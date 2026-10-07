@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_DB: dpo, POSTGRES_USER: dpo, POSTGRES_PASSWORD: dpo }
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U dpo -d dpo"], interval: 5s, timeout: 3s, retries: 20 }
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://dpo:dpo@db:5432/dpo
+      STORAGE_LOCAL_PATH: /app/storage
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-mock}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+    volumes: [./storage:/app/storage]
+    depends_on: { db: { condition: service_healthy } }
+    ports: ["8000:8000"]
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"], interval: 10s, timeout: 3s, retries: 10 }
+  frontend:
+    build: ./frontend
+    depends_on: { backend: { condition: service_healthy } }
+    ports: ["5173:80"]
+volumes: { postgres_data: {} }

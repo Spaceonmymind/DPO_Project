@@ -1,0 +1,16 @@
+.collapsed .account-pop{opacity:0;visibility:hidden;pointer-events:none}
+.sidebar-brand{display:flex;align-items:center;gap:10px;height:42px;min-width:0;max-width:calc(100% - 40px);cursor:pointer;white-space:nowrap}
+.brand-mark{display:block;flex:0 0 34px}
+.brand-name{display:block;min-width:0;opacity:1;visibility:visible;transform:translateX(0);font-size:19px;font-weight:850;line-height:1;transition:opacity 150ms ease,transform 240ms cubic-bezier(.4,0,.2,1),visibility 0s}
+.brand-name b{color:#17251f}
+.brand-name strong{color:#008b76}
+.collapsed .side-head{height:82px;flex:none}
+.collapsed .sidebar-brand{position:absolute;top:0;left:50%;width:34px;max-width:34px;margin:0;gap:0;transform:translateX(-50%)}
+.collapsed .collapse{top:44px;right:10px}
+.compact-plus{display:none}
+.collapsed .side .new svg{display:none}
+.collapsed .side .new .compact-plus{display:block;width:20px;opacity:1;visibility:visible;transform:none;color:#fff;font-size:30px;font-weight:300;line-height:20px;pointer-events:none}
+.collapsed .side .nav svg{display:block;width:20px;height:20px;flex:0 0 20px;opacity:1;visibility:visible;color:#30423a;stroke:currentColor;stroke-width:2}
+.collapsed .side .new,.collapsed .side .nav{gap:0}
+.collapsed .side .new>span:not(.compact-plus),.collapsed .side .nav>span{width:0;min-width:0;flex:0 0 0;overflow:hidden;margin:0}
+.collapsed .brand-name{opacity:0;visibility:hidden;transform:translateX(-8px);width:0;overflow:hidden;pointer-events:none;transition:opacity 100ms ease,transform 180ms cubic-bezier(.4,0,.2,1),visibility 0s linear 100ms,width 240ms cubic-bezier(.4,0,.2,1)}

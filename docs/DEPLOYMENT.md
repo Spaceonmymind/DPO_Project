@@ -14,6 +14,8 @@ Linux-сервер с Docker Engine 24+ и Docker Compose v2, 2 CPU, 4 ГБ RAM,
 6. Миграции Alembic выполняются backend-контейнером до старта ASGI. Проверка: `docker compose exec backend alembic current`.
 7. При первом запуске автоматически создаются `Ivanov / Ivanov` и `Petrova / Petrova`. Если пользователи уже существуют, seed их не изменяет.
 
+Перед backend автоматически выполняется одноразовый сервис `storage-init`: он создаёт `uploads`, `templates`, `generated` и выдаёт непривилегированному backend права на запись в эти каталоги. Существующие документы и их содержимое при этом не изменяются.
+
 Приложение доступно на порту `APP_PORT` (по умолчанию 5173). `/health` возвращает только состояние backend. Проверки: `docker compose ps`, `curl -fsS http://127.0.0.1:5173/health`.
 
 ## Пользователи

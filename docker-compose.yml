@@ -3,6 +3,15 @@ x-logging: &default-logging
   options: { max-size: "10m", max-file: "5" }
 
 services:
+  storage-init:
+    image: alpine:3.20
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /app/storage/uploads /app/storage/templates /app/storage/generated && chmod 0777 /app/storage /app/storage/uploads /app/storage/templates /app/storage/generated"]
+    volumes: [./storage:/app/storage]
+    networks: [backend_net]
+    logging: *default-logging
+
   db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -56,7 +65,9 @@ services:
       CORS_ORIGINS: ${APP_BASE_URL:-http://localhost:5173}
     volumes: [./storage:/app/storage]
     networks: [frontend_net, backend_net]
-    depends_on: { db: { condition: service_healthy } }
+    depends_on:
+      storage-init: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]

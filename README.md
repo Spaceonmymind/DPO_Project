@@ -6,7 +6,7 @@
 
 ```bash
 cp .env.example .env
-# Задайте POSTGRES_PASSWORD и APP_SECRET_KEY; для HTTP установите SESSION_COOKIE_SECURE=false
+# Задайте POSTGRES_PASSWORD и APP_SECRET_KEY. Для HTTP оставьте SESSION_COOKIE_SECURE=false
 docker compose up --build -d
 ```
 

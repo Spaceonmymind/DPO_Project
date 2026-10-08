@@ -28,7 +28,7 @@ docker compose exec backend python -m app.cli.reset_password --username sidorov
 docker compose exec backend python -m app.cli.update_user --username sidorov --full-name "Сидоров Пётр Петрович" --enable
 ```
 
-Публичной регистрации нет. `SEED_DEMO_USERS` на сервере всегда должен оставаться `false`.
+Публичной регистрации нет. При `SEED_DEMO_USERS=true` первый запуск создаёт `Ivanov / Ivanov` и `Petrova / Petrova`. Seed идемпотентен и не меняет существующие аккаунты. После первичного тестирования смените пароли командой `reset_password` или установите `SEED_DEMO_USERS=false` для окружений, где стартовые аккаунты не нужны.
 
 ## Эксплуатация
 

@@ -8,11 +8,11 @@ Linux-сервер с Docker Engine 24+ и Docker Compose v2, 2 CPU, 4 ГБ RAM,
 
 1. Установите Docker по инструкции для дистрибутива и добавьте администратора в группу `docker`.
 2. Клонируйте репозиторий и перейдите в него.
-3. Выполните `cp .env.example .env`, задайте уникальные `POSTGRES_PASSWORD` и `APP_SECRET_KEY` (не менее 32 случайных символов), реальный `APP_BASE_URL`, `SESSION_COOKIE_SECURE=true`. Оставьте `APP_ENV=staging`, `LLM_PROVIDER=mock`, `SEED_DEMO_USERS=false`.
+3. Выполните `cp .env.example .env`, задайте уникальные `POSTGRES_PASSWORD` и `APP_SECRET_KEY` (не менее 32 случайных символов), реальный `APP_BASE_URL`, `SESSION_COOKIE_SECURE=true`. Оставьте `APP_ENV=staging`, `LLM_PROVIDER=mock`, `SEED_DEMO_USERS=true` для автоматического создания двух стартовых аккаунтов.
 4. Проверьте конфигурацию: `docker compose config --quiet`.
 5. Запустите: `docker compose up --build -d`.
 6. Миграции Alembic выполняются backend-контейнером до старта ASGI. Проверка: `docker compose exec backend alembic current`.
-7. Создайте первого пользователя командой из раздела ниже.
+7. При первом запуске автоматически создаются `Ivanov / Ivanov` и `Petrova / Petrova`. Если пользователи уже существуют, seed их не изменяет.
 
 Приложение доступно на порту `APP_PORT` (по умолчанию 5173). `/health` возвращает только состояние backend. Проверки: `docker compose ps`, `curl -fsS http://127.0.0.1:5173/health`.
 

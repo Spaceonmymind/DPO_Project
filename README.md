@@ -10,7 +10,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Интерфейс доступен по адресу `http://localhost:5173`. API обслуживается на том же origin по `/api/`; backend и PostgreSQL наружу не публикуются. Миграции Alembic выполняются перед запуском backend. Автоматическое создание аккаунтов в staging отключено.
+Интерфейс доступен по адресу `http://localhost:5173`. API обслуживается на том же origin по `/api/`; backend и PostgreSQL наружу не публикуются. Миграции Alembic выполняются перед запуском backend. При первом запуске создаются тестовые аккаунты `Ivanov / Ivanov` и `Petrova / Petrova`; существующие аккаунты seed не перезаписывает.
 
 Создание пользователя:
 

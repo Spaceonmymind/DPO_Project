@@ -17,7 +17,7 @@ from app.main import app
 
 
 def auth(client: TestClient, name: str = 'ivanov') -> dict[str, str]:
-    response = client.post('/api/v1/auth/login', json={'external_id': name, 'password': name})
+    response = client.post('/api/v1/auth/login', json={'external_id': name, 'password': name.capitalize()})
     assert response.status_code == 200
     return {'x-csrf-token': response.json()['csrf_token']}
 
@@ -85,7 +85,7 @@ def test_sessions_csrf_ownership_and_switching():
 
 def test_login_cookie_and_rate_limit():
     client = TestClient(app)
-    response = client.post('/api/v1/auth/login', json={'external_id': 'ivanov', 'password': 'ivanov'})
+    response = client.post('/api/v1/auth/login', json={'external_id': 'Ivanov', 'password': 'Ivanov'})
     assert response.status_code == 200 and 'session_id' not in response.json()
     cookie = response.headers['set-cookie'].lower()
     assert 'httponly' in cookie and 'samesite=lax' in cookie

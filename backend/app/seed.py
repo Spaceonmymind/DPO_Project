@@ -2,14 +2,16 @@ from pathlib import Path
 import os
 from app.db import SessionLocal,User,ContractTemplate,ContractRule,settings
 from app.documents.service import generate_spec,generate_contract
-from app.security import hash_password
-USERS=[('ivanov','Иванов Иван Иванович','ivanov@nspk.local','ДПО','ivanov'),('petrova','Петрова Анна Сергеевна','petrova@nspk.local','Маркетинг','petrova')]
+from app.security import hash_password,verify_password
+USERS=[('ivanov','Иванов Иван Иванович','ivanov@nspk.local','ДПО','Ivanov'),('petrova','Петрова Анна Сергеевна','petrova@nspk.local','Маркетинг','Petrova')]
 TEMPLATES=[('services','Договор оказания услуг','Для закупки услуг',{'category':'services'}),('works','Договор выполнения работ','Для выполнения работ',{'category':'works'}),('supply','Договор поставки','Для поставки товаров',{'category':'supply'}),('license','Лицензионный договор','Для лицензий ПО',{'category':'software_license'}),('consulting','Договор информационно-консультационных услуг','Для консультаций',{'category':'consulting'}),('universal','Универсальный шаблон договора','Для отдельных случаев',{'category':'other_demo'})]
 def seed():
  db=SessionLocal(); root=Path(settings.storage); (root/'templates').mkdir(parents=True,exist_ok=True)
  if os.getenv('SEED_DEMO_USERS',str(settings.app_env=='development')).lower()=='true':
   for ext,name,email,dept,pw in USERS:
-   if not db.query(User).filter_by(external_id=ext).first(): db.add(User(external_id=ext,full_name=name,email=email,department=dept,roles=['employee'],password=hash_password(pw),is_active=True))
+   user=db.query(User).filter_by(external_id=ext).first()
+   if not user: db.add(User(external_id=ext,full_name=name,email=email,department=dept,roles=['employee'],password=hash_password(pw),is_active=True))
+   elif verify_password(user.password,ext)[0]: user.password=hash_password(pw)
  for code,name,desc,cond in TEMPLATES:
   path=root/'templates'/f'{code}.docx'
   if not path.exists(): generate_contract(name,path)

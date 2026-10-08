@@ -6,9 +6,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBS
 from app.db import *
-from app.ai.providers import provider
+from app.ai.orchestrator import AIOrchestrator
+from app.ai.config import get_llm_settings
+from app.ai.errors import LLMError
 from app.documents.service import extract,generate_spec
 app=FastAPI(title='ДПО Ассистент API',version='1.1.0')
+orchestrator=AIOrchestrator()
 app.add_middleware(CORSMiddleware,allow_origins=os.getenv('CORS_ORIGINS','http://localhost:5173').split(','),allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 @app.middleware('http')
 async def headers(req,call):
@@ -43,6 +46,9 @@ class Change(BaseModel): field:str; operation:str='replace'; value:str|None=None
 class Changes(BaseModel): changes:list[Change]
 @app.get('/health')
 def health(): return {'status':'ok'}
+@app.get('/api/v1/system/llm-status')
+def llmstatus(u=Depends(current)):
+ s=get_llm_settings(); valid,error=s.validate_provider(); kind='simulated' if s.provider=='mock' else ('internal' if s.provider_is_internal else 'external'); return {'configured_provider':s.provider,'configured_model':s.model,'configuration_valid':valid,'provider_type':kind,'error':error}
 @app.post('/api/v1/auth/login')
 def login(x:Login,d:DBS=Depends(db)):
  u=d.query(User).filter_by(external_id=x.external_id,password=x.password).first()
@@ -79,20 +85,22 @@ def title_for(text,ctx):
 QUESTIONS={'purpose':'Какова основная цель закупки?','scope':'Уточните, пожалуйста, какой объём требуется: количество товаров, объём работ или перечень услуг?','deadline':'До какой даты необходимо выполнить работы или осуществить поставку?','acceptance_criteria':'Как вы планируете принимать результат: по соответствию требованиям, количеству, срокам или другим критериям?'}
 FIELDS=list(QUESTIONS)
 @app.post('/api/v1/cases/{cid}/messages')
-def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
- c=own(cid,u,d); d.add(Message(case_id=cid,role='user',content=x.content)); audit(d,u.id,cid,'MESSAGE_SENT')
- s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
- if not s:
-  ctx=provider().extract(x.content); c.context=ctx.model_dump()
-  if not ctx.is_procurement: c.state='ESCALATED_TO_DPO'; answer='Для этого обращения требуется участие специалиста ДПО. Пожалуйста, обратитесь в ДПО.'
-  else:
-   if c.title=='Новое обращение': c.title=title_for(x.content,ctx)
-   data={'subject':ctx.subject,'purpose':'','scope':'','functional_requirements':'','nonfunctional_requirements':'','deadline':'','acceptance_criteria':'','other_conditions':''}; s=TechnicalSpecification(case_id=cid,data=data); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=data)); c.state='COLLECTING_SPEC_DATA'; answer='Для этой закупки потребуется техническое задание. Я помогу его подготовить — уточню несколько параметров.\n\n'+QUESTIONS['purpose']
- elif c.state=='COLLECTING_SPEC_DATA':
-  data=dict(s.data); missing=[f for f in FIELDS if not data.get(f)]; data[missing[0]]=x.content.strip(); s.data=data; missing=[f for f in FIELDS if not data.get(f)]
-  if missing: answer=QUESTIONS[missing[0]]
-  else: s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=data)); c.state='SPEC_REVIEW'; answer='Черновик технического задания готов. Проверьте его в карточке и при необходимости внесите изменения.'
- else: answer='Техническое задание готово к проверке. Вы можете изменить раздел в карточке или подтвердить документ.'
+async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
+ c=own(cid,u,d); d.add(Message(case_id=cid,role='user',content=x.content)); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
+ s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
+ try: result=await orchestrator.process_message(c,u,x.content,history[:-1],s,d)
+ except LLMError:
+  d.rollback(); d.add(Message(case_id=cid,role='assistant',content='Не удалось обработать запрос. Попробуйте повторить позднее.')); d.commit(); return detail(c,d)
+ c.context=result['context']; answer=result['answer']
+ if not result['context'].get('is_procurement',True): c.state='ESCALATED_TO_DPO'
+ else:
+  if c.title=='Новое обращение': c.title=(result['data'].get('subject') or x.content.strip())[:60]
+  if not s:
+   s=TechnicalSpecification(case_id=cid,data=result['data']); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=result['data']))
+  elif result['changed'] and s.status!='CONFIRMED':
+   s.data=result['data']
+   if result['ready'] and c.state!='SPEC_REVIEW': s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=result['data']))
+  c.state='SPEC_REVIEW' if result['ready'] else 'COLLECTING_SPEC_DATA'
  d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit(); return detail(c,d)
 @app.patch('/api/v1/cases/{cid}/technical-specification')
 def edit(cid:str,x:Changes,u=Depends(current),d:DBS=Depends(db)):
@@ -133,6 +141,11 @@ async def upload(cid:str,file:UploadFile=File(...),u=Depends(current),d:DBS=Depe
  p=Path(settings.storage)/'uploads'/f'{uid()}{ext}'; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(raw)
  try: text=extract(p,ext)
  except Exception: p.unlink(missing_ok=True); raise HTTPException(422,detail='Не удалось прочитать файл')
- a=Attachment(case_id=cid,original_name=Path(file.filename).name,path=str(p),mime_type=file.content_type or '',extracted_text=text); d.add(a); result=provider().analyse_specification(text); c.context=result['context']; c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
- if not s: s=TechnicalSpecification(case_id=cid,data=result['specification']); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
- msg=result['summary']+'\n\nПредмет закупки: '+s.data['subject']+'\nСрок выполнения: '+s.data.get('deadline','требуется уточнение')+'\nКритерии приёмки: '+s.data.get('acceptance_criteria','требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или внесите изменения.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}
+ a=Attachment(case_id=cid,original_name=Path(file.filename).name,path=str(p),mime_type=file.content_type or '',extracted_text=text); d.add(a)
+ try: result=await orchestrator.analyse_document(c,u,text,d)
+ except LLMError:
+  d.rollback(); p.unlink(missing_ok=True); raise HTTPException(503,detail='Не удалось обработать запрос. Попробуйте повторить позднее.')
+ specdata={k:v for k,v in result.specification.model_dump().items() if k in {'subject','purpose','scope','functional_requirements','nonfunctional_requirements','deadline','acceptance_criteria','other_conditions'}}; c.context=result.context.model_dump(); c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
+ if not s: s=TechnicalSpecification(case_id=cid,data=specdata); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
+ elif s.status!='CONFIRMED': s.data=specdata; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=s.data))
+ msg=result.summary+'\n\nПредмет закупки: '+(s.data.get('subject') or 'требуется уточнение')+'\nСрок выполнения: '+(s.data.get('deadline') or 'требуется уточнение')+'\nКритерии приёмки: '+(s.data.get('acceptance_criteria') or 'требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или внесите изменения.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}

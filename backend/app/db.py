@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, String, Text, DateTime, Integer, Boolean, ForeignKey, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 class Settings:
- database_url=os.getenv('DATABASE_URL','sqlite:///./dpo.db'); storage=os.getenv('STORAGE_LOCAL_PATH','../storage'); max_upload=int(os.getenv('MAX_UPLOAD_SIZE_MB','20'))*1024*1024
+ database_url=os.getenv('DATABASE_URL','sqlite:///./dpo.db')
+ storage=os.getenv('DOCUMENT_STORAGE_PATH',os.getenv('STORAGE_LOCAL_PATH','../storage'))
+ max_upload=int(os.getenv('MAX_UPLOAD_SIZE_MB','20'))*1024*1024
+ app_env=os.getenv('APP_ENV','development')
+ app_secret_key=os.getenv('APP_SECRET_KEY','development-only-change-me')
+ session_cookie_secure=os.getenv('SESSION_COOKIE_SECURE','false').lower()=='true'
+ session_max_age=int(os.getenv('SESSION_MAX_AGE','28800'))
+ login_max_attempts=int(os.getenv('LOGIN_MAX_ATTEMPTS','5'))
+ login_window_seconds=int(os.getenv('LOGIN_WINDOW_SECONDS','900'))
 settings=Settings()
 connect_args={'check_same_thread':False} if settings.database_url.startswith('sqlite') else {}
 engine=create_engine(settings.database_url,connect_args=connect_args); SessionLocal=sessionmaker(bind=engine,autoflush=False)
@@ -11,9 +19,11 @@ def now(): return datetime.now(timezone.utc)
 def uid(): return str(uuid.uuid4())
 class Base(DeclarativeBase): pass
 class User(Base):
- __tablename__='users'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); external_id:Mapped[str]=mapped_column(String(100),unique=True); full_name:Mapped[str]=mapped_column(String(200)); email:Mapped[str]=mapped_column(String(200)); department:Mapped[str]=mapped_column(String(200)); roles:Mapped[dict]=mapped_column(JSON,default=list); password:Mapped[str]=mapped_column(String(100))
+ __tablename__='users'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); external_id:Mapped[str]=mapped_column(String(100),unique=True); full_name:Mapped[str]=mapped_column(String(200)); email:Mapped[str]=mapped_column(String(200)); department:Mapped[str]=mapped_column(String(200)); roles:Mapped[dict]=mapped_column(JSON,default=list); password:Mapped[str]=mapped_column(String(255)); is_active:Mapped[bool]=mapped_column(Boolean,default=True)
 class Session(Base):
- __tablename__='sessions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id:Mapped[str]=mapped_column(ForeignKey('users.id')); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+ __tablename__='sessions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id:Mapped[str]=mapped_column(ForeignKey('users.id')); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); expires_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True); csrf_token:Mapped[str|None]=mapped_column(String(64),nullable=True)
+class LoginAttempt(Base):
+ __tablename__='login_attempts'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); external_id:Mapped[str]=mapped_column(String(100),index=True); ip_address:Mapped[str]=mapped_column(String(64)); success:Mapped[bool]=mapped_column(Boolean,default=False); attempted_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
 class Case(Base):
  __tablename__='cases'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id:Mapped[str]=mapped_column(ForeignKey('users.id')); title:Mapped[str]=mapped_column(String(300)); state:Mapped[str]=mapped_column(String(50),default='NEW'); context:Mapped[dict]=mapped_column(JSON,default=dict); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class Message(Base):

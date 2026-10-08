@@ -1,38 +1,90 @@
+x-logging: &default-logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
 services:
   db:
     image: postgres:16-alpine
-    environment: { POSTGRES_DB: dpo, POSTGRES_USER: dpo, POSTGRES_PASSWORD: dpo }
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U dpo -d dpo"], interval: 5s, timeout: 3s, retries: 20 }
-    volumes: [postgres_data:/var/lib/postgresql/data]
-  backend:
-    build: ./backend
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://dpo:dpo@db:5432/dpo
-      STORAGE_LOCAL_PATH: /app/storage
-      AUTH_PROVIDER: ${AUTH_PROVIDER:-mock}
+      POSTGRES_DB: ${POSTGRES_DB:-dpo}
+      POSTGRES_USER: ${POSTGRES_USER:-dpo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  backend:
+    build: { context: ./backend }
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-staging}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set APP_SECRET_KEY in .env}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-dpo}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-dpo}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_MAX_AGE: ${SESSION_MAX_AGE:-28800}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_WINDOW_SECONDS: ${LOGIN_WINDOW_SECONDS:-900}
+      SEED_DEMO_USERS: ${SEED_DEMO_USERS:-false}
+      DOCUMENT_STORAGE_PATH: /app/storage
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
-      LLM_MODEL: ${LLM_MODEL:-qwen}
+      LLM_MODEL: ${LLM_MODEL:-mock-v1}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT:-120}
       LLM_CONNECT_TIMEOUT_SECONDS: ${LLM_CONNECT_TIMEOUT_SECONDS:-10}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
-      LLM_MAX_CONCURRENT_REQUESTS: ${LLM_MAX_CONCURRENT_REQUESTS:-5}
+      LLM_MAX_CONCURRENT_REQUESTS: ${LLM_MAX_CONCURRENCY:-5}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-4096}
       LLM_STRUCTURED_OUTPUT_MODE: ${LLM_STRUCTURED_OUTPUT_MODE:-prompt}
       LLM_CONTEXT_MAX_TOKENS: ${LLM_CONTEXT_MAX_TOKENS:-16000}
       LLM_HISTORY_MAX_MESSAGES: ${LLM_HISTORY_MAX_MESSAGES:-30}
-      LLM_LOG_CONTENT: ${LLM_LOG_CONTENT:-false}
+      LLM_LOG_CONTENT: "false"
       LLM_EXTERNAL_DATA_TRANSFER: ${LLM_EXTERNAL_DATA_TRANSFER:-false}
       LLM_PROVIDER_IS_INTERNAL: ${LLM_PROVIDER_IS_INTERNAL:-false}
-      CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+      CORS_ORIGINS: ${APP_BASE_URL:-http://localhost:5173}
     volumes: [./storage:/app/storage]
+    networks: [frontend_net, backend_net]
     depends_on: { db: { condition: service_healthy } }
-    ports: ["8000:8000"]
-    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"], interval: 10s, timeout: 3s, retries: 10 }
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *default-logging
+
   frontend:
-    build: ./frontend
+    build: { context: ./frontend }
+    restart: unless-stopped
+    ports: ["${APP_PORT:-5173}:8080"]
+    networks: [frontend_net]
     depends_on: { backend: { condition: service_healthy } }
-    ports: ["5173:80"]
-volumes: { postgres_data: {} }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/nginx-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 15s
+    logging: *default-logging
+
+networks:
+  frontend_net: { driver: bridge }
+  backend_net: { driver: bridge, internal: true }
+
+volumes:
+  postgres_data:

@@ -1,6 +1,9 @@
+import hmac
+import logging
 import os
+from datetime import timedelta, timezone
 from pathlib import Path
-from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Request
+from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Request,Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -10,6 +13,9 @@ from app.ai.orchestrator import AIOrchestrator
 from app.ai.config import get_llm_settings
 from app.ai.errors import LLMError
 from app.documents.service import extract,generate_spec
+from app.security import csrf_token, session_token, verify_password
+logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
+log=logging.getLogger('dpo.backend')
 app=FastAPI(title='ДПО Ассистент API',version='1.1.0')
 orchestrator=AIOrchestrator()
 app.add_middleware(CORSMiddleware,allow_origins=os.getenv('CORS_ORIGINS','http://localhost:5173').split(','),allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
@@ -21,9 +27,16 @@ def db():
  try: yield d
  finally: d.close()
 def current(req:Request,d:DBS=Depends(db)):
- s=d.get(Session,req.headers.get('x-session',''))
- if not s: raise HTTPException(401,detail='Требуется авторизация')
- return d.get(User,s.user_id)
+ token=req.cookies.get('dpo_session','')
+ s=d.get(Session,token)
+ expires=s.expires_at.replace(tzinfo=timezone.utc) if s and s.expires_at and s.expires_at.tzinfo is None else (s.expires_at if s else None)
+ if not s or (expires and expires<=now()):
+  if s: d.delete(s); d.commit()
+  raise HTTPException(401,detail='Требуется авторизация')
+ u=d.get(User,s.user_id)
+ if not u or not u.is_active: raise HTTPException(401,detail='Учётная запись недоступна')
+ if req.method not in {'GET','HEAD','OPTIONS'} and not hmac.compare_digest(req.headers.get('x-csrf-token',''),s.csrf_token or ''): raise HTTPException(403,detail='Недействительный CSRF-токен')
+ return u
 def own(cid,u,d):
  c=d.get(Case,cid)
  if not c: raise HTTPException(404,detail='Обращение не найдено')
@@ -50,16 +63,27 @@ def health(): return {'status':'ok'}
 def llmstatus(u=Depends(current)):
  s=get_llm_settings(); valid,error=s.validate_provider(); kind='simulated' if s.provider=='mock' else ('internal' if s.provider_is_internal else 'external'); return {'configured_provider':s.provider,'configured_model':s.model,'configuration_valid':valid,'provider_type':kind,'error':error}
 @app.post('/api/v1/auth/login')
-def login(x:Login,d:DBS=Depends(db)):
- u=d.query(User).filter_by(external_id=x.external_id,password=x.password).first()
- if not u: raise HTTPException(401,detail='Неверные учётные данные')
- s=Session(user_id=u.id); d.add(s); audit(d,u.id,None,'USER_LOGIN'); d.commit(); return {'session_id':s.id,'user':userout(u)}
+def login(x:Login,req:Request,response:Response,d:DBS=Depends(db)):
+ external_id=x.external_id.strip().lower(); ip=req.client.host if req.client else 'unknown'; cutoff=now()-timedelta(seconds=settings.login_window_seconds)
+ failures=d.query(LoginAttempt).filter(LoginAttempt.external_id==external_id,LoginAttempt.ip_address==ip,LoginAttempt.success.is_(False),LoginAttempt.attempted_at>=cutoff).count()
+ if failures>=settings.login_max_attempts:
+  log.warning('Login rate limit reached for account=%s ip=%s',external_id,ip); raise HTTPException(429,detail='Слишком много попыток входа. Повторите позднее.')
+ u=d.query(User).filter_by(external_id=external_id).first(); valid,upgraded=verify_password(u.password,x.password) if u and u.is_active else (False,None)
+ d.add(LoginAttempt(external_id=external_id,ip_address=ip,success=valid))
+ if not valid:
+  d.commit(); log.warning('Failed login for account=%s ip=%s',external_id,ip); raise HTTPException(401,detail='Неверные учётные данные')
+ if upgraded: u.password=upgraded
+ token=session_token(); csrf=csrf_token(); expires=now()+timedelta(seconds=settings.session_max_age); s=Session(id=token,user_id=u.id,expires_at=expires,csrf_token=csrf); d.add(s); audit(d,u.id,None,'USER_LOGIN'); d.commit()
+ response.set_cookie('dpo_session',token,max_age=settings.session_max_age,httponly=True,secure=settings.session_cookie_secure,samesite='lax',path='/')
+ return {'user':userout(u),'csrf_token':csrf}
 @app.get('/api/v1/auth/me')
-def me(u=Depends(current)): return userout(u)
+def me(req:Request,u=Depends(current),d:DBS=Depends(db)):
+ s=d.get(Session,req.cookies.get('dpo_session','')); return {'user':userout(u),'csrf_token':s.csrf_token}
 @app.post('/api/v1/auth/logout')
-def logout(req:Request,d:DBS=Depends(db)):
- s=d.get(Session,req.headers.get('x-session',''))
- if s: d.delete(s); d.commit()
+def logout(req:Request,response:Response,u=Depends(current),d:DBS=Depends(db)):
+ s=d.get(Session,req.cookies.get('dpo_session',''))
+ if s: d.delete(s); audit(d,u.id,None,'USER_LOGOUT'); d.commit()
+ response.delete_cookie('dpo_session',path='/',secure=settings.session_cookie_secure,samesite='lax')
  return {'ok':True}
 @app.get('/api/v1/users/me')
 def usersme(u=Depends(current)): return userout(u)

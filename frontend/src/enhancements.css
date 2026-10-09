@@ -1,0 +1,14 @@
+.quick{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:0 0 22px}
+.quick>button{display:flex;gap:14px;text-align:left;padding:18px;border:1px solid var(--line);border-radius:16px;background:#fff}
+.quick>button:hover{border-color:#8dcfc2;box-shadow:0 8px 24px #143f3710}
+.quick svg{flex:0 0 auto;color:var(--green)}
+.quick span,.quick small{display:block}.quick small{margin-top:6px;color:var(--muted);line-height:1.45}
+.rowactions{display:flex;gap:2px}.context{overflow:auto}
+.contextblock{padding:0 0 18px;margin:0 0 18px;border-bottom:1px solid var(--line)}
+.contextblock>h3{margin:0 0 10px}.contextblock header{display:flex;justify-content:space-between;align-items:center}
+.contextblock header>div{display:flex;gap:9px;align-items:center}.contextblock header h3,.contextblock header p{margin:0}
+.contextblock dl{display:grid;grid-template-columns:75px 1fr;gap:8px;margin:0;font-size:13px}.contextblock dt{color:var(--muted)}.contextblock dd{margin:0}
+.items>div{padding:10px 0;border-bottom:1px solid var(--line)}.items>div p,.items>div small{display:block;margin:5px 0;color:var(--muted)}
+.exports{flex-wrap:wrap}.exports .secondary{padding:8px 10px}.contract{border:0}
+.modalactions{display:flex;justify-content:flex-end;gap:10px}.danger{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:10px;background:#b42318;color:#fff;padding:10px 15px;font-weight:700}
+@media(max-width:1100px){.quick{grid-template-columns:1fr}}

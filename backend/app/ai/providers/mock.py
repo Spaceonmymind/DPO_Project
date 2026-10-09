@@ -23,13 +23,21 @@ class MockLLMProvider:
         user_text=text.rsplit('USER_MESSAGE:',1)[-1].strip() if 'USER_MESSAGE:' in text else text
         t=user_text.lower()
         unrelated=any(x in t for x in ['личный юридический','погода','рецепт'])
-        intent='unrelated_request' if unrelated else 'confirm_specification' if any(x in t for x in ['подтверждаю','всё верно','все верно']) else 'update_specification' if any(x in t for x in ['измени','добавь','убери','удали']) else 'create_specification'
-        category='supply' if any(x in t for x in ['ноутбук','велосипед','постав','оборудов']) else 'works' if any(x in t for x in ['сайт','лендинг','разработ']) else 'services'
+        contract_only=any(x in t for x in ['только договор','нужен договор','шаблон договора','подобрать договор','тз делать не надо'])
+        create_both=any(x in t for x in ['тз и договор','техническое задание и договор'])
+        intent='unrelated' if unrelated else 'confirm_specification' if any(x in t for x in ['подтверждаю','всё верно','все верно']) else 'update_specification' if any(x in t for x in ['измени','поменяй','добавь','убери','удали']) else 'create_spec_and_get_contract' if create_both else 'get_contract' if contract_only else 'create_specification'
+        category='software_license' if any(x in t for x in ['лицензи','право использования по']) else 'consulting' if any(x in t for x in ['консультац']) else 'supply' if any(x in t for x in ['ноутбук','велосипед','постав','оборудов','товар']) else 'works' if any(x in t for x in ['сайт','лендинг','разработ','работ']) else 'services' if any(x in t for x in ['услуг']) else ''
         subject='Поставка ноутбуков' if 'ноутбук' in t else 'Закупка велосипедов' if 'велосипед' in t else 'Разработка корпоративного сайта' if 'сайт' in t else 'Разработка корпоративного лендинга' if 'лендинг' in t else ('Закупка услуг' if not current else '')
-        result=RequirementsExtractionResult(intent=intent,category=category,subject=subject)
+        result=RequirementsExtractionResult(intent=intent,is_procurement=not unrelated,category=category,subject=subject,counterparty_type='legal_entity' if any(x in t for x in ['юрлиц','юридическ']) else '')
         if unrelated: return result.model_dump()
         count=re.search(r'\b(\d+)\s+(?:ноутбук|велосипед)',t)
         if count: result.scope=f'{count.group(1)} шт.'
+        if any(x in t for x in ['только поставка','без установки','без настройки']): result.installation_required=False
+        elif any(x in t for x in ['установка','настройка','монтаж']): result.installation_required=True
+        if 'персональн' in t and 'данн' in t: result.personal_data_related=True
+        if any(x in t for x in ['обратитесь в дпо','юридическая экспертиза']): result.exceptions=['Требуется правовая экспертиза']
+        warranty=re.search(r'гаранти[яию][^\d]*(\d+)\s*(месяц|год)',t)
+        if warranty: result.other_conditions=f'Гарантия не менее {warranty.group(1)} {warranty.group(2)}'
         if any(x in t for x in ['для сотрудник','оснащен']): result.purpose='Оснащение сотрудников'
         date=re.search(r'(?:до|срок[^—-]*[—-]?)\s*(\d{1,2}\s+[а-я]+\s+\d{4}(?:\s+года)?)',t)
         if date: result.deadline=date.group(1)
@@ -44,6 +52,11 @@ class MockLLMProvider:
         if 'убери' in t or 'удали' in t:
             if 'личн' in t: result.remove_phrases=['Личный кабинет']
             if 'производител' in t: result.remove_phrases=['Предпочтительный производитель Lenovo']
+            if 'блокирующ' in t: result.remove_blocking_requirements=['Блокирующее требование']
+        quantity_change=re.search(r'(?:количество[^\d]*|поменяй[^\d]*)(\d+)',t)
+        if quantity_change: result.item_updates=[{'index':0,'quantity':float(quantity_change.group(1))}]
+        if ('добавь' in t or 'добавить' in t) and 'блокирующ' in t:
+            result.blocking_requirements=['Блокирующее требование']
         if current and intent=='create_specification':
             missing=next((f for f in ['purpose','scope','deadline','acceptance_criteria'] if not current.get(f)),None)
             extracted=any([result.purpose,result.scope,result.deadline,result.acceptance_criteria,result.other_conditions])

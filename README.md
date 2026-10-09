@@ -1,6 +1,6 @@
 # ДПО Ассистент
 
-Корпоративное веб-приложение для подготовки технических заданий и подбора договорных шаблонов. Frontend — React/Vite, backend — FastAPI, база — PostgreSQL, AI runtime поддерживает Mock и OpenAI-compatible providers.
+Корпоративное веб-приложение для независимого сбора контекста закупки, подготовки технических заданий и подбора договорных шаблонов. Договор можно подобрать без обязательного ТЗ. Готовые ТЗ принимаются в DOCX, PDF, XLSX и XLS; подтверждённые данные экспортируются в DOCX, PDF и XLSX. Frontend — React/Vite, backend — FastAPI, база — PostgreSQL, AI runtime поддерживает Mock и OpenAI-compatible providers.
 
 ## Локальный production-like запуск
 
@@ -26,6 +26,8 @@ docker compose exec backend python -m app.cli.create_user \
 - `docs/ADMIN_GUIDE.md` — управление пользователями и эксплуатация;
 - `docs/TESTING_GUIDE.md` — инструкция участника тестирования;
 - `docs/LLM_CONFIGURATION.md` — конфигурация AI runtime.
+- `docs/SPECIFICATION_MODEL.md` — ProcurementContext, структура ТЗ, таблицы и exports;
+- `docs/TZ_COMPLIANCE.md` — проверяемая матрица соответствия исходному ТЗ.
 
 ## Проверка
 

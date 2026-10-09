@@ -1,0 +1,21 @@
+# Соответствие исходному ТЗ
+
+| Требование | Статус | Реализация |
+|---|---|---|
+| Корпоративный SSO | Частично | Локальная защищённая сессия и подготовленные auth endpoints; корпоративный SSO не подключён |
+| Русскоязычный диалог, свободный текст | Реализовано | `app/ai/orchestrator.py`, prompt templates, Chat |
+| Один файл на обращение | Реализовано | `POST /cases/{id}/attachments`, HTTP 409 |
+| Вход DOCX / PDF / XLSX / XLS | Реализовано | `app/documents/service.py` |
+| Определение закупочного запроса | Реализовано | intent/is_procurement в AI Orchestrator |
+| Формирование и изменение ТЗ | Реализовано | Orchestrator, PATCH technical-specification, item patches |
+| Явное подтверждение | Реализовано | `/technical-specification/confirm` |
+| Экспорт DOCX / PDF / Excel | Реализовано | `render_specification` |
+| Шесть договорных шаблонов | Реализовано | `app/seed.py` |
+| Выбор и скачивание договора | Реализовано | `app/contracts.py`, template download |
+| Договор без обязательного ТЗ | Реализовано | ProcurementContext + GET_CONTRACT flow |
+| История / продолжение / переименование | Реализовано | cases/messages API и frontend |
+| Серверный поиск | Реализовано | `GET /cases?q=` с ownership filter |
+| Удаление с подтверждением | Реализовано | DELETE endpoint и DeleteModal |
+| Изоляция пользователей | Реализовано | `own()`, ownership во всех новых endpoints |
+| Fallback в ДПО | Реализовано | NO_MATCH / LEGAL_REVIEW_REQUIRED / ESCALATED_TO_DPO |
+| Точное воспроизведение приложенного корпоративного Excel | Отсутствует | Исходный файл не был доступен в полученных вложениях; используется обезличенная универсальная структура |

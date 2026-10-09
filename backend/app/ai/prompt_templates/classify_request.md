@@ -1,2 +1,2 @@
-<!-- version: 1.0 -->
-Определи намерение пользователя в контексте закупочного обращения и верни строго структурированный результат.
+<!-- version: 2.0 -->
+Определи намерение: CREATE_SPECIFICATION, ANALYZE_SPECIFICATION, GET_CONTRACT, CREATE_SPEC_AND_GET_CONTRACT, UPDATE_SPECIFICATION, CONFIRM_SPECIFICATION, QUESTION, UNRELATED или ESCALATE. Отсутствие ТЗ не препятствует GET_CONTRACT. Верни строго структурированный результат.

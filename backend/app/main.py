@@ -3,16 +3,18 @@ import logging
 import os
 from datetime import timedelta, timezone
 from pathlib import Path
-from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Request,Response
+from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Request,Response,Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBS
+from sqlalchemy import or_
 from app.db import *
 from app.ai.orchestrator import AIOrchestrator
 from app.ai.config import get_llm_settings
 from app.ai.errors import LLMError
-from app.documents.service import extract,generate_spec
+from app.documents.service import extract,render_specification,SpreadsheetSpecificationParser
+from app.contracts import select_contract
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
@@ -45,17 +47,24 @@ def own(cid,u,d):
 def userout(u): return {'id':u.id,'full_name':u.full_name,'email':u.email,'department':u.department,'roles':u.roles}
 def specout(s): return {'id':s.id,'version':s.version,'data':s.data,'status':s.status}
 def caseout(c): return {'id':c.id,'title':c.title,'state':c.state,'context':c.context,'created_at':c.created_at}
+def contextout(c,d):
+ p=d.query(ProcurementContextRecord).filter_by(case_id=c.id).first()
+ return p.data if p else (c.context or {})
 def rec(c,d):
- rule=next((r for r in d.query(ContractRule).all() if r.conditions.get('category')==(c.context or {}).get('category')),None)
- if not rule:return None
- t=d.get(ContractTemplate,rule.template_id); return {'template_id':t.id,'name':t.name,'description':t.description}
+ stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
+ if stored:
+  template=d.get(ContractTemplate,stored.template_id) if stored.template_id else None
+  return {'status':stored.status,'reason':stored.reason,'template_id':template.id if template else None,'name':template.name if template else None,'description':template.description if template else None}
+ decision=select_contract(d,contextout(c,d))
+ if decision.status!='MATCHED': return None
+ return {'status':'MATCHED','reason':decision.reason,'template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description}
 def detail(c,d):
- out=caseout(c); out['messages']=[{'id':m.id,'role':m.role,'content':m.content,'created_at':m.created_at} for m in d.query(Message).filter_by(case_id=c.id).order_by(Message.created_at)]; s=d.query(TechnicalSpecification).filter_by(case_id=c.id).first(); out['technical_specification']=specout(s) if s else None; out['recommendation']=rec(c,d) if c.state=='COMPLETED' else None; return out
+ out=caseout(c); out['messages']=[{'id':m.id,'role':m.role,'content':m.content,'created_at':m.created_at} for m in d.query(Message).filter_by(case_id=c.id).order_by(Message.created_at)]; s=d.query(TechnicalSpecification).filter_by(case_id=c.id).first(); out['technical_specification']=specout(s) if s else None; out['procurement_context']=contextout(c,d); out['recommendation']=rec(c,d); out['attachment']=({'id':a.id,'original_name':a.original_name} if (a:=d.query(Attachment).filter_by(case_id=c.id).first()) else None); return out
 class Login(BaseModel): external_id:str; password:str
-class CreateCase(BaseModel): title:str='Новое обращение'
+class CreateCase(BaseModel): title:str='Новое обращение'; initial_intent:str='GENERAL_PROCUREMENT_DIALOGUE'
 class UpdateCase(BaseModel): title:str
 class Text(BaseModel): content:str
-class Change(BaseModel): field:str; operation:str='replace'; value:str|None=None
+class Change(BaseModel): field:str; operation:str='replace'; value:object|None=None
 class Changes(BaseModel): changes:list[Change]
 @app.get('/health')
 def health(): return {'status':'ok'}
@@ -89,9 +98,16 @@ def logout(req:Request,response:Response,u=Depends(current),d:DBS=Depends(db)):
 def usersme(u=Depends(current)): return userout(u)
 @app.post('/api/v1/cases')
 def create(x:CreateCase,u=Depends(current),d:DBS=Depends(db)):
- c=Case(user_id=u.id,title=x.title); d.add(c); audit(d,u.id,c.id,'CASE_CREATED'); d.commit(); return caseout(c)
+ allowed={'GET_CONTRACT','CREATE_SPECIFICATION','ANALYZE_SPECIFICATION','CREATE_SPEC_AND_GET_CONTRACT','GENERAL_PROCUREMENT_DIALOGUE'}
+ intent=x.initial_intent.upper() if x.initial_intent.upper() in allowed else 'GENERAL_PROCUREMENT_DIALOGUE'
+ c=Case(user_id=u.id,title=x.title,context={'intent':intent}); d.add(c); d.flush(); d.add(ProcurementContextRecord(case_id=c.id,intent=intent,data={'intent':intent,'is_procurement':True,'missing_fields':[]})); audit(d,u.id,c.id,'CASE_CREATED',{'initial_intent':intent}); d.commit(); return caseout(c)
 @app.get('/api/v1/cases')
-def cases(u=Depends(current),d:DBS=Depends(db)): return [caseout(c) for c in d.query(Case).filter_by(user_id=u.id).order_by(Case.created_at.desc())]
+def cases(q:str|None=Query(default=None,max_length=200),u=Depends(current),d:DBS=Depends(db)):
+ query=d.query(Case).outerjoin(ProcurementContextRecord,ProcurementContextRecord.case_id==Case.id).filter(Case.user_id==u.id)
+ if q and q.strip():
+  pattern=f'%{q.strip()}%'; own_message_cases=d.query(Message.case_id).join(Case,Case.id==Message.case_id).filter(Case.user_id==u.id,Message.content.ilike(pattern))
+  query=query.filter(or_(Case.title.ilike(pattern),ProcurementContextRecord.subject.ilike(pattern),Case.id.in_(own_message_cases)))
+ return [caseout(c) for c in query.order_by(Case.created_at.desc()).distinct()]
 @app.get('/api/v1/cases/{cid}')
 def getcase(cid:str,u=Depends(current),d:DBS=Depends(db)): return detail(own(cid,u,d),d)
 @app.patch('/api/v1/cases/{cid}')
@@ -99,6 +115,18 @@ def rename(cid:str,x:UpdateCase,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); title=x.title.strip()
  if not title or len(title)>300: raise HTTPException(422,detail='Укажите корректное название')
  c.title=title; d.commit(); return caseout(c)
+@app.delete('/api/v1/cases/{cid}',status_code=204)
+def delete_case(cid:str,u=Depends(current),d:DBS=Depends(db)):
+ c=own(cid,u,d); attachments=d.query(Attachment).filter_by(case_id=cid).all(); spec=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
+ for attachment in attachments:
+  try:
+   path=Path(attachment.path).resolve(); root=Path(settings.storage).resolve()
+   if path.is_relative_to(root): path.unlink(missing_ok=True)
+  except OSError: log.exception('Failed to remove attachment for case=%s',cid)
+ if spec: d.query(SpecVersion).filter_by(spec_id=spec.id).delete(); d.delete(spec)
+ d.query(Message).filter_by(case_id=cid).delete(); d.query(Attachment).filter_by(case_id=cid).delete(); d.query(ProcurementContextRecord).filter_by(case_id=cid).delete(); d.query(ContractRecommendation).filter_by(case_id=cid).delete(); d.query(AuditEvent).filter_by(case_id=cid).delete(); d.query(AIRun).filter_by(case_id=cid).delete()
+ for path in (Path(settings.storage)/'generated').glob(f'{cid}.*'): path.unlink(missing_ok=True)
+ d.flush(); d.delete(c); d.commit(); return Response(status_code=204)
 def title_for(text,ctx):
  t=text.lower()
  if 'велосипед' in t:return 'Закупка велосипедов'
@@ -108,49 +136,72 @@ def title_for(text,ctx):
  return text.strip()[:60]
 QUESTIONS={'purpose':'Какова основная цель закупки?','scope':'Уточните, пожалуйста, какой объём требуется: количество товаров, объём работ или перечень услуг?','deadline':'До какой даты необходимо выполнить работы или осуществить поставку?','acceptance_criteria':'Как вы планируете принимать результат: по соответствию требованиям, количеству, срокам или другим критериям?'}
 FIELDS=list(QUESTIONS)
+def save_context(c,data,d):
+ p=d.query(ProcurementContextRecord).filter_by(case_id=c.id).first()
+ if not p: p=ProcurementContextRecord(case_id=c.id); d.add(p)
+ p.intent=data.get('intent','GENERAL_PROCUREMENT_DIALOGUE'); p.subject=data.get('subject',''); p.category=data.get('category',''); p.data=data; p.missing_fields=data.get('missing_fields',[]); p.source_confidence=data.get('source_confidence'); c.context={'intent':p.intent,'subject':p.subject,'category':p.category}
+ return p
+def apply_contract_decision(c,context,d):
+ decision=select_contract(d,context); stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
+ if not stored: stored=ContractRecommendation(case_id=c.id,status=decision.status,reason=decision.reason); d.add(stored)
+ stored.status=decision.status; stored.reason=decision.reason; stored.template_id=decision.template.id if decision.template else None
+ if decision.status=='MATCHED': c.state='COMPLETED'
+ elif decision.status in {'NO_MATCH','LEGAL_REVIEW_REQUIRED'}: c.state='ESCALATED_TO_DPO'
+ return decision
 @app.post('/api/v1/cases/{cid}/messages')
 async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); d.add(Message(case_id=cid,role='user',content=x.content)); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
- s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
- try: result=await orchestrator.process_message(c,u,x.content,history[:-1],s,d)
+ s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
+ try: result=await orchestrator.process_message(c,u,x.content,history[:-1],s,d,p)
  except LLMError:
   d.rollback(); d.add(Message(case_id=cid,role='assistant',content='Не удалось обработать запрос. Попробуйте повторить позднее.')); d.commit(); return detail(c,d)
- c.context=result['context']; answer=result['answer']
+ context=result['context']; save_context(c,context,d); answer=result['answer']
  if not result['context'].get('is_procurement',True): c.state='ESCALATED_TO_DPO'
  else:
-  if c.title=='Новое обращение': c.title=(result['data'].get('subject') or x.content.strip())[:60]
-  if not s:
-   s=TechnicalSpecification(case_id=cid,data=result['data']); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=result['data']))
-  elif result['changed'] and s.status!='CONFIRMED':
-   s.data=result['data']
-   if result['ready'] and c.state!='SPEC_REVIEW': s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=result['data']))
-  c.state='SPEC_REVIEW' if result['ready'] else 'COLLECTING_SPEC_DATA'
+  if c.title=='Новое обращение': c.title=(context.get('subject') or x.content.strip())[:60]
+  if result['create_spec']:
+   data=result['spec_data']
+   if not s: s=TechnicalSpecification(case_id=cid,data=data); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=data))
+   elif result['changed'] and s.status!='CONFIRMED':
+    was_incomplete=any(not s.data.get(field) for field in ('purpose','scope','deadline','acceptance_criteria')); s.data=data
+    if not context.get('missing_fields') or not was_incomplete:
+     s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=data))
+   c.state='SPEC_REVIEW' if not context.get('missing_fields') else 'COLLECTING_SPEC_DATA'
+  elif context.get('missing_fields'): c.state='COLLECTING_SPEC_DATA'
+  if result['run_contract']:
+   decision=apply_contract_decision(c,context,d)
+   if decision.status=='MATCHED': answer=f'Подходящий шаблон найден: {decision.template.name}. {decision.reason}'
+   elif decision.status=='AMBIGUOUS': answer='Нужно уточнить данные закупки, чтобы однозначно выбрать договор.'
+   else: answer='Для этого обращения требуется участие специалиста ДПО.'
  d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit(); return detail(c,d)
 @app.patch('/api/v1/cases/{cid}/technical-specification')
 def edit(cid:str,x:Changes,u=Depends(current),d:DBS=Depends(db)):
  own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
- allowed={'subject','purpose','scope','functional_requirements','nonfunctional_requirements','deadline','acceptance_criteria','other_conditions'}; data=dict(s.data)
+ allowed={'subject','purpose','scope','functional_requirements','nonfunctional_requirements','deadline','acceptance_criteria','other_conditions','items','common_requirements','blocking_requirements','additional_conditions','delivery_terms','total_amount'}; data=dict(s.data)
  for ch in x.changes:
   if ch.field not in allowed or ch.operation not in {'replace','delete'}: raise HTTPException(422,detail='Недопустимое изменение')
-  data[ch.field]='' if ch.operation=='delete' else (ch.value or '')
+  data[ch.field]=([] if ch.field in {'items','common_requirements','blocking_requirements','additional_conditions'} else '') if ch.operation=='delete' else ch.value
  s.data=data; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=data)); audit(d,u.id,cid,'SPEC_UPDATED'); d.commit(); return specout(s)
 @app.post('/api/v1/cases/{cid}/technical-specification/confirm')
 def confirm(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
- s.status='CONFIRMED'; r=rec(c,d)
- if not r: c.state='ESCALATED_TO_DPO'; d.commit(); return {'status':'no_match','reason':'Для этого обращения требуется участие специалиста ДПО.'}
- c.state='COMPLETED'; audit(d,u.id,cid,'CONTRACT_SELECTED',{'template_id':r['template_id']}); d.commit(); return {'status':'matched',**r}
+ s.status='CONFIRMED'; context=contextout(c,d); decision=apply_contract_decision(c,context,d)
+ if decision.status!='MATCHED': d.commit(); return {'status':decision.status.lower(),'reason':decision.reason}
+ audit(d,u.id,cid,'CONTRACT_SELECTED',{'template_id':decision.template.id}); d.commit(); return {'status':'matched','template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description,'reason':decision.reason}
 @app.get('/api/v1/cases/{cid}/contract-recommendation')
 def recommendation(cid:str,u=Depends(current),d:DBS=Depends(db)):
- c=own(cid,u,d); r=rec(c,d)
- return {'status':'matched',**r} if r else {'status':'no_match','reason':'Для этого обращения требуется участие специалиста ДПО.'}
+ c=own(cid,u,d); decision=apply_contract_decision(c,contextout(c,d),d); d.commit()
+ if decision.status=='MATCHED': return {'status':'matched','template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description,'reason':decision.reason}
+ return {'status':decision.status.lower(),'reason':decision.reason,'missing_fields':decision.missing_fields or []}
 @app.get('/api/v1/cases/{cid}/technical-specification/download')
-def downloadspec(cid:str,u=Depends(current),d:DBS=Depends(db)):
+def downloadspec(cid:str,format:str='docx',u=Depends(current),d:DBS=Depends(db)):
  own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
- p=Path(settings.storage)/'generated'/f'{cid}.docx'; p.parent.mkdir(parents=True,exist_ok=True); generate_spec(s.data,p); return FileResponse(p,filename='Техническое_задание.docx')
+ fmt=format.lower();
+ if fmt not in {'docx','pdf','xlsx'}: raise HTTPException(422,detail='Доступны DOCX, PDF и XLSX')
+ p=Path(settings.storage)/'generated'/f'{cid}.{fmt}'; p.parent.mkdir(parents=True,exist_ok=True); render_specification(s.data,p,fmt); media={'docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','pdf':'application/pdf','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}[fmt]; return FileResponse(p,filename=f'Техническое_задание.{fmt}',media_type=media)
 @app.get('/api/v1/templates/{tid}/download')
 def downloadtemplate(tid:str,u=Depends(current),d:DBS=Depends(db)):
  t=d.get(ContractTemplate,tid)
@@ -159,17 +210,21 @@ def downloadtemplate(tid:str,u=Depends(current),d:DBS=Depends(db)):
 @app.post('/api/v1/cases/{cid}/attachments')
 async def upload(cid:str,file:UploadFile=File(...),u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); ext=Path(file.filename or '').suffix.lower()
- if ext not in {'.docx','.pdf','.xlsx'}: raise HTTPException(415,detail='Поддерживаются DOCX, PDF и XLSX')
+ if d.query(Attachment).filter_by(case_id=cid).first(): raise HTTPException(409,detail='В обращении уже есть загруженный документ.')
+ if ext not in {'.docx','.pdf','.xlsx','.xls'}: raise HTTPException(415,detail='Поддерживаются DOCX, PDF, XLSX и XLS')
  raw=await file.read()
  if not raw or len(raw)>settings.max_upload: raise HTTPException(422,detail='Файл пустой или слишком большой')
  p=Path(settings.storage)/'uploads'/f'{uid()}{ext}'; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(raw)
- try: text=extract(p,ext)
+ try:
+  structured=SpreadsheetSpecificationParser().parse(p,ext) if ext in {'.xlsx','.xls'} else None
+  text=extract(p,ext)
  except Exception: p.unlink(missing_ok=True); raise HTTPException(422,detail='Не удалось прочитать файл')
  a=Attachment(case_id=cid,original_name=Path(file.filename).name,path=str(p),mime_type=file.content_type or '',extracted_text=text); d.add(a)
- try: result=await orchestrator.analyse_document(c,u,text,d)
+ try: result,specdata=await orchestrator.analyse_document(c,u,text,d,structured)
  except LLMError:
   d.rollback(); p.unlink(missing_ok=True); raise HTTPException(503,detail='Не удалось обработать запрос. Попробуйте повторить позднее.')
- specdata={k:v for k,v in result.specification.model_dump().items() if k in {'subject','purpose','scope','functional_requirements','nonfunctional_requirements','deadline','acceptance_criteria','other_conditions'}}; c.context=result.context.model_dump(); c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
+ context=result.context.model_dump(); save_context(c,context,d); c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: s=TechnicalSpecification(case_id=cid,data=specdata); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
  elif s.status!='CONFIRMED': s.data=specdata; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=s.data))
- msg=result.summary+'\n\nПредмет закупки: '+(s.data.get('subject') or 'требуется уточнение')+'\nСрок выполнения: '+(s.data.get('deadline') or 'требуется уточнение')+'\nКритерии приёмки: '+(s.data.get('acceptance_criteria') or 'требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или внесите изменения.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}
+ items=f"\nПозиции: {len(s.data.get('items',[]))}." if s.data.get('items') else ''
+ msg=result.summary+'\n\nПредмет закупки: '+(s.data.get('subject') or 'требуется уточнение')+items+'\nСрок выполнения: '+(s.data.get('deadline') or s.data.get('delivery_terms') or 'требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или напишите, что нужно исправить.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}

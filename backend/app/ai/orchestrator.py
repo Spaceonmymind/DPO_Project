@@ -5,7 +5,7 @@ from .context import build_context
 from .schemas import LLMMessage, LLMOptions, RequirementsExtractionResult, ProcurementContext, SpecificationAnalysisResult
 
 SPEC_FIELDS = ['subject','purpose','scope','functional_requirements','nonfunctional_requirements','deadline','acceptance_criteria','other_conditions']
-CONTEXT_FIELDS = ['subject','category','counterparty_type','amount','currency','delivery_required','delivery_location','installation_required','support_required','licensing_required','intellectual_property_related','personal_data_related','advance_payment','term','restrictions','exceptions']
+CONTEXT_FIELDS = ['subject','category','counterparty_type','amount','currency','procurement_object_type','requires_transfer_of_goods','requires_service_activity','requires_tangible_work_result','requires_agent_actions','agent_acts_in_principal_interest','materials_purchase_required','acceptance_result_type','delivery_required','delivery_location','installation_required','support_required','licensing_required','intellectual_property_related','personal_data_related','advance_payment','term','restrictions','exceptions']
 SPEC_INTENTS = {'CREATE_SPECIFICATION','CREATE_SPEC_AND_GET_CONTRACT','UPDATE_SPECIFICATION','CONFIRM_SPECIFICATION','ANALYZE_SPECIFICATION'}
 CONTRACT_INTENTS = {'GET_CONTRACT','CREATE_SPEC_AND_GET_CONTRACT'}
 LABELS = {'purpose':'цель закупки','scope':'объём поставки или работ','deadline':'срок выполнения','acceptance_criteria':'критерии приёмки'}
@@ -78,11 +78,8 @@ class AIOrchestrator:
             data = None
             missing = []
             if not context_data.get('subject'): missing.append('subject')
-            if not context_data.get('category'): missing.append('category')
-            if context_data.get('category') == 'supply' and context_data.get('installation_required') is None: missing.append('installation_required')
             context_data['missing_fields'] = missing
-            if 'installation_required' in missing: answer = 'Уточните, пожалуйста: предполагается только поставка или также установка и настройка?'
-            elif missing: answer = 'Уточните предмет и вид закупки, чтобы подобрать договор.'
+            if missing: answer = 'Уточните предмет и вид закупки, чтобы подобрать договор.'
             else: answer = 'Данных достаточно для подбора договорного шаблона.'
 
         context = ProcurementContext.model_validate(context_data)

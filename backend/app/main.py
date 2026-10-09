@@ -1,4 +1,5 @@
 import hmac
+import hashlib
 import logging
 import os
 from datetime import timedelta, timezone
@@ -54,10 +55,10 @@ def rec(c,d):
  stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
  if stored:
   template=d.get(ContractTemplate,stored.template_id) if stored.template_id else None
-  return {'status':stored.status,'reason':stored.reason,'template_id':template.id if template else None,'name':template.name if template else None,'description':template.description if template else None}
+  return {'status':stored.status,'reason':stored.reason,'rules_triggered':stored.rules_triggered,'template_id':template.id if template else None,'template_code':stored.template_code,'template_title':stored.template_title,'name':template.name if template else stored.template_title,'description':template.description if template else None,'filename':template.filename if template else None,'file_format':template.file_format if template else None}
  decision=select_contract(d,contextout(c,d))
  if decision.status!='MATCHED': return None
- return {'status':'MATCHED','reason':decision.reason,'template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description}
+ return {'status':'MATCHED','reason':decision.reason,'rules_triggered':decision.rules_triggered,'template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format}
 def detail(c,d):
  out=caseout(c); out['messages']=[{'id':m.id,'role':m.role,'content':m.content,'created_at':m.created_at} for m in d.query(Message).filter_by(case_id=c.id).order_by(Message.created_at)]; s=d.query(TechnicalSpecification).filter_by(case_id=c.id).first(); out['technical_specification']=specout(s) if s else None; out['procurement_context']=contextout(c,d); out['recommendation']=rec(c,d); out['attachment']=({'id':a.id,'original_name':a.original_name} if (a:=d.query(Attachment).filter_by(case_id=c.id).first()) else None); return out
 class Login(BaseModel): external_id:str; password:str
@@ -145,6 +146,7 @@ def apply_contract_decision(c,context,d):
  decision=select_contract(d,context); stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
  if not stored: stored=ContractRecommendation(case_id=c.id,status=decision.status,reason=decision.reason); d.add(stored)
  stored.status=decision.status; stored.reason=decision.reason; stored.template_id=decision.template.id if decision.template else None
+ stored.template_code=decision.template.code if decision.template else ''; stored.template_title=decision.template.name if decision.template else ''; stored.rules_triggered=decision.rules_triggered
  if decision.status=='MATCHED': c.state='COMPLETED'
  elif decision.status in {'NO_MATCH','LEGAL_REVIEW_REQUIRED'}: c.state='ESCALATED_TO_DPO'
  return decision
@@ -171,7 +173,7 @@ async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
   if result['run_contract']:
    decision=apply_contract_decision(c,context,d)
    if decision.status=='MATCHED': answer=f'Подходящий шаблон найден: {decision.template.name}. {decision.reason}'
-   elif decision.status=='AMBIGUOUS': answer='Нужно уточнить данные закупки, чтобы однозначно выбрать договор.'
+   elif decision.status=='AMBIGUOUS': answer=decision.reason
    else: answer='Для этого обращения требуется участие специалиста ДПО.'
  d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit(); return detail(c,d)
 @app.patch('/api/v1/cases/{cid}/technical-specification')
@@ -188,13 +190,13 @@ def confirm(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
  s.status='CONFIRMED'; context=contextout(c,d); decision=apply_contract_decision(c,context,d)
- if decision.status!='MATCHED': d.commit(); return {'status':decision.status.lower(),'reason':decision.reason}
- audit(d,u.id,cid,'CONTRACT_SELECTED',{'template_id':decision.template.id}); d.commit(); return {'status':'matched','template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description,'reason':decision.reason}
+ if decision.status!='MATCHED': d.commit(); return {'status':decision.status.lower(),'reason':decision.reason,'rules_triggered':decision.rules_triggered}
+ audit(d,u.id,cid,'CONTRACT_SELECTED',{'template_id':decision.template.id}); d.commit(); return {'status':'matched','template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format,'reason':decision.reason,'rules_triggered':decision.rules_triggered}
 @app.get('/api/v1/cases/{cid}/contract-recommendation')
 def recommendation(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); decision=apply_contract_decision(c,contextout(c,d),d); d.commit()
- if decision.status=='MATCHED': return {'status':'matched','template_id':decision.template.id,'name':decision.template.name,'description':decision.template.description,'reason':decision.reason}
- return {'status':decision.status.lower(),'reason':decision.reason,'missing_fields':decision.missing_fields or []}
+ if decision.status=='MATCHED': return {'status':'matched','template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format,'reason':decision.reason,'rules_triggered':decision.rules_triggered}
+ return {'status':decision.status.lower(),'reason':decision.reason,'missing_fields':decision.missing_fields,'rules_triggered':decision.rules_triggered}
 @app.get('/api/v1/cases/{cid}/technical-specification/download')
 def downloadspec(cid:str,format:str='docx',u=Depends(current),d:DBS=Depends(db)):
  own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
@@ -202,11 +204,18 @@ def downloadspec(cid:str,format:str='docx',u=Depends(current),d:DBS=Depends(db))
  fmt=format.lower();
  if fmt not in {'docx','pdf','xlsx'}: raise HTTPException(422,detail='Доступны DOCX, PDF и XLSX')
  p=Path(settings.storage)/'generated'/f'{cid}.{fmt}'; p.parent.mkdir(parents=True,exist_ok=True); render_specification(s.data,p,fmt); media={'docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','pdf':'application/pdf','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}[fmt]; return FileResponse(p,filename=f'Техническое_задание.{fmt}',media_type=media)
-@app.get('/api/v1/templates/{tid}/download')
-def downloadtemplate(tid:str,u=Depends(current),d:DBS=Depends(db)):
- t=d.get(ContractTemplate,tid)
- if not t: raise HTTPException(404,detail='Шаблон не найден')
- return FileResponse(t.path,filename=t.name+'.docx')
+@app.get('/api/v1/cases/{cid}/contract-template')
+def downloadtemplate(cid:str,u=Depends(current),d:DBS=Depends(db)):
+ own(cid,u,d); recommendation=d.query(ContractRecommendation).filter_by(case_id=cid,status='MATCHED').first()
+ if not recommendation or not recommendation.template_id: raise HTTPException(404,detail='Для обращения нет выбранного шаблона')
+ template=d.get(ContractTemplate,recommendation.template_id)
+ if not template or not template.active: raise HTTPException(404,detail='Шаблон недоступен')
+ root=Path(settings.contract_templates_path).resolve(); path=Path(template.path).resolve()
+ if not path.is_relative_to(root) or not path.is_file(): raise HTTPException(404,detail='Файл шаблона недоступен')
+ digest=hashlib.sha256(path.read_bytes()).hexdigest()
+ if not hmac.compare_digest(digest,template.checksum_sha256): raise HTTPException(409,detail='Нарушена целостность шаблона')
+ media={'docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','rtf':'application/rtf'}.get(template.file_format,'application/octet-stream')
+ return FileResponse(path,filename=template.filename,media_type=media)
 @app.post('/api/v1/cases/{cid}/attachments')
 async def upload(cid:str,file:UploadFile=File(...),u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); ext=Path(file.filename or '').suffix.lower()

@@ -25,4 +25,5 @@ frontend/dist/
 backend/*.db
 storage/uploads/
 storage/generated/
+contract_templates/
 backups/

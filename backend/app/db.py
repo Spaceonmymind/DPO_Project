@@ -5,6 +5,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 class Settings:
  database_url=os.getenv('DATABASE_URL','sqlite:///./dpo.db')
  storage=os.getenv('DOCUMENT_STORAGE_PATH',os.getenv('STORAGE_LOCAL_PATH','../storage'))
+ contract_templates_path=os.getenv('CONTRACT_TEMPLATES_PATH','../contract_templates')
  max_upload=int(os.getenv('MAX_UPLOAD_SIZE_MB','20'))*1024*1024
  app_env=os.getenv('APP_ENV','development')
  app_secret_key=os.getenv('APP_SECRET_KEY','development-only-change-me')
@@ -29,7 +30,7 @@ class Case(Base):
 class ProcurementContextRecord(Base):
  __tablename__='procurement_contexts'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); case_id:Mapped[str]=mapped_column(ForeignKey('cases.id'),unique=True,index=True); intent:Mapped[str]=mapped_column(String(60),default='GENERAL_PROCUREMENT_DIALOGUE'); subject:Mapped[str]=mapped_column(String(500),default=''); category:Mapped[str]=mapped_column(String(80),default=''); data:Mapped[dict]=mapped_column(JSON,default=dict); missing_fields:Mapped[list]=mapped_column(JSON,default=list); source_confidence:Mapped[float|None]=mapped_column(nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
 class ContractRecommendation(Base):
- __tablename__='contract_recommendations'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); case_id:Mapped[str]=mapped_column(ForeignKey('cases.id'),unique=True,index=True); template_id:Mapped[str|None]=mapped_column(ForeignKey('contract_templates.id'),nullable=True); status:Mapped[str]=mapped_column(String(40)); reason:Mapped[str]=mapped_column(Text,default=''); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
+ __tablename__='contract_recommendations'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); case_id:Mapped[str]=mapped_column(ForeignKey('cases.id'),unique=True,index=True); template_id:Mapped[str|None]=mapped_column(ForeignKey('contract_templates.id'),nullable=True); template_code:Mapped[str]=mapped_column(String(40),default=''); template_title:Mapped[str]=mapped_column(String(200),default=''); status:Mapped[str]=mapped_column(String(40)); reason:Mapped[str]=mapped_column(Text,default=''); rules_triggered:Mapped[list]=mapped_column(JSON,default=list); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
 class Message(Base):
  __tablename__='messages'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); case_id:Mapped[str]=mapped_column(ForeignKey('cases.id')); role:Mapped[str]=mapped_column(String(20)); content:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class Attachment(Base):
@@ -39,7 +40,7 @@ class TechnicalSpecification(Base):
 class SpecVersion(Base):
  __tablename__='technical_specification_versions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); spec_id:Mapped[str]=mapped_column(ForeignKey('technical_specifications.id')); version:Mapped[int]=mapped_column(Integer); data:Mapped[dict]=mapped_column(JSON); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class ContractTemplate(Base):
- __tablename__='contract_templates'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); code:Mapped[str]=mapped_column(String(80),unique=True); name:Mapped[str]=mapped_column(String(200)); description:Mapped[str]=mapped_column(Text); path:Mapped[str]=mapped_column(String(500)); active:Mapped[bool]=mapped_column(Boolean,default=True); version:Mapped[str]=mapped_column(String(30),default='1.0')
+ __tablename__='contract_templates'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); code:Mapped[str]=mapped_column(String(80),unique=True); name:Mapped[str]=mapped_column(String(200)); description:Mapped[str]=mapped_column(Text); filename:Mapped[str]=mapped_column(String(300),default=''); path:Mapped[str]=mapped_column(String(500)); file_format:Mapped[str]=mapped_column(String(20),default='docx'); checksum_sha256:Mapped[str]=mapped_column(String(64),default=''); active:Mapped[bool]=mapped_column(Boolean,default=True); version:Mapped[str]=mapped_column(String(30),default='1.0'); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
 class ContractRule(Base):
  __tablename__='contract_template_rules'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); template_id:Mapped[str]=mapped_column(ForeignKey('contract_templates.id')); conditions:Mapped[dict]=mapped_column(JSON)
 class AuditEvent(Base):

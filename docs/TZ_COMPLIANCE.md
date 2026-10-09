@@ -10,8 +10,8 @@
 | Формирование и изменение ТЗ | Реализовано | Orchestrator, PATCH technical-specification, item patches |
 | Явное подтверждение | Реализовано | `/technical-specification/confirm` |
 | Экспорт DOCX / PDF / Excel | Реализовано | `render_specification` |
-| Шесть договорных шаблонов | Реализовано | `app/seed.py` |
-| Выбор и скачивание договора | Реализовано | `app/contracts.py`, template download |
+| Шесть договорных шаблонов | Частично | На текущем тестовом этапе фактически предоставлены и зарегистрированы 4 оригинальных шаблона; исходное ТЗ предусматривает 6 |
+| Выбор и скачивание договора | Реализовано | Детерминированный `app/contracts.py`, case-scoped download оригинала с SHA-256 |
 | Договор без обязательного ТЗ | Реализовано | ProcurementContext + GET_CONTRACT flow |
 | История / продолжение / переименование | Реализовано | cases/messages API и frontend |
 | Серверный поиск | Реализовано | `GET /cases?q=` с ownership filter |

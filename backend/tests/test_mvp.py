@@ -1,14 +1,22 @@
 import io
 import os
 import tempfile
+import hashlib
+from urllib.parse import quote
 from pathlib import Path
+from docx import Document
 
 os.environ['DATABASE_URL'] = 'sqlite:///' + tempfile.mktemp(suffix='.db')
 os.environ['STORAGE_LOCAL_PATH'] = tempfile.mkdtemp()
 os.environ['SEED_DEMO_USERS'] = 'true'
+template_directory = Path(tempfile.mkdtemp())
+os.environ['CONTRACT_TEMPLATES_PATH'] = str(template_directory)
+os.environ['CONTRACT_TEMPLATE_ALLOW_DYNAMIC_CHECKSUMS'] = 'true'
+for filename in ('Договор_подряда.docx','договор возмездного оказания услуг (образец).docx','Shablon-agentskogo-dogovora.docx'):
+    fixture=Document(); fixture.add_paragraph(filename); fixture.save(template_directory/filename)
+(template_directory/'договор поставки.rtf').write_bytes(b'{\\rtf1\\ansi approved supply fixture}')
 
 from fastapi.testclient import TestClient
-from docx import Document
 import fitz
 import openpyxl
 import xlwt
@@ -60,7 +68,7 @@ def test_upload_docx_analysis_and_contract_download():
     assert response.status_code == 200 and response.json()['analysis_ready']
     recommendation = client.post(f'/api/v1/cases/{case_id}/technical-specification/confirm', headers=headers)
     assert recommendation.json()['status'] == 'matched'
-    assert client.get('/api/v1/templates/' + recommendation.json()['template_id'] + '/download').status_code == 200
+    assert client.get(f'/api/v1/cases/{case_id}/contract-template').status_code == 200
 
 
 def test_sessions_csrf_ownership_and_switching():
@@ -123,14 +131,14 @@ def test_contract_only_without_specification_and_download():
     body=response.json(); assert body['technical_specification'] is None
     assert body['procurement_context']['intent']=='GET_CONTRACT' and body['procurement_context']['installation_required'] is False
     assert body['recommendation']['status']=='MATCHED'
-    assert client.get('/api/v1/templates/'+body['recommendation']['template_id']+'/download').status_code==200
+    assert client.get(f'/api/v1/cases/{case_id}/contract-template').status_code==200
 
 
 def test_contract_ambiguity_then_clarification_and_legal_review():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
     first=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Хотим купить 5 ноутбуков у юридического лица.'}).json()
-    assert first['technical_specification'] is None and first['recommendation'] is None
+    assert first['technical_specification'] is None and first['recommendation']['template_code']=='SUPPLY'
     second=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Только поставка, без установки.'}).json()
     assert second['recommendation']['status']=='MATCHED'
     review_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
@@ -167,6 +175,16 @@ def test_xlsx_upload_one_file_and_corruption():
     assert second.status_code==409
 
 
+def test_xlsx_context_selects_same_approved_supply_template():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
+    upload=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('sample.xlsx',spreadsheet_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
+    assert upload.status_code==200
+    recommendation=client.post(f'/api/v1/cases/{case_id}/technical-specification/confirm',headers=headers).json()
+    assert recommendation['status']=='matched' and recommendation['template_code']=='SUPPLY'
+    assert client.get(f'/api/v1/cases/{case_id}/contract-template').content==(template_directory/'договор поставки.rtf').read_bytes()
+
+
 def test_consistent_docx_pdf_xlsx_exports():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
@@ -188,3 +206,43 @@ def test_search_delete_and_ownership():
     assert ivan.delete(f'/api/v1/cases/{foreign}',headers=ih).status_code==404
     assert ivan.delete(f'/api/v1/cases/{own_case}',headers=ih).status_code==204
     assert ivan.get(f'/api/v1/cases/{own_case}').status_code==404
+
+
+def test_four_approved_contracts_and_original_download_bytes():
+    scenarios={
+        'SUPPLY':('Нужен договор: купить 10 ноутбуков, только поставка без установки','договор поставки.rtf','application/rtf'),
+        'SERVICES':('Нужен договор: заказать консультационные услуги','договор возмездного оказания услуг (образец).docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        'WORKS':('Нужен договор: выполнить ремонт помещения','Договор_подряда.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        'AGENCY':('Нужен договор: агент должен по поручению закупить материалы у третьих лиц, доставить их и предоставить отчёт агента за вознаграждение','Shablon-agentskogo-dogovora.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    }
+    client=TestClient(app); headers=auth(client)
+    for code,(message,filename,mime) in scenarios.items():
+        case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':message}).json()
+        assert body['recommendation']['status']=='MATCHED'
+        assert body['recommendation']['template_code']==code
+        response=client.get(f'/api/v1/cases/{case_id}/contract-template')
+        assert response.status_code==200 and response.headers['content-type'].startswith(mime)
+        assert quote(filename) in response.headers['content-disposition']
+        assert hashlib.sha256(response.content).hexdigest()==hashlib.sha256((template_directory/filename).read_bytes()).hexdigest()
+
+
+def test_rules_fallbacks_are_deterministic():
+    from app.contracts import select_contract
+    from app.db import SessionLocal
+    db=SessionLocal()
+    base={'subject':'Закупка'}
+    assert select_contract(db,{**base,'requires_transfer_of_goods':True,'requires_tangible_work_result':True}).status=='AMBIGUOUS'
+    assert select_contract(db,{}).status=='AMBIGUOUS'
+    assert select_contract(db,{**base,'category':'software_license','licensing_required':True}).status=='NO_MATCH'
+    assert select_contract(db,{**base,'exceptions':['Нестандартные условия']}).status=='LEGAL_REVIEW_REQUIRED'
+    db.close()
+
+
+def test_mixed_contract_flow_returns_clarification():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужен договор: купить оборудование и выполнить большой комплекс монтажа'}).json()
+    assert body['recommendation']['status']=='AMBIGUOUS'
+    assert 'основным предметом' in body['recommendation']['reason']
+    assert client.get(f'/api/v1/cases/{case_id}/contract-template').status_code==404

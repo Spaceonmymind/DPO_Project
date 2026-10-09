@@ -16,6 +16,7 @@ from app.ai.config import get_llm_settings
 from app.ai.errors import LLMError
 from app.documents.service import extract,render_specification,SpreadsheetSpecificationParser
 from app.contracts import select_contract
+from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
@@ -46,7 +47,14 @@ def own(cid,u,d):
  if c.user_id!=u.id: raise HTTPException(404,detail='Обращение не найдено')
  return c
 def userout(u): return {'id':u.id,'full_name':u.full_name,'email':u.email,'department':u.department,'roles':u.roles}
-def specout(s): return {'id':s.id,'version':s.version,'data':s.data,'status':s.status}
+def sanitized_spec(data):
+ out={}
+ for key,value in data.items():
+  if isinstance(value,str): out[key]=clean_text(value,allow_short=key in {'unit'})
+  elif isinstance(value,list): out[key]=clean_list(value)
+  else: out[key]=value
+ return out
+def specout(s): return {'id':s.id,'version':s.version,'data':sanitized_spec(s.data),'status':s.status}
 def caseout(c): return {'id':c.id,'title':c.title,'state':c.state,'context':c.context,'created_at':c.created_at}
 def contextout(c,d):
  p=d.query(ProcurementContextRecord).filter_by(case_id=c.id).first()
@@ -108,7 +116,7 @@ def cases(q:str|None=Query(default=None,max_length=200),u=Depends(current),d:DBS
  if q and q.strip():
   pattern=f'%{q.strip()}%'; own_message_cases=d.query(Message.case_id).join(Case,Case.id==Message.case_id).filter(Case.user_id==u.id,Message.content.ilike(pattern))
   query=query.filter(or_(Case.title.ilike(pattern),ProcurementContextRecord.subject.ilike(pattern),Case.id.in_(own_message_cases)))
- return [caseout(c) for c in query.order_by(Case.created_at.desc()).distinct()]
+ return [caseout(c) for c in query.order_by(Case.created_at.desc())]
 @app.get('/api/v1/cases/{cid}')
 def getcase(cid:str,u=Depends(current),d:DBS=Depends(db)): return detail(own(cid,u,d),d)
 @app.patch('/api/v1/cases/{cid}')
@@ -150,14 +158,36 @@ def apply_contract_decision(c,context,d):
  if decision.status=='MATCHED': c.state='COMPLETED'
  elif decision.status in {'NO_MATCH','LEGAL_REVIEW_REQUIRED'}: c.state='ESCALATED_TO_DPO'
  return decision
+def contract_clarification(context,decision):
+ fields=decision.missing_fields; previous=context.get('last_clarification_fields',[]); repeats=context.get('clarification_repeat_count',0)+1 if fields==previous else 0
+ question=decision.reason
+ options=[]
+ if 'dominant_procurement_element' in fields: options=['Поставка товара','Оказание услуг','Выполнение работ','Агентские действия']
+ elif 'ordinary_supply_confirmation' in fields: options=['Да','Нет']
+ if repeats==1 and options: question=decision.reason+' Выберите вариант: '+', '.join(options)+'.'
+ elif repeats>=2: question='Не удалось однозначно интерпретировать ответ. Выберите один вариант: '+', '.join(options or ['уточнить условия','обратиться в ДПО'])+'.'
+ context.update(last_clarification_fields=fields,last_clarification_question=question,clarification_repeat_count=repeats,suggested_options=options)
+ return question
+def finalize_specification(c,s,u,d):
+ s.status='CONFIRMED'; decision=apply_contract_decision(c,contextout(c,d),d)
+ if decision.status=='AMBIGUOUS': c.state='COLLECTING_CONTRACT_DATA'
+ if decision.status=='MATCHED': audit(d,u.id,c.id,'CONTRACT_SELECTED',{'template_id':decision.template.id})
+ audit(d,u.id,c.id,'SPEC_CONFIRMED',{'contract_status':decision.status})
+ return decision
 @app.post('/api/v1/cases/{cid}/messages')
 async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
- c=own(cid,u,d); d.add(Message(case_id=cid,role='user',content=x.content)); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
+ c=own(cid,u,d); state_before=c.state; user_message=Message(case_id=cid,role='user',content=x.content); d.add(user_message); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
  s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
+ if s and s.status!='CONFIRMED' and is_confirmation(x.content):
+  missing_before=(p.data if p else {}).get('missing_fields',[]); decision=finalize_specification(c,s,u,d)
+  answer=f'Техническое задание подтверждено. Подходящий шаблон: {decision.template.name}.' if decision.status=='MATCHED' else (decision.reason if decision.status=='AMBIGUOUS' else 'Техническое задание подтверждено. Для выбора договора требуется участие специалиста ДПО.')
+  d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit()
+  log.info('workflow_transition case_id=%s message_id=%s state_before=%s intent=CONFIRM_SPECIFICATION resolved_fields=%s missing_before=%s missing_after=%s state_after=%s contract_status=%s',cid,user_message.id,state_before,['specification_confirmation'],missing_before,contextout(c,d).get('missing_fields',[]),c.state,decision.status)
+  return detail(c,d)
  try: result=await orchestrator.process_message(c,u,x.content,history[:-1],s,d,p)
  except LLMError:
   d.rollback(); d.add(Message(case_id=cid,role='assistant',content='Не удалось обработать запрос. Попробуйте повторить позднее.')); d.commit(); return detail(c,d)
- context=result['context']; save_context(c,context,d); answer=result['answer']
+ context=result['context']; missing_before=(p.data if p else {}).get('missing_fields',[]) if p else []; save_context(c,context,d); answer=result['answer']; contract_status='NOT_RUN'
  if not result['context'].get('is_procurement',True): c.state='ESCALATED_TO_DPO'
  else:
   if c.title=='Новое обращение': c.title=(context.get('subject') or x.content.strip())[:60]
@@ -172,10 +202,14 @@ async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
   elif context.get('missing_fields'): c.state='COLLECTING_SPEC_DATA'
   if result['run_contract']:
    decision=apply_contract_decision(c,context,d)
+   contract_status=decision.status
    if decision.status=='MATCHED': answer=f'Подходящий шаблон найден: {decision.template.name}. {decision.reason}'
-   elif decision.status=='AMBIGUOUS': answer=decision.reason
+   elif decision.status=='AMBIGUOUS':
+    answer=contract_clarification(context,decision); save_context(c,context,d); c.state='COLLECTING_CONTRACT_DATA'
    else: answer='Для этого обращения требуется участие специалиста ДПО.'
- d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit(); return detail(c,d)
+ d.add(Message(case_id=cid,role='assistant',content=answer)); d.commit()
+ log.info('workflow_transition case_id=%s message_id=%s state_before=%s intent=%s resolved_fields=%s missing_before=%s missing_after=%s state_after=%s contract_status=%s',cid,user_message.id,state_before,context.get('intent'),result.get('resolved_fields',[]),missing_before,context.get('missing_fields',[]),c.state,contract_status)
+ return detail(c,d)
 @app.patch('/api/v1/cases/{cid}/technical-specification')
 def edit(cid:str,x:Changes,u=Depends(current),d:DBS=Depends(db)):
  own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
@@ -189,9 +223,9 @@ def edit(cid:str,x:Changes,u=Depends(current),d:DBS=Depends(db)):
 def confirm(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
- s.status='CONFIRMED'; context=contextout(c,d); decision=apply_contract_decision(c,context,d)
+ decision=finalize_specification(c,s,u,d)
  if decision.status!='MATCHED': d.commit(); return {'status':decision.status.lower(),'reason':decision.reason,'rules_triggered':decision.rules_triggered}
- audit(d,u.id,cid,'CONTRACT_SELECTED',{'template_id':decision.template.id}); d.commit(); return {'status':'matched','template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format,'reason':decision.reason,'rules_triggered':decision.rules_triggered}
+ d.commit(); return {'status':'matched','template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format,'reason':decision.reason,'rules_triggered':decision.rules_triggered}
 @app.get('/api/v1/cases/{cid}/contract-recommendation')
 def recommendation(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); decision=apply_contract_decision(c,contextout(c,d),d); d.commit()

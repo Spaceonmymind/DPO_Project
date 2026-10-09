@@ -45,6 +45,8 @@ def select_contract(db: Session, context: dict) -> ContractDecision:
         return ContractDecision('AMBIGUOUS', 'Уточните, что является основным предметом: передача товара или самостоятельное оказание услуг.', missing_fields=['dominant_procurement_element'], rules_triggered=['GOODS_TRANSFER', 'SERVICE_ACTIVITY', 'MIXED_SCENARIO'])
     if works and services:
         return ContractDecision('AMBIGUOUS', 'Уточните, должен ли контрагент передать конкретный материальный результат работ или только осуществлять деятельность.', missing_fields=['acceptance_result_type'], rules_triggered=['TANGIBLE_WORK_RESULT', 'SERVICE_ACTIVITY'])
+    if goods and 'вод' in context.get('subject','').lower() and not context.get('ordinary_supply_confirmed'):
+        return ContractDecision('AMBIGUOUS', 'Правильно понимаю, что требуется обычная поставка питьевой воды без дополнительных услуг или работ?', missing_fields=['ordinary_supply_confirmation'], rules_triggered=['VAGUE_GOODS_SCOPE'])
     if goods:
         return _matched(db, 'SUPPLY', 'Предмет закупки — передача товара без самостоятельного комплекса работ, услуг или агентских действий.', ['GOODS_TRANSFER', 'NO_DOMINANT_WORKS_OR_AGENCY'])
     if works:

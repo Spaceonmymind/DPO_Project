@@ -246,3 +246,100 @@ def test_mixed_contract_flow_returns_clarification():
     assert body['recommendation']['status']=='AMBIGUOUS'
     assert 'основным предметом' in body['recommendation']['reason']
     assert client.get(f'/api/v1/cases/{case_id}/contract-template').status_code==404
+
+
+def contract_conversation(client,headers,messages):
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    states=[]
+    for message in messages:
+        states.append(client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':message}).json())
+    return case_id,states
+
+
+def test_equivalent_service_answers_resolve_goods_services_question():
+    client=TestClient(app); headers=auth(client)
+    for answer in ('Оказание услуги','Самостоятельное оказание услуги','Услуга'):
+        _,states=contract_conversation(client,headers,['Нужен договор: передача товара или оказание услуг',answer])
+        final=states[-1]
+        assert final['procurement_context']['procurement_object_type']=='services'
+        assert final['recommendation']['template_code']=='SERVICES'
+        assert 'передача товара или самостоятельное оказание услуг' not in final['messages'][-1]['content']
+
+
+def test_partial_date_answer_only_asks_acceptance_criteria():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    for text in ('Нужно разработать лендинг','Продвижение мероприятия','Адаптивный лендинг'):
+        client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':text})
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'25 октября'}).json()
+    assert body['technical_specification']['data']['deadline']=='25 октября'
+    assert body['procurement_context']['missing_fields']==['acceptance_criteria']
+    assert 'критерии приёмки' in body['messages'][-1]['content'] and 'срок' not in body['messages'][-1]['content'].lower()
+
+
+def test_natural_date_october_25_is_saved():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужно разработать лендинг'})
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'октябрь 25'}).json()
+    assert body['technical_specification']['data']['deadline']=='октябрь 25'
+
+
+def test_text_confirmation_uses_same_transition_as_button_after_xlsx():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
+    uploaded=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('sample.xlsx',spreadsheet_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}).json()['case']
+    assert uploaded['procurement_context']['procurement_object_type']=='goods'
+    assert uploaded['procurement_context']['requires_tangible_work_result'] is False
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Всё верно'}).json()
+    assert body['technical_specification']['status']=='CONFIRMED'
+    assert body['recommendation']['template_code']=='SUPPLY' and body['state']=='COMPLETED'
+    assert not any(field in body['procurement_context']['missing_fields'] for field in ('subject','scope'))
+
+
+def test_vague_water_procurement_clarifies_then_selects_supply():
+    client=TestClient(app); headers=auth(client)
+    _,states=contract_conversation(client,headers,['Нужно купить много воды','Да'])
+    first,second=states
+    assert first['state']=='COLLECTING_CONTRACT_DATA' and first['recommendation']['status']=='AMBIGUOUS'
+    assert 'обычная поставка' in first['messages'][-1]['content'] and first['state']!='ESCALATED_TO_DPO'
+    assert second['recommendation']['template_code']=='SUPPLY' and second['state']=='COMPLETED'
+
+
+def test_full_technical_support_description_selects_services():
+    client=TestClient(app); headers=auth(client)
+    message='Нужен договор на оказание услуг по технической поддержке информационной системы в течение 12 месяцев. Исполнитель консультирует пользователей, устраняет ошибки и обеспечивает сопровождение. Передача товаров и создание нового программного продукта не предусмотрены.'
+    _,states=contract_conversation(client,headers,[message])
+    body=states[0]
+    assert body['procurement_context']['requires_transfer_of_goods'] is False
+    assert body['procurement_context']['procurement_object_type']=='services'
+    assert body['procurement_context']['new_software_development'] is False
+    assert body['recommendation']['template_code']=='SERVICES'
+
+
+def test_context_contradiction_replaces_domain_not_marks_missing():
+    client=TestClient(app); headers=auth(client)
+    _,states=contract_conversation(client,headers,['Нужен договор: только поставка оборудования','Нет, всё-таки это услуга'])
+    body=states[-1]
+    assert body['procurement_context']['requires_transfer_of_goods'] is False
+    assert body['procurement_context']['requires_service_activity'] is True
+    assert body['recommendation']['template_code']=='SERVICES'
+
+
+def test_invalid_short_and_test_placeholders_are_not_saved_or_returned():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужно разработать лендинг'})
+    for value in ('М','ТЕст'):
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':value}).json()
+    assert 'М' not in body['technical_specification']['data'].values()
+    assert 'ТЕст' not in body['technical_specification']['data'].values()
+
+
+def test_loop_detector_never_repeats_identical_question_three_times():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    questions=[]
+    for text in ('Нужно разработать лендинг','не знаю','не уверен','затрудняюсь'):
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':text}).json(); questions.append(body['messages'][-1]['content'])
+    assert len(set(questions[-3:]))==3

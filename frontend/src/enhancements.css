@@ -10,5 +10,6 @@
 .contextblock dl{display:grid;grid-template-columns:75px 1fr;gap:8px;margin:0;font-size:13px}.contextblock dt{color:var(--muted)}.contextblock dd{margin:0}
 .items>div{padding:10px 0;border-bottom:1px solid var(--line)}.items>div p,.items>div small{display:block;margin:5px 0;color:var(--muted)}
 .exports{flex-wrap:wrap}.exports .secondary{padding:8px 10px}.contract{border:0}
+.quickreplies{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}.quickreplies button{min-height:34px;padding:6px 11px;border:1px solid #b6d9cc;border-radius:9px;background:#fff;color:#216253;font-size:13px;font-weight:700}.quickreplies button:hover{background:var(--soft)}.quickreplies button:focus-visible{outline:3px solid #6bcdb6;outline-offset:2px}
 .modalactions{display:flex;justify-content:flex-end;gap:10px}.danger{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:10px;background:#b42318;color:#fff;padding:10px 15px;font-weight:700}
 @media(max-width:1100px){.quick{grid-template-columns:1fr}}

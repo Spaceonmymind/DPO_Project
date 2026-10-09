@@ -101,14 +101,17 @@ def test_login_cookie_and_rate_limit():
 
 def spreadsheet_bytes() -> bytes:
     workbook = openpyxl.Workbook(); sheet = workbook.active; sheet.title = 'Спецификация'
-    sheet.merge_cells('A1:F1'); sheet['A1'] = 'Предмет закупки'; sheet['A2'] = 'Предмет закупки'; sheet['B2'] = 'Поставка ноутбуков'
-    sheet.append(['Наименование','Количество','Единица измерения','Характеристики','Гарантия','Адрес поставки','Ссылка'])
-    sheet.append(['Ноутбук Альфа',3,'шт.','RAM 16 ГБ; SSD 512 ГБ','24 месяца','Москва','Карточка товара'])
-    sheet['G4'].hyperlink = 'https://example.test/notebook-a'
-    sheet.append(['Ноутбук Бета',2,'шт.','RAM 32 ГБ; SSD 1 ТБ','36 месяцев','Москва',''])
+    sheet['B1'] = 'Спецификация'
+    for column,value in enumerate(['Наименование','Характеристики','Кол-во','Стоимость (руб., c учетом НДС)','Срок поставки (рабочих дней)','Гарантия','Ссылки на ресурс, при наличии','Адрес поставки'],2): sheet.cell(2,column,value)
+    first=['Ноутбук Альфа','RAM 16 ГБ; SSD 512 ГБ',3,300000,20,'24 месяца','https://example.test/notebook-a\nhttps://example.test/notebook-b','Москва']
+    second=['Ноутбук Бета','RAM 32 ГБ; SSD 1 ТБ',2,250000,20,'36 месяцев','','Москва']
+    for row_index,values in enumerate((first,second),3):
+        sheet.cell(row_index,1,row_index-2)
+        for column,value in enumerate(values,2): sheet.cell(row_index,column,value)
+    sheet['H3'].hyperlink = 'https://example.test/notebook-a'
+    sheet['C5']='Блокирующие требования:\n- Не допускается восстановленное оборудование\n- Без замены на аналоги'
     requirements = workbook.create_sheet('Требования')
     requirements.append(['Общие требования','Только поставка, без установки'])
-    requirements.append(['Блокирующее требование','Не допускается восстановленное оборудование'])
     requirements.append(['Срок поставки','20 рабочих дней'])
     buffer = io.BytesIO(); workbook.save(buffer); return buffer.getvalue()
 
@@ -141,7 +144,7 @@ def test_spreadsheet_parser_xlsx_and_xls():
         parsed=SpreadsheetSpecificationParser().parse(xlsx,'.xlsx')
         assert len(parsed['items'])==2 and parsed['items'][0]['quantity']==3
         assert '16 ГБ' in parsed['items'][0]['characteristics']
-        assert parsed['items'][0]['references']=='https://example.test/notebook-a'
+        assert len(parsed['items'][0]['references'].splitlines())==2
         assert any('восстановленное' in item for item in parsed['blocking_requirements'])
         assert parsed['delivery_terms']=='20 рабочих дней'
         book=xlwt.Workbook(); sheet=book.add_sheet('Спецификация')
@@ -171,9 +174,9 @@ def test_consistent_docx_pdf_xlsx_exports():
     for fmt in ('docx','pdf','xlsx'):
         response=client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format={fmt}')
         assert response.status_code==200 and len(response.content)>500
-        if fmt=='docx': assert 'Поставка ноутбуков' in '\n'.join(p.text for p in Document(io.BytesIO(response.content)).paragraphs)
-        if fmt=='pdf': assert 'Поставка ноутбуков' in ''.join(page.get_text() for page in fitz.open(stream=response.content,filetype='pdf'))
-        if fmt=='xlsx': assert openpyxl.load_workbook(io.BytesIO(response.content)).active['B3'].value=='Поставка ноутбуков'
+        if fmt=='docx': assert 'Ноутбук Альфа' in '\n'.join(p.text for p in Document(io.BytesIO(response.content)).paragraphs)
+        if fmt=='pdf': assert 'Ноутбук Альфа' in ''.join(page.get_text() for page in fitz.open(stream=response.content,filetype='pdf'))
+        if fmt=='xlsx': assert 'Ноутбук' in openpyxl.load_workbook(io.BytesIO(response.content)).active['B3'].value
 
 
 def test_search_delete_and_ownership():

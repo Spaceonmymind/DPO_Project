@@ -68,6 +68,10 @@ class SpreadsheetSpecificationParser:
         if header_index is not None:
             for row_index,row in enumerate(rows[header_index+1:],header_index+2):
                 item={field:(row[column]['link'] or row[column]['value']) if column<len(row) else '' for field,column in mapping.items()}
+                if 'references' in mapping and mapping['references'] < len(row):
+                    reference_cell=row[mapping['references']]
+                    urls=re.findall(r'https?://\S+',reference_cell['value'])
+                    item['references']='\n'.join(urls) if urls else (reference_cell['link'] or reference_cell['value'])
                 if not item.get('name') or item['name'].lower().startswith(('итого','всего')): continue
                 item['source_sheet']=sheet_name; item['source_row']=row_index
                 for number_field in ('quantity','unit_price','total_price'):
@@ -82,6 +86,13 @@ class SpreadsheetSpecificationParser:
             line=' '.join(cell['value'] for cell in nonempty)
             low=line.lower()
             is_section_heading=low.strip(' :') in {'общие требования','блокирующие требования','дополнительные условия'}
+            section_block=next(((heading,target) for heading,target in section_targets.items() if low.strip().startswith(heading+':')),None)
+            if section_block:
+                heading,target=section_block
+                body=re.sub(r'^'+re.escape(heading)+r'\s*:\s*','',line,flags=re.I)
+                result[target].extend(part.lstrip('•- ').strip() for part in re.split(r'\n\s*[•-]\s*',body) if part.strip())
+                current_section=None
+                continue
             if is_section_heading:
                 current_section=section_targets[low.strip(' :')]
                 continue
@@ -92,9 +103,11 @@ class SpreadsheetSpecificationParser:
                 elif 'срок поставки' in key or 'срок выполнения' in key: result['delivery_terms']=value; result['deadline']=value
                 elif 'адрес поставки' in key: result['delivery_address']=value
             if current_section and line.lstrip().startswith(('•','-')):
-                result[current_section].append(line.lstrip('•- ').strip())
+                result[current_section].extend(part.strip() for part in re.split(r'\n\s*[•-]\s*',line.lstrip('•- ')) if part.strip())
             else:
-                if any(word in low for word in ('блокирующ','не допускается','обязательно отсутствие')): result['blocking_requirements'].append(line)
+                if any(word in low for word in ('блокирующ','не допускается','обязательно отсутствие')):
+                    parts=[part.lstrip('•- ').strip() for part in re.split(r'(?:блокирующие требования\s*:\s*)|(?:\n\s*[•-]\s*)',line,flags=re.I) if part.strip()]
+                    result['blocking_requirements'].extend(parts)
                 elif any(word in low for word in ('обязательн','общие требования')) and line not in result['common_requirements']: result['common_requirements'].append(line)
                 elif any(word in low for word in ('дополнительные условия','примечание')) and line not in result['additional_conditions']: result['additional_conditions'].append(line)
 
@@ -143,24 +156,28 @@ def generate_spec(data,path):
 
 
 def generate_xlsx(data,path):
-    workbook=openpyxl.Workbook(); ws=workbook.active; ws.title='Техническое задание'; ws.sheet_view.showGridLines=False
-    ws.merge_cells('A1:F1'); ws['A1']='ТЕХНИЧЕСКОЕ ЗАДАНИЕ'; ws['A1'].font=Font(size=16,bold=True,color='FFFFFF'); ws['A1'].fill=PatternFill('solid',fgColor='008B76'); ws['A1'].alignment=Alignment(horizontal='center')
-    row=3
-    for label,value in normalized_sections(data): ws.cell(row,1,label).font=Font(bold=True); ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=6); ws.cell(row,2,str(value)).alignment=Alignment(wrap_text=True); row+=1
-    row+=1; headers=['№','Наименование','Описание','Количество','Ед. изм.','Цена за единицу','Стоимость','Характеристики','Срок поставки','Гарантия','Адрес поставки','Ссылка','Примечание']
-    for column,value in enumerate(headers,1): cell=ws.cell(row,column,value); cell.font=Font(bold=True,color='FFFFFF'); cell.fill=PatternFill('solid',fgColor='008B76'); cell.alignment=Alignment(wrap_text=True)
+    workbook=openpyxl.Workbook(); ws=workbook.active; ws.title='Лист1'
+    thin=openpyxl.styles.Side(style='thin',color='000000'); bordered=openpyxl.styles.Border(left=thin,right=thin,top=thin,bottom=thin)
+    ws['B1']='Спецификация'; ws['B1'].font=Font(name='Calibri',size=11,bold=True); ws['B1'].alignment=Alignment(horizontal='left',vertical='top',wrap_text=True); ws['B1'].border=bordered
+    row=2; headers=['Наименование','Характеристики','Кол-во','Стоимость (долларов США/руб., c учетом НДС)','Срок поставки (рабочих дней)','Гарантия','Ссылки на ресурс, при наличии ','Адрес поставки']
+    for column,value in enumerate(headers,2):
+        cell=ws.cell(row,column,value); cell.font=Font(name='Calibri',size=12,bold=True); cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True); cell.border=bordered
     for index,item in enumerate(data.get('items',[]),1):
-        row+=1; values=[index,item.get('name',''),item.get('description',''),item.get('quantity',''),item.get('unit',''),item.get('unit_price',''),item.get('total_price',''),item.get('characteristics',''),item.get('delivery_term',''),item.get('warranty',''),item.get('delivery_address',''),item.get('references',''),item.get('notes','')]
-        for column,value in enumerate(values,1): ws.cell(row,column,value).alignment=Alignment(vertical='top',wrap_text=True)
-        for column in (4,6,7): ws.cell(row,column).number_format='#,##0.00'
-        if item.get('references'): ws.cell(row,12).hyperlink=str(item['references']); ws.cell(row,12).style='Hyperlink'
-    for key,label in [('common_requirements','Общие требования'),('blocking_requirements','Блокирующие требования'),('additional_conditions','Дополнительные условия')]:
+        row+=1
+        description='\n'.join(value for value in (item.get('description',''),item.get('characteristics',''),item.get('notes','')) if value)
+        values=[index,item.get('name',''),description,item.get('quantity',''),item.get('total_price',''),item.get('delivery_term') or data.get('delivery_terms',''),item.get('warranty',''),item.get('references',''),item.get('delivery_address','')]
+        for column,value in enumerate(values,1):
+            cell=ws.cell(row,column,value); cell.font=Font(name='Calibri',size=12); cell.alignment=Alignment(horizontal='left',vertical='top',wrap_text=True); cell.border=bordered
+        ws.cell(row,4).number_format='#,##0'; ws.cell(row,5).number_format='#,##0.00'
+        references=str(item.get('references','')).splitlines()
+        if len(references)==1 and references[0].startswith(('http://','https://')): ws.cell(row,8).hyperlink=references[0]; ws.cell(row,8).style='Hyperlink'
+    for label,key in [('Общие требования','common_requirements'),('Блокирующие требования','blocking_requirements'),('Дополнительные условия','additional_conditions')]:
         if data.get(key):
-            row+=2; ws.cell(row,1,label).font=Font(bold=True,color='008B76')
-            for value in data[key]: row+=1; ws.merge_cells(start_row=row,start_column=1,end_row=row,end_column=13); ws.cell(row,1,'• '+str(value)).alignment=Alignment(wrap_text=True)
-    widths=[7,30,28,12,12,16,16,45,18,18,28,32,28]
-    for column,width in enumerate(widths,1): ws.column_dimensions[openpyxl.utils.get_column_letter(column)].width=width
-    ws.freeze_panes='A4'; workbook.save(path)
+            row+=1; cell=ws.cell(row,3,label+':\n'+'\n'.join('- '+str(value) for value in data[key])); cell.font=Font(name='Calibri',size=12); cell.alignment=Alignment(horizontal='left',vertical='top',wrap_text=True)
+    widths={'A':9.14,'B':34.28,'C':114.71,'D':7.85,'E':20.71,'F':11.42,'G':32.42,'H':83.28,'I':16.28}
+    for column,width in widths.items(): ws.column_dimensions[column].width=width
+    ws.row_dimensions[2].height=80.25; ws.page_setup.orientation='portrait'; ws.page_margins.left=.7; ws.page_margins.right=.7
+    workbook.save(path)
 
 
 def generate_pdf(data,path):

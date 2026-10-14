@@ -194,7 +194,7 @@ def test_consistent_docx_pdf_xlsx_exports():
         assert response.status_code==200 and len(response.content)>500
         if fmt=='docx': assert 'Ноутбук Альфа' in '\n'.join(p.text for p in Document(io.BytesIO(response.content)).paragraphs)
         if fmt=='pdf': assert 'Ноутбук Альфа' in ''.join(page.get_text() for page in fitz.open(stream=response.content,filetype='pdf'))
-        if fmt=='xlsx': assert 'Ноутбук' in openpyxl.load_workbook(io.BytesIO(response.content)).active['B3'].value
+        if fmt=='xlsx': assert 'Ноутбук' in openpyxl.load_workbook(io.BytesIO(response.content)).active['B11'].value
 
 
 def test_search_delete_and_ownership():
@@ -237,6 +237,16 @@ def test_rules_fallbacks_are_deterministic():
     assert select_contract(db,{**base,'category':'software_license','licensing_required':True}).status=='NO_MATCH'
     assert select_contract(db,{**base,'exceptions':['Нестандартные условия']}).status=='LEGAL_REVIEW_REQUIRED'
     db.close()
+
+
+def test_training_dialogue_persists_facts_and_selects_physical_template():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'TRAINING_CONTRACT'}).json()['id']
+    first=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужны платные тренировки, лично, без третьих лиц.'}).json()
+    assert first['state']=='TRAINING_APPLICABILITY' and first['procurement_context']['training_facts']['subject']['type']=='TRAINING_SERVICE'
+    second=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Обычное физлицо без ИП, гражданин РФ, совершеннолетний.'}).json()
+    assert second['state']=='TRAINING_TEMPLATE_SELECTED' and second['recommendation']['template_code']=='PHYSICAL_PERSON'
+    assert second['procurement_context']['training_decision']['matched_rule_id']=='D020'
 
 
 def test_mixed_contract_flow_returns_clarification():

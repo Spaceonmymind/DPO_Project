@@ -158,9 +158,12 @@ def generate_spec(data,path):
 def generate_xlsx(data,path):
     workbook=openpyxl.Workbook(); ws=workbook.active; ws.title='Лист1'
     thin=openpyxl.styles.Side(style='thin',color='000000'); bordered=openpyxl.styles.Border(left=thin,right=thin,top=thin,bottom=thin)
-    ws['B1']='Спецификация'; ws['B1'].font=Font(name='Calibri',size=11,bold=True); ws['B1'].alignment=Alignment(horizontal='left',vertical='top',wrap_text=True); ws['B1'].border=bordered
-    row=2; headers=['Наименование','Характеристики','Кол-во','Стоимость (долларов США/руб., c учетом НДС)','Срок поставки (рабочих дней)','Гарантия','Ссылки на ресурс, при наличии ','Адрес поставки']
-    for column,value in enumerate(headers,2):
+    ws['A1']='ТЕХНИЧЕСКОЕ ЗАДАНИЕ'; ws['A1'].font=Font(name='Calibri',size=14,bold=True)
+    summary=[('Предмет закупки',data.get('subject','')),('Цель закупки',data.get('purpose','')),('Объём работ / поставки',data.get('scope','')),('Срок выполнения',data.get('deadline') or data.get('delivery_terms','')),('Критерии приёмки',data.get('acceptance_criteria',''))]
+    for row_index,(label,value) in enumerate(summary,3):
+        ws.cell(row_index,1,label).font=Font(name='Calibri',size=11,bold=True); ws.cell(row_index,2,str(value or '')).alignment=Alignment(wrap_text=True,vertical='top')
+    row=10; headers=['№','Наименование','Характеристики','Кол-во','Стоимость (долларов США/руб., c учетом НДС)','Срок поставки (рабочих дней)','Гарантия','Ссылки на ресурс, при наличии','Адрес поставки']
+    for column,value in enumerate(headers,1):
         cell=ws.cell(row,column,value); cell.font=Font(name='Calibri',size=12,bold=True); cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True); cell.border=bordered
     for index,item in enumerate(data.get('items',[]),1):
         row+=1
@@ -173,10 +176,10 @@ def generate_xlsx(data,path):
         if len(references)==1 and references[0].startswith(('http://','https://')): ws.cell(row,8).hyperlink=references[0]; ws.cell(row,8).style='Hyperlink'
     for label,key in [('Общие требования','common_requirements'),('Блокирующие требования','blocking_requirements'),('Дополнительные условия','additional_conditions')]:
         if data.get(key):
-            row+=1; cell=ws.cell(row,3,label+':\n'+'\n'.join('- '+str(value) for value in data[key])); cell.font=Font(name='Calibri',size=12); cell.alignment=Alignment(horizontal='left',vertical='top',wrap_text=True)
+            row+=1; cell=ws.cell(row,2,label+':\n'+'\n'.join('- '+str(value) for value in data[key])); cell.font=Font(name='Calibri',size=12); cell.alignment=Alignment(horizontal='left',vertical='top',wrap_text=True)
     widths={'A':9.14,'B':34.28,'C':114.71,'D':7.85,'E':20.71,'F':11.42,'G':32.42,'H':83.28,'I':16.28}
     for column,width in widths.items(): ws.column_dimensions[column].width=width
-    ws.row_dimensions[2].height=80.25; ws.page_setup.orientation='portrait'; ws.page_margins.left=.7; ws.page_margins.right=.7
+    ws.row_dimensions[10].height=80.25; ws.freeze_panes='A11'; ws.auto_filter.ref=f'A10:I{max(row,10)}'; ws.page_setup.orientation='landscape'; ws.page_margins.left=.7; ws.page_margins.right=.7
     workbook.save(path)
 
 

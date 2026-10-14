@@ -17,6 +17,7 @@ from app.ai.errors import LLMError
 from app.documents.service import extract,render_specification,SpreadsheetSpecificationParser
 from app.contracts import select_contract
 from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
+from app.training_contracts import audit_payload, decide_training, empty_facts, extract_training_facts, merge_facts, next_question, render_training_contract, TrainingDecision
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
@@ -107,7 +108,7 @@ def logout(req:Request,response:Response,u=Depends(current),d:DBS=Depends(db)):
 def usersme(u=Depends(current)): return userout(u)
 @app.post('/api/v1/cases')
 def create(x:CreateCase,u=Depends(current),d:DBS=Depends(db)):
- allowed={'GET_CONTRACT','CREATE_SPECIFICATION','ANALYZE_SPECIFICATION','CREATE_SPEC_AND_GET_CONTRACT','GENERAL_PROCUREMENT_DIALOGUE'}
+ allowed={'GET_CONTRACT','CREATE_SPECIFICATION','ANALYZE_SPECIFICATION','CREATE_SPEC_AND_GET_CONTRACT','GENERAL_PROCUREMENT_DIALOGUE','TRAINING_CONTRACT'}
  intent=x.initial_intent.upper() if x.initial_intent.upper() in allowed else 'GENERAL_PROCUREMENT_DIALOGUE'
  c=Case(user_id=u.id,title=x.title,context={'intent':intent}); d.add(c); d.flush(); d.add(ProcurementContextRecord(case_id=c.id,intent=intent,data={'intent':intent,'is_procurement':True,'missing_fields':[]})); audit(d,u.id,c.id,'CASE_CREATED',{'initial_intent':intent}); d.commit(); return caseout(c)
 @app.get('/api/v1/cases')
@@ -158,6 +159,24 @@ def apply_contract_decision(c,context,d):
  if decision.status=='MATCHED': c.state='COMPLETED'
  elif decision.status in {'NO_MATCH','LEGAL_REVIEW_REQUIRED'}: c.state='ESCALATED_TO_DPO'
  return decision
+def save_training_recommendation(c,decision,d):
+ stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
+ if not stored: stored=ContractRecommendation(case_id=c.id,status=decision.render_status,reason=decision.reason); d.add(stored)
+ stored.status=decision.render_status; stored.reason=decision.reason; stored.template_id=None
+ stored.template_code=decision.template if decision.template!='NONE' else ''; stored.template_title={'PHYSICAL_PERSON':'Договор с физическим лицом','INDIVIDUAL_ENTREPRENEUR':'Договор с ИП'}.get(decision.template,'')
+ stored.rules_triggered=[decision.matched_rule_id,decision.reason_code]
+ c.state={'BLOCKED':'TRAINING_BLOCKED','NEEDS_INPUT':'TRAINING_TEMPLATE_SELECTED' if decision.template!='NONE' else 'TRAINING_APPLICABILITY','READY':'TRAINING_READY'}[decision.render_status]
+ return stored
+def training_message(c,text,u,d):
+ context=dict(contextout(c,d)); facts=merge_facts(context.get('training_facts') or empty_facts(),extract_training_facts(text,context.get('training_facts')))
+ decision=decide_training(facts); payload=audit_payload(decision)
+ context.update(intent='TRAINING_CONTRACT',category='training_contract',subject='Договор на проведение тренировок',training_facts=facts,training_decision=payload,red_fields=decision.red_fields,missing_fields=decision.missing_field_ids,suggested_options=[])
+ save_context(c,context,d); save_training_recommendation(c,decision,d)
+ if c.title=='Новое обращение': c.title='Договор на проведение тренировок'
+ answer=decision.reason if decision.render_status=='BLOCKED' else (f'{decision.reason} {next_question(decision,facts)}' if decision.render_status=='NEEDS_INPUT' else 'Все обязательные данные заполнены. Документ готов к формированию.')
+ d.add(Message(case_id=c.id,role='assistant',content=answer)); audit(d,u.id,c.id,'TRAINING_DECISION',payload); d.commit()
+ log.info('training_decision case_id=%s applicability=%s template=%s matched_rule_id=%s reason_code=%s render_status=%s missing_field_ids=%s',c.id,decision.applicability,decision.template,decision.matched_rule_id,decision.reason_code,decision.render_status,decision.missing_field_ids)
+ return detail(c,d)
 def contract_clarification(context,decision):
  fields=decision.missing_fields; previous=context.get('last_clarification_fields',[]); repeats=context.get('clarification_repeat_count',0)+1 if fields==previous else 0
  question=decision.reason
@@ -178,6 +197,7 @@ def finalize_specification(c,s,u,d):
 async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); state_before=c.state; user_message=Message(case_id=cid,role='user',content=x.content); d.add(user_message); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
  s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
+ if (p.intent if p else (c.context or {}).get('intent'))=='TRAINING_CONTRACT': return training_message(c,x.content,u,d)
  if s and s.status!='CONFIRMED' and is_confirmation(x.content):
   missing_before=(p.data if p else {}).get('missing_fields',[]); decision=finalize_specification(c,s,u,d)
   answer=f'Техническое задание подтверждено. Подходящий шаблон: {decision.template.name}.' if decision.status=='MATCHED' else (decision.reason if decision.status=='AMBIGUOUS' else 'Техническое задание подтверждено. Для выбора договора требуется участие специалиста ДПО.')
@@ -241,6 +261,15 @@ def downloadspec(cid:str,format:str='docx',u=Depends(current),d:DBS=Depends(db))
 @app.get('/api/v1/cases/{cid}/contract-template')
 def downloadtemplate(cid:str,u=Depends(current),d:DBS=Depends(db)):
  own(cid,u,d); recommendation=d.query(ContractRecommendation).filter_by(case_id=cid,status='MATCHED').first()
+ training_context=contextout(d.get(Case,cid),d); training=training_context.get('training_decision')
+ if training:
+  if training.get('render_status')!='READY' or training.get('template')=='NONE': raise HTTPException(409,detail='Документ ещё не готов к формированию')
+  decision=TrainingDecision(training['applicability'],training['template'],training['matched_rule_id'],training['reason_code'],training_context.get('training_decision_reason',''),training['render_status'],training.get('missing_field_ids',[]),training_context.get('red_fields',[]))
+  path=Path(settings.storage)/'generated'/f'{cid}-training.docx'
+  try: render_training_contract(Path(settings.contract_templates_path),training_context['training_facts'],decision,path)
+  except (ValueError,FileNotFoundError) as exc: log.error('training_render_failed case_id=%s error=%s',cid,exc); raise HTTPException(409,detail='Не удалось сформировать договор: проверьте обязательные поля и mapping шаблона')
+  audit(d,u.id,cid,'TRAINING_DOCUMENT_RENDERED',audit_payload(decision)); d.commit()
+  return FileResponse(path,filename=('Договор_с_физическим_лицом.docx' if decision.template=='PHYSICAL_PERSON' else 'Договор_с_ИП.docx'),media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
  if not recommendation or not recommendation.template_id: raise HTTPException(404,detail='Для обращения нет выбранного шаблона')
  template=d.get(ContractTemplate,recommendation.template_id)
  if not template or not template.active: raise HTTPException(404,detail='Шаблон недоступен')

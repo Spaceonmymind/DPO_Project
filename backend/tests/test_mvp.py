@@ -241,12 +241,40 @@ def test_rules_fallbacks_are_deterministic():
 
 def test_training_dialogue_persists_facts_and_selects_physical_template():
     client=TestClient(app); headers=auth(client)
-    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'TRAINING_CONTRACT'}).json()['id']
-    first=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужны платные тренировки, лично, без третьих лиц.'}).json()
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    first=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужен тренер для проведения платных тренировок, лично, без третьих лиц.'}).json()
     assert first['state']=='TRAINING_APPLICABILITY' and first['procurement_context']['training_facts']['subject']['type']=='TRAINING_SERVICE'
+    assert first['procurement_context']['contract_domain']=='training'
     second=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Обычное физлицо без ИП, гражданин РФ, совершеннолетний.'}).json()
     assert second['state']=='TRAINING_TEMPLATE_SELECTED' and second['recommendation']['template_code']=='PHYSICAL_PERSON'
     assert second['procurement_context']['training_decision']['matched_rule_id']=='D020'
+
+
+def test_contract_router_keeps_supply_and_services_in_generic_engine():
+    client=TestClient(app); headers=auth(client)
+    supply_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    supply=client.post(f'/api/v1/cases/{supply_id}/messages',headers=headers,json={'content':'Нужно купить ноутбуки, только поставка без установки.'}).json()
+    assert supply['recommendation']['template_code']=='SUPPLY' and supply['procurement_context'].get('contract_domain')!='training'
+    service_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    service=client.post(f'/api/v1/cases/{service_id}/messages',headers=headers,json={'content':'Нужно заказать консультационные услуги.'}).json()
+    assert service['recommendation']['template_code']=='SERVICES' and service['procurement_context'].get('contract_domain')!='training'
+
+
+def test_contract_router_training_ip_npd_and_clarification():
+    client=TestClient(app); headers=auth(client)
+    for phrase,template,status in [
+        ('Нужен тренер. ИП без НПД, лично, без третьих лиц.','INDIVIDUAL_ENTREPRENEUR','NEEDS_INPUT'),
+        ('Нужен тренер. Исполнитель самозанятый плательщик НПД.','', 'BLOCKED'),
+    ]:
+        case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':phrase}).json()
+        assert body['procurement_context']['contract_domain']=='training'
+        assert body['recommendation']['template_code']==template and body['recommendation']['status']==status
+    unclear_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    unclear=client.post(f'/api/v1/cases/{unclear_id}/messages',headers=headers,json={'content':'Нужно организовать занятия сотрудникам.'}).json()
+    assert unclear['procurement_context']['pending_contract_domain']=='training'
+    confirmed=client.post(f'/api/v1/cases/{unclear_id}/messages',headers=headers,json={'content':'Да'}).json()
+    assert confirmed['procurement_context']['contract_domain']=='training'
 
 
 def test_mixed_contract_flow_returns_clarification():

@@ -31,6 +31,7 @@ def complete_facts(status='PHYSICAL_NO_IP_NO_NPD'):
 
 def test_decision_priority_and_readiness():
     assert extract_training_facts('Обычное физлицо без ИП')['contractor']['status']=='PHYSICAL_NO_IP_NO_NPD'
+    assert extract_training_facts('Физлицо, не ИП и не самозанятый')['contractor']['status']=='PHYSICAL_NO_IP_NO_NPD'
     scenarios=[
         ('LEGAL_ENTITY','D004'),('NPD_PHYSICAL','D005'),('IP_NPD','D005'),('FOREIGN_PHYSICAL','D006'),('MINOR','D007'),
     ]

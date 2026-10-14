@@ -16,6 +16,7 @@ from app.ai.config import get_llm_settings
 from app.ai.errors import LLMError
 from app.documents.service import extract,render_specification,SpreadsheetSpecificationParser
 from app.contracts import select_contract
+from app.contract_router import contract_router
 from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
 from app.training_contracts import audit_payload, decide_training, empty_facts, extract_training_facts, merge_facts, next_question, render_training_contract, TrainingDecision
 from app.security import csrf_token, session_token, verify_password
@@ -169,11 +170,12 @@ def save_training_recommendation(c,decision,d):
  return stored
 def training_message(c,text,u,d):
  context=dict(contextout(c,d)); facts=merge_facts(context.get('training_facts') or empty_facts(),extract_training_facts(text,context.get('training_facts')))
+ facts['subject']['type']='TRAINING_SERVICE'
  decision=decide_training(facts); payload=audit_payload(decision)
- context.update(intent='TRAINING_CONTRACT',category='training_contract',subject='Договор на проведение тренировок',training_facts=facts,training_decision=payload,red_fields=decision.red_fields,missing_fields=decision.missing_field_ids,suggested_options=[])
+ context.update(intent='GET_CONTRACT',contract_domain='training',pending_contract_domain=None,category='training_contract',subject='Договор на проведение тренировок',training_facts=facts,training_decision=payload,red_fields=decision.red_fields,missing_fields=decision.missing_field_ids,suggested_options=[])
  save_context(c,context,d); save_training_recommendation(c,decision,d)
  if c.title=='Новое обращение': c.title='Договор на проведение тренировок'
- answer=decision.reason if decision.render_status=='BLOCKED' else (f'{decision.reason} {next_question(decision,facts)}' if decision.render_status=='NEEDS_INPUT' else 'Все обязательные данные заполнены. Документ готов к формированию.')
+ answer=decision.reason if decision.render_status=='BLOCKED' or (decision.render_status=='NEEDS_INPUT' and decision.template=='NONE') else (f'{decision.reason} {next_question(decision,facts)}' if decision.render_status=='NEEDS_INPUT' else 'Все обязательные данные заполнены. Документ готов к формированию.')
  d.add(Message(case_id=c.id,role='assistant',content=answer)); audit(d,u.id,c.id,'TRAINING_DECISION',payload); d.commit()
  log.info('training_decision case_id=%s applicability=%s template=%s matched_rule_id=%s reason_code=%s render_status=%s missing_field_ids=%s',c.id,decision.applicability,decision.template,decision.matched_rule_id,decision.reason_code,decision.render_status,decision.missing_field_ids)
  return detail(c,d)
@@ -197,7 +199,16 @@ def finalize_specification(c,s,u,d):
 async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); state_before=c.state; user_message=Message(case_id=cid,role='user',content=x.content); d.add(user_message); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
  s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
- if (p.intent if p else (c.context or {}).get('intent'))=='TRAINING_CONTRACT': return training_message(c,x.content,u,d)
+ context=contextout(c,d); intent=p.intent if p else (c.context or {}).get('intent')
+ if intent in {'GET_CONTRACT','TRAINING_CONTRACT'}:
+  route=contract_router.route(x.content,context)
+  if route.domain=='training': return training_message(c,x.content,u,d)
+  if route.needs_clarification:
+   updated=dict(context); updated.update(intent='GET_CONTRACT',pending_contract_domain='training',missing_fields=['contract_domain'],suggested_options=['Да','Нет'])
+   save_context(c,updated,d); c.state='COLLECTING_CONTRACT_DATA'; answer='Правильно понимаю, что предмет договора — оказание услуг по проведению тренировок?'
+   d.add(Message(case_id=cid,role='assistant',content=answer)); audit(d,u.id,cid,'CONTRACT_DOMAIN_CLARIFICATION',{'candidate_domain':'training'}); d.commit(); return detail(c,d)
+  if context.get('pending_contract_domain'):
+   updated=dict(context); updated.update(pending_contract_domain=None,contract_domain='generic',missing_fields=[],suggested_options=[]); save_context(c,updated,d)
  if s and s.status!='CONFIRMED' and is_confirmation(x.content):
   missing_before=(p.data if p else {}).get('missing_fields',[]); decision=finalize_specification(c,s,u,d)
   answer=f'Техническое задание подтверждено. Подходящий шаблон: {decision.template.name}.' if decision.status=='MATCHED' else (decision.reason if decision.status=='AMBIGUOUS' else 'Техническое задание подтверждено. Для выбора договора требуется участие специалиста ДПО.')

@@ -2,6 +2,7 @@ import io
 import os
 import tempfile
 import hashlib
+import shutil
 from urllib.parse import quote
 from pathlib import Path
 from docx import Document
@@ -15,6 +16,8 @@ os.environ['CONTRACT_TEMPLATE_ALLOW_DYNAMIC_CHECKSUMS'] = 'true'
 for filename in ('Договор_подряда.docx','договор возмездного оказания услуг (образец).docx','Shablon-agentskogo-dogovora.docx'):
     fixture=Document(); fixture.add_paragraph(filename); fixture.save(template_directory/filename)
 (template_directory/'договор поставки.rtf').write_bytes(b'{\\rtf1\\ansi approved supply fixture}')
+training_fixture_root=Path('/app/contract_templates/training') if Path('/app/contract_templates/training').is_dir() else Path(__file__).resolve().parents[2]/'contract_templates'/'training'
+shutil.copytree(training_fixture_root,template_directory/'training')
 
 from fastapi.testclient import TestClient
 import fitz
@@ -304,6 +307,60 @@ def test_training_composite_no_requests_disambiguation_without_inference():
     assert body['procurement_context']['training_facts']['performance']=={'personal':None,'third_parties':None}
     assert body['procurement_context']['pending_clarification']['question_id']=='TRAINING_PERFORMANCE_DISAMBIGUATION'
     assert 'Уточните' in body['messages'][-1]['content']
+
+
+def run_training_dialogue(client,headers,initial,vat='NO_VAT'):
+    answers={
+      'service.name':'Проведение тренировок по плаванию','term.start':'2026-11-01','term.end':'2027-01-31',
+      'price.total':'120 000 рублей','tax.ndfl_rate':'13%','tax.ndfl_amount':'15 600 рублей',
+      'tax.vat_status':'Без НДС' if vat=='NO_VAT' else 'С НДС','tax.no_vat_basis':'Применение УСН',
+      'tax.vat_rate':'20%','tax.vat_amount':'20 000 рублей','payment.model':'Постоплата',
+      'payment.postpay_percent':'100%','payment.postpay_days':'10 дней','places.multiple_or_not_in_contract':'Нет',
+      'schedule.months':'2026-11','schedule.entries':'2026-11-10, вторник, 10:00, 1, 120000, Москва',
+      'extra_option.enabled':'Нет','physical.passport':'45 01 123456, выдан 01.01.2020',
+      'physical.snils':'123-456-789 00','ip.ogrnip':'123456789012345','ip.long_term_resources_clause':'Нет',
+    }
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':initial}).json()
+    seen=[]; turns=1
+    while body['state']!='TRAINING_READY':
+        assert body['state']!='TRAINING_BLOCKED',body['messages'][-1]['content']
+        pending=body['procurement_context']['pending_clarification']; question_id=pending['question_id']
+        assert question_id not in seen,(question_id,body['messages'][-1]['content'])
+        seen.append(question_id)
+        path=pending['target_paths'][0]
+        assert path in answers,(path,pending)
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answers[path]}).json(); turns+=1
+        assert turns<30
+    assert body['procurement_context']['training_decision']['render_status']=='READY'
+    assert not body['procurement_context']['missing_fields']
+    download=client.get(f'/api/v1/cases/{case_id}/contract-template')
+    assert download.status_code==200 and download.content[:2]==b'PK'
+    return body,turns
+
+
+def test_sequential_full_physical_flow_reaches_ready_and_generates_docx():
+    client=TestClient(app); headers=auth(client)
+    body,turns=run_training_dialogue(client,headers,'Нужен тренер, обычное физлицо без ИП и НПД, гражданин РФ, совершеннолетний, проводит лично без привлечения других лиц')
+    assert body['recommendation']['template_code']=='PHYSICAL_PERSON' and turns==15
+
+
+def test_sequential_full_ip_no_vat_and_vat_flows_reach_ready():
+    client=TestClient(app); headers=auth(client)
+    base='Нужен тренер ИП без НПД, проводит лично без привлечения других лиц'
+    no_vat,no_vat_turns=run_training_dialogue(client,headers,base,'NO_VAT')
+    vat,vat_turns=run_training_dialogue(client,headers,base,'VAT_PAYER')
+    assert no_vat['recommendation']['template_code']=='INDIVIDUAL_ENTREPRENEUR' and no_vat_turns==14
+    assert vat['recommendation']['template_code']=='INDIVIDUAL_ENTREPRENEUR' and vat_turns==15
+
+
+def test_training_negative_flows_stop_before_red_fields():
+    client=TestClient(app); headers=auth(client)
+    for phrase in ('Нужен тренер самозанятый НПД','Нужен тренер юридическое лицо ООО Ромашка','Нужен иностранный тренер','Нужен несовершеннолетний тренер','Нужен тренер, будут ещё другие тренеры','Нужен тренер в штат на оклад'):
+        case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':phrase}).json()
+        assert body['state']=='TRAINING_BLOCKED',phrase
+        assert body['procurement_context']['pending_clarification'] is None
 
 
 def test_mixed_contract_flow_returns_clarification():

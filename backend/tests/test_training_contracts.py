@@ -3,10 +3,11 @@ from copy import deepcopy
 from pathlib import Path
 
 import openpyxl
+import pytest
 from docx import Document
 
 from app.documents.service import generate_xlsx
-from app.training_contracts import clarification_for, decide_training, empty_facts, extract_training_facts, load_occurrences, merge_facts, render_training_contract, resolve_contextual_answer
+from app.training_contracts import RED_FIELD_REGISTRY, apply_training_defaults, clarification_for, decide_training, empty_facts, extract_training_facts, load_occurrences, merge_facts, parse_pending_red_answer, red_field_values, render_training_contract, resolve_contextual_answer
 
 
 _repository_templates=Path('/app/contract_templates') if Path('/app/contract_templates/training').is_dir() else Path(__file__).resolve().parents[2]/'contract_templates'
@@ -82,6 +83,61 @@ def test_repeated_composite_clarification_rephrases_then_splits():
     assert second['question']!=first['question'] and second['repeat_count']==1
     assert third['question_id']=='TRAINING_PERFORMANCE_THIRD_PARTIES'
     assert third['target_fields']==['performance.third_parties']
+
+
+def test_all_25_red_fields_are_registered_and_have_explicit_states():
+    assert list(RED_FIELD_REGISTRY)==[f'RF{i:03d}' for i in range(1,26)]
+    for template in ('PHYSICAL_PERSON','INDIVIDUAL_ENTREPRENEUR'):
+        facts=apply_training_defaults(empty_facts(),template)
+        states={item['field_id']:item for item in red_field_values(facts,template)}
+        assert len(states)==25
+        for field_id,definition in RED_FIELD_REGISTRY.items():
+            assert states[field_id]['status'] in {'MISSING','FILLED','NOT_APPLICABLE'}
+            applicable=definition.scope in {'BOTH',template}
+            if not applicable: assert states[field_id]['status']=='NOT_APPLICABLE'
+            if definition.acquisition in {'DERIVED','DEFAULT','NOT_APPLICABLE'}:
+                assert definition.acquisition!='USER_INPUT'
+    defaults={item['field_id']:item for item in red_field_values(apply_training_defaults(empty_facts(),'PHYSICAL_PERSON'),'PHYSICAL_PERSON')}
+    assert defaults['RF001']=={'field_id':'RF001','status':'FILLED','value':'TYPICAL_FORM','source':'DEFAULT'}
+    assert defaults['RF002']['source']=='DEFAULT'
+
+
+@pytest.mark.parametrize('field_id',[f'RF{i:03d}' for i in range(1,26)])
+def test_each_canonical_red_field_has_template_applicability_and_state(field_id):
+    definition=RED_FIELD_REGISTRY[field_id]
+    for template in ('PHYSICAL_PERSON','INDIVIDUAL_ENTREPRENEUR'):
+        states={item['field_id']:item for item in red_field_values(apply_training_defaults(empty_facts(),template),template)}
+        state=states[field_id]
+        assert state['field_id']==field_id and state['status'] in {'MISSING','FILLED','NOT_APPLICABLE'}
+        if definition.scope not in {'BOTH',template}: assert state['status']=='NOT_APPLICABLE'
+        if state['status']=='FILLED': assert state['source'] in {'USER','DERIVED','DEFAULT'}
+        else: assert state['source']=='NONE'
+
+
+def test_universal_red_parser_types_normalize_valid_and_reject_invalid_input():
+    cases=[
+      ('BOOLEAN','Да',True),('BOOLEAN','не требуется',False),('MONEY','100 тыс. руб.',100000.0),
+      ('PERCENT','20 процентов',20.0),('INTEGER','10 дней',10),('DATE','31.10.2026','2026-10-31'),
+      ('LIST','2026-10 и 2026-11',['2026-10','2026-11']),('OGRNIP','123456789012345','123456789012345'),
+      ('STRING','Проведение тренировок по плаванию','Проведение тренировок по плаванию'),
+    ]
+    for parser,text,expected in cases:
+        pending={'phase':'RED_FIELDS','parser_type':parser,'target_paths':['value'],'question':'Укажите значение','answer_mapping':{}}
+        patch,used,error=parse_pending_red_answer(text,pending)
+        assert error is None and patch['value']==expected and used
+    pending={'phase':'RED_FIELDS','parser_type':'PERCENT','target_paths':['value'],'question':'Укажите процент','answer_mapping':{}}
+    assert parse_pending_red_answer('150%',pending)[0]=={} and parse_pending_red_answer('150%',pending)[2]
+
+
+def test_general_extractor_closes_multiple_red_dependencies_in_one_message():
+    patch=extract_training_facts('Исполнитель ИП Иванов Иван Иванович, ОГРНИП 123456789012345, НДС не облагается, стоимость договора 120 000 рублей, оплата после оказания услуг в течение 10 дней.')
+    assert patch['contractor']['status']=='IP_NO_NPD'
+    assert patch['ip']['ogrnip']=='123456789012345'
+    assert patch['tax']['vat_status']=='NO_VAT'
+    assert patch['price']['total']==120000
+    assert patch['payment']['model']=='POSTPAY' and patch['payment']['postpay_days']==10
+    payment=extract_training_facts('30% авансом за 5 дней, остаток 70% после оказания услуг за 10 дней')
+    assert payment['payment']=={'advance_percent':30.0,'advance_days':5,'postpay_percent':70.0,'postpay_days':10,'model':'MIXED'}
 
 
 def test_matrix_and_both_renderers_preserve_sources(tmp_path):

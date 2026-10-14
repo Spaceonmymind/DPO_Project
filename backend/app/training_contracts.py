@@ -6,6 +6,7 @@ import logging
 import re
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -117,32 +118,46 @@ def extract_training_facts(text: str, current: dict | None=None) -> dict:
         if any(word in t for word in words): put('labor.'+field,True)
         elif any(x in t for x in ('без признаков трудовых','гпх, трудовых признаков нет')): put('labor.'+field,False)
     patterns={
-      'price.total':r'(?:стоимость|цена)\s*(?:услуг)?\s*[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
+      'price.total':r'(?:стоимость|цена)\s*(?:(?:договора|услуг)\s*)?[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
       'tax.ndfl_rate':r'ндфл\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'tax.ndfl_amount':r'(?:сумма ндфл|ндфл составляет)\s*[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
       'tax.vat_rate':r'ндс\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'tax.vat_amount':r'(?:сумма ндс|ндс составляет)\s*[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
       'payment.advance_percent':r'аванс\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'payment.advance_days':r'аванс[^.]{0,50}?(\d+)\s*(?:календарн\w*\s*)?дн',
-      'payment.postpay_percent':r'(?:постоплат|остаток)[^\d]{0,15}(\d+(?:[,.]\d+)?)\s*%', 'payment.postpay_days':r'(?:постоплат|окончательн\w* оплат)[^.]{0,50}?(\d+)\s*(?:календарн\w*\s*)?дн',
+      'payment.postpay_percent':r'(?:постоплат|остаток)[^\d]{0,15}(\d+(?:[,.]\d+)?)\s*%', 'payment.postpay_days':r'(?:постоплат|окончательн\w* оплат|оплат\w* после оказания услуг)[^.]{0,70}?(\d+)\s*(?:календарн\w*\s*)?дн',
       'extra_option.limit':r'(?:не более|лимит)\s*(\d+)', 'ip.ogrnip':r'огрнип\D*(\d{15})',
     }
     for path,pattern in patterns.items():
         match=re.search(pattern,t)
-        if match: put(path,float(match.group(1).replace(' ','').replace(',','.')) if path not in {'payment.advance_days','payment.postpay_days','extra_option.limit','ip.ogrnip'} else (match.group(1) if path=='ip.ogrnip' else int(match.group(1))))
+        if match:
+            raw=match.group(1).replace(' ','').replace(',','.')
+            value=float(raw) if path not in {'payment.advance_days','payment.postpay_days','extra_option.limit','ip.ogrnip'} else (match.group(1) if path=='ip.ogrnip' else int(match.group(1)))
+            if path=='price.total' and re.search(r'\bтыс(?:яч[аи]?)?\b',t): value=float(value)*1000
+            put(path,value)
+    advance_before=re.search(r'(\d+(?:[,.]\d+)?)\s*%\s*аванс',t)
+    advance_days=re.search(r'аванс\w*[^.]{0,40}?(?:за|в течение)\s*(\d+)\s*(?:календарн\w*\s*)?дн',t)
+    postpay_days=re.search(r'(?:остаток|оплат\w* после оказания услуг)[^.]{0,50}?(?:за|в течение)\s*(\d+)\s*(?:календарн\w*\s*)?дн',t)
+    if advance_before: put('payment.advance_percent',float(advance_before.group(1).replace(',','.')))
+    if advance_days: put('payment.advance_days',int(advance_days.group(1)))
+    if postpay_days: put('payment.postpay_days',int(postpay_days.group(1)))
     for path,label in (('physical.passport','паспорт'),('physical.snils','снилс'),('tax.no_vat_basis','без ндс на основании'),('service.name','услуги:')):
-        match=re.search(re.escape(label)+r'\s*[:—-]?\s*([^;\n]+)',text,re.I)
+        match=re.search(re.escape(label)+r'\s*[:—-]?\s*([^;,\n]+)',text,re.I)
         if match: put(path,match.group(1).strip(' .'))
-    if 'типовая форма' in t: put('contract.form_label','TYPICAL_FORM')
+    if any(x in t for x in ('типовая форма','типовой договор','стандартная форма','обычная типовая')): put('contract.form_label','TYPICAL_FORM')
     elif 'иная форма' in t or 'собственная форма' in t: put('contract.form_label','CUSTOM_FORM')
-    if 'без ндс' in t: put('tax.vat_status','NO_VAT')
+    if 'без ндс' in t or 'ндс не облагается' in t: put('tax.vat_status','NO_VAT')
     elif 'плательщик ндс' in t or re.search(r'ндс\s*\d+\s*%',t): put('tax.vat_status','VAT_PAYER')
     if 'смешанн' in t or ('аванс' in t and ('остаток' in t or 'постоплат' in t)): put('payment.model','MIXED')
     elif 'аванс' in t or 'предоплат' in t: put('payment.model','PREPAY')
-    elif 'постоплат' in t or 'после акт' in t: put('payment.model','POSTPAY')
+    elif 'постоплат' in t or 'после акт' in t or 'оплата после оказания услуг' in t: put('payment.model','POSTPAY')
     if 'банковская гарантия не' in t or 'без банковской гарантии' in t: put('payment.bank_guarantee',False)
     elif 'банковская гарантия' in t: put('payment.bank_guarantee',True)
     dates=re.findall(r'\b(20\d{2}-\d{2}-\d{2})\b',t)
     if dates: put('term.start',dates[0])
     if len(dates)>1: put('term.end',dates[1])
     months=re.findall(r'\b(20\d{2}-(?:0[1-9]|1[0-2]))\b',t)
+    month_names={'январ':1,'феврал':2,'март':3,'апрел':4,'ма':5,'июн':6,'июл':7,'август':8,'сентябр':9,'октябр':10,'ноябр':11,'декабр':12}
+    for stem,number in month_names.items():
+        match=re.search(stem+r'\w*\s+(20\d{2})',t)
+        if match: months.append(f'{match.group(1)}-{number:02d}')
     if months: put('schedule.months',list(dict.fromkeys(months)))
     if 'несколько мест' in t or 'места в договоре не указаны' in t: put('places.multiple_or_not_in_contract',True)
     elif 'одно место' in t: put('places.multiple_or_not_in_contract',False)
@@ -154,6 +169,11 @@ def extract_training_facts(text: str, current: dict | None=None) -> dict:
     schedule=[]
     for match in re.finditer(r'(20\d{2}-\d{2}-\d{2})\s*,\s*([^,;]+),\s*([^,;]+),\s*(\d+)\s*,\s*([\d.]+)\s*,\s*([^;]+)',text):
         schedule.append(dict(date=match.group(1),weekday=match.group(2).strip(),time=match.group(3).strip(),count=int(match.group(4)),unit_price=float(match.group(5)),place=match.group(6).strip()))
+    if not schedule and months:
+        time_match=re.search(r'\b([01]?\d|2[0-3]):[0-5]\d\b',t); count_match=re.search(r'(\d+)\s*трениров',t); price_match=re.search(r'по\s*([\d ]+)\s*(?:руб|₽)',t)
+        weekdays=[word for word in ('понедельник','вторник','сред','четверг','пятниц','суббот','воскресень') if word in t]
+        if time_match or count_match or price_match or weekdays:
+            schedule=[{'date':None,'weekday':' и '.join(weekdays) or None,'time':time_match.group(0) if time_match else None,'count':int(count_match.group(1)) if count_match else None,'unit_price':float(price_match.group(1).replace(' ','')) if price_match else None,'place':None}]
     if schedule: put('schedule.entries',schedule)
     return patch
 
@@ -168,6 +188,146 @@ RED_SCHEMA = [
 ]
 
 
+@dataclass(frozen=True)
+class RedFieldDefinition:
+    field_id: str
+    path: str
+    field_type: str
+    scope: str
+    required: bool
+    acquisition: str
+
+
+# This registry mirrors RED_FIELD_SCHEMA from applicability matrix v2.0.  It is
+# deliberately complete: dialogue code never invents an RF outside this table.
+RED_FIELD_REGISTRY = {
+    field_id: RedFieldDefinition(field_id,path,field_type,scope,required,acquisition)
+    for field_id,path,field_type,scope,required,acquisition in (
+      ('RF001','contract.form_label','ENUM','BOTH',True,'DEFAULT'),('RF002','appendices.other','LIST','BOTH',False,'DEFAULT'),
+      ('RF003','contractor.variant_label','ENUM','BOTH',True,'DERIVED'),('RF004','party.status_clause','STRING','BOTH',True,'DERIVED'),
+      ('RF005','service.name','STRING','BOTH',True,'USER_INPUT'),('RF006','price.tax_clause','CONDITIONAL_BLOCK','BOTH',True,'DERIVED'),
+      ('RF007','payment.model','ENUM','BOTH',True,'USER_INPUT'),('RF008','payment.bank_guarantee_clause','BOOLEAN','BOTH',True,'USER_INPUT'),
+      ('RF009','physical.ndfl_clause','CONDITIONAL_BLOCK','PHYSICAL_PERSON',True,'DERIVED'),('RF010','ip.invoice_clause','CONDITIONAL_BLOCK','INDIVIDUAL_ENTREPRENEUR',True,'DERIVED'),
+      ('RF011','npd.receipt_clause','CONDITIONAL_BLOCK','NONE',False,'NOT_APPLICABLE'),('RF012','npd.loss_status_clause','CONDITIONAL_BLOCK','NONE',False,'NOT_APPLICABLE'),
+      ('RF013','ip.additional_warranties','CONDITIONAL_BLOCK','INDIVIDUAL_ENTREPRENEUR',True,'DEFAULT'),('RF014','ip.vat_penalty','CONDITIONAL_BLOCK','INDIVIDUAL_ENTREPRENEUR',True,'DERIVED'),
+      ('RF015','dispute.forum','ENUM','BOTH',True,'DERIVED'),('RF016','ip.long_term_resources','BOOLEAN','INDIVIDUAL_ENTREPRENEUR',True,'USER_INPUT'),
+      ('RF017','act.party_status_clause','STRING','BOTH',True,'DERIVED'),('RF018','act.price_tax_clause','CONDITIONAL_BLOCK','BOTH',True,'DERIVED'),
+      ('RF019','act.ndfl_clause','CONDITIONAL_BLOCK','PHYSICAL_PERSON',True,'DERIVED'),('RF020','schedule.place_column','BOOLEAN','BOTH',True,'USER_INPUT'),
+      ('RF021','schedule.months','SCHEDULE','BOTH',True,'USER_INPUT'),('RF022','extra_option.enabled','BOOLEAN','BOTH',True,'USER_INPUT'),
+      ('RF023','extra_option.limit','INTEGER','BOTH',True,'USER_INPUT'),('RF024','physical.passport_snils','PERSON_DETAILS','PHYSICAL_PERSON',True,'USER_INPUT'),
+      ('RF025','ip.ogrnip','STRING','INDIVIDUAL_ENTREPRENEUR',True,'USER_INPUT'),
+    )
+}
+
+
+def apply_training_defaults(facts: dict, template: str) -> dict:
+    """Apply only values made unambiguous by the approved template or facts."""
+    result=deepcopy(facts)
+    if template!='NONE':
+        if _get(result,'contract.form_label') is None: _set(result,'contract.form_label','TYPICAL_FORM')
+        if _get(result,'appendices.other') is None: _set(result,'appendices.other',[])
+    start,end=_get(result,'term.start'),_get(result,'term.end')
+    if start and end and _get(result,'term.more_than_one_year') is None:
+        try: _set(result,'term.more_than_one_year',(date.fromisoformat(end)-date.fromisoformat(start)).days>366)
+        except ValueError: pass
+    return result
+
+
+def _input(field_id,path,parser,question,quick=None,mapping=None,allowed=None):
+    return {'red_field_id':field_id,'path':path,'parser_type':parser,'question':question,'quick_replies':quick or [],'answer_mapping':mapping or {},'allowed_values':allowed or []}
+
+
+def missing_red_inputs(decision: TrainingDecision, facts: dict) -> list[dict[str,Any]]:
+    """Return atomic USER_INPUT requirements in deterministic business order."""
+    template=decision.template; model=_get(facts,'payment.model'); vat=_get(facts,'tax.vat_status')
+    specs=[
+      _input('RF005','service.name','STRING','Как точно называются услуги по проведению тренировок?'),
+      _input('RF005','term.start','DATE','Укажите дату начала оказания услуг.',allowed=['YYYY-MM-DD']),
+      _input('RF005','term.end','DATE','Укажите дату окончания оказания услуг.',allowed=['YYYY-MM-DD']),
+      _input('RF006','price.total','MONEY','Укажите общую стоимость услуг.'),
+    ]
+    if template=='PHYSICAL_PERSON': specs += [
+      _input('RF009','tax.ndfl_rate','PERCENT','Укажите ставку НДФЛ.'),
+      _input('RF009','tax.ndfl_amount','MONEY','Укажите сумму НДФЛ.'),
+    ]
+    if template=='INDIVIDUAL_ENTREPRENEUR':
+      specs += [_input('RF010','tax.vat_status','ENUM','ИП является плательщиком НДС?', ['С НДС','Без НДС'],{'с ндс':'VAT_PAYER','плательщик ндс':'VAT_PAYER','да':'VAT_PAYER','без ндс':'NO_VAT','ндс не облагается':'NO_VAT','нет':'NO_VAT'},['VAT_PAYER','NO_VAT'])]
+      if vat=='VAT_PAYER': specs += [_input('RF006','tax.vat_rate','PERCENT','Укажите ставку НДС.'),_input('RF006','tax.vat_amount','MONEY','Укажите сумму НДС.')]
+      elif vat=='NO_VAT': specs += [_input('RF006','tax.no_vat_basis','STRING','Укажите основание, по которому НДС не облагается.')]
+    specs += [_input('RF007','payment.model','ENUM','Как будет производиться оплата?', ['Предоплата','Смешанная','Постоплата'],{'предоплата':'PREPAY','аванс':'PREPAY','100% аванс':'PREPAY','смешанная':'MIXED','аванс и остаток':'MIXED','часть авансом, остаток после оказания услуг':'MIXED','постоплата':'POSTPAY','оплата после оказания услуг':'POSTPAY','после оказания услуг':'POSTPAY'},['PREPAY','MIXED','POSTPAY'])]
+    if model in {'PREPAY','MIXED'}: specs += [_input('RF007','payment.advance_percent','PERCENT','Какой процент составляет аванс?'),_input('RF007','payment.advance_days','INTEGER','В течение скольких дней перечисляется аванс?')]
+    if model in {'MIXED','POSTPAY'}: specs += [_input('RF007','payment.postpay_percent','PERCENT','Какой процент оплачивается после оказания услуг?'),_input('RF007','payment.postpay_days','INTEGER','В течение скольких дней производится окончательная оплата?')]
+    if model in {'PREPAY','MIXED'}: specs += [_input('RF008','payment.bank_guarantee','BOOLEAN','Требуется банковская гарантия?', ['Да','Нет'])]
+    specs += [
+      _input('RF020','places.multiple_or_not_in_contract','BOOLEAN','Мест проведения несколько или адрес будет указан только в графике?', ['Да','Нет']),
+      _input('RF021','schedule.months','LIST','За какие месяцы нужен график? Укажите в формате ГГГГ-ММ.'),
+      _input('RF021','schedule.entries','SCHEDULE','Укажите строки графика: дата, день недели, время, количество, цена одной тренировки, место. Строки разделите точкой с запятой.'),
+      _input('RF022','extra_option.enabled','BOOLEAN','Нужны дополнительные тренировки или сопровождение?', ['Да','Нет']),
+    ]
+    if _get(facts,'extra_option.enabled') is True: specs += [_input('RF023','extra_option.limit','INTEGER','Каково максимальное количество дополнительных услуг?')]
+    if template=='PHYSICAL_PERSON': specs += [_input('RF024','physical.passport','PERSON_DETAILS','Укажите паспортные данные исполнителя.'),_input('RF024','physical.snils','PERSON_DETAILS','Укажите СНИЛС исполнителя.')]
+    if template=='INDIVIDUAL_ENTREPRENEUR':
+      if _get(facts,'term.more_than_one_year') is True: specs += [_input('RF016','ip.long_term_resources_clause','BOOLEAN','Включить запрос документов о ресурсах ИП?', ['Да','Нет'])]
+      specs += [_input('RF025','ip.ogrnip','OGRNIP','Укажите 15-значный ОГРНИП.')]
+    return [spec for spec in specs if _get(facts,spec['path']) in (None,'',[])]
+
+
+def _normalized_text(text: str) -> str:
+    return ' '.join(text.lower().replace('ё','е').strip(' .!?').split())
+
+
+def _number(text: str) -> float | None:
+    match=re.search(r'(?<!\d)(\d[\d\s]*(?:[,.]\d+)?)',text)
+    if not match: return None
+    value=float(match.group(1).replace(' ','').replace(',','.'))
+    if re.search(r'\bтыс(?:яч[аи]?)?\b',text.lower()): value*=1000
+    return value
+
+
+def parse_pending_red_answer(text: str, pending: dict | None) -> tuple[dict,str,str|None]:
+    """Parse any RED_FIELDS pending question using its declared parser contract."""
+    if not pending or pending.get('phase')!='RED_FIELDS': return {},'free_text',None
+    parser=pending.get('parser_type'); path=(pending.get('target_paths') or [None])[0]; normalized=_normalized_text(text); value=None
+    mapping=pending.get('answer_mapping') or {}
+    for phrase,mapped in sorted(mapping.items(),key=lambda item:len(item[0]),reverse=True):
+        if normalized==phrase or (len(phrase)>3 and phrase in normalized): value=mapped; break
+    if parser=='BOOLEAN':
+        if normalized in {'да','верно','подтверждаю','есть','нужно','требуется'}: value=True
+        elif normalized in {'нет','не требуется','отсутствует','не нужно','не требуется'}: value=False
+    elif parser in {'MONEY','PERCENT','INTEGER'}:
+        value=_number(normalized)
+        if value is not None and parser=='INTEGER': value=int(value)
+    elif parser=='DATE':
+        match=re.search(r'\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\b',normalized) or re.search(r'\b(\d{1,2})[./](\d{1,2})[./](20\d{2})\b',normalized)
+        if match:
+            parts=list(map(int,match.groups())); y,m,d=parts if parts[0]>2000 else (parts[2],parts[1],parts[0])
+            try: value=date(y,m,d).isoformat()
+            except ValueError: value=None
+    elif parser=='LIST':
+        value=list(dict.fromkeys(re.findall(r'\b20\d{2}-(?:0[1-9]|1[0-2])\b',normalized))) or None
+    elif parser=='SCHEDULE':
+        extracted=extract_training_facts(text)
+        value=_get(extracted,'schedule.entries')
+    elif parser=='OGRNIP':
+        match=re.search(r'\b\d{15}\b',normalized); value=match.group(0) if match else None
+    elif parser in {'STRING','PERSON_DETAILS'}:
+        value=text.strip(' .') if len(text.strip(' .'))>=2 else None
+    if value is None: return {},parser.lower() if parser else 'unknown',f'Не удалось распознать ответ. {pending.get("format_hint") or pending.get("question","")}'
+    if parser=='PERCENT' and not 0<=float(value)<=100: return {},'percent','Процент должен быть от 0 до 100.'
+    if parser=='INTEGER' and int(value)<=0: return {},'integer','Укажите целое число больше нуля.'
+    patch={}; _set(patch,path,value); return patch,parser.lower(),None
+
+
+def validate_training_facts(facts: dict) -> str | None:
+    if _get(facts,'payment.model')=='MIXED':
+        advance,postpay=_get(facts,'payment.advance_percent'),_get(facts,'payment.postpay_percent')
+        if advance is not None and postpay is not None and abs(float(advance)+float(postpay)-100)>0.001:
+            return 'Сумма аванса и окончательной оплаты должна составлять 100%.'
+    start,end=_get(facts,'term.start'),_get(facts,'term.end')
+    if start and end and start>end: return 'Дата окончания должна быть позже даты начала.'
+    return None
+
+
 def _money(value): return f'{float(value):,.2f}'.replace(',',' ').replace('.',',') if value is not None else None
 
 
@@ -176,6 +336,8 @@ def red_field_values(facts: dict, template: str) -> list[dict[str,Any]]:
     values: dict[str,tuple[Any,str]]={}
     direct={'RF001':'contract.form_label','RF002':'appendices.other','RF005':'service.name','RF007':'payment.model','RF020':'places.multiple_or_not_in_contract','RF021':'schedule.months','RF022':'extra_option.enabled','RF023':'extra_option.limit','RF025':'ip.ogrnip'}
     for rf,path in direct.items(): values[rf]=(_get(facts,path),'USER')
+    if _get(facts,'contract.form_label')=='TYPICAL_FORM': values['RF001']=('TYPICAL_FORM','DEFAULT')
+    if _get(facts,'appendices.other')==[]: values['RF002']=([],'DEFAULT')
     values['RF003']=(template,'DERIVED'); values['RF004']=(('Гражданин РФ' if physical else 'Индивидуальный предприниматель'),'DERIVED')
     values['RF015']=(('GENERAL_COURT' if physical else 'ARBITRATION_COURT'),'DERIVED'); values['RF017']=values['RF004']
     if physical:
@@ -202,7 +364,7 @@ def red_field_values(facts: dict, template: str) -> list[dict[str,Any]]:
         if field_id=='RF023' and facts['extra_option'].get('enabled') is not True: applicable=False
         if not applicable: result.append({'field_id':field_id,'status':'NOT_APPLICABLE','value':None,'source':'NONE'}); continue
         value,source=values.get(field_id,(None,'NONE'))
-        filled=value is not None and value!='' and value!=[]
+        filled=value is not None and value!='' and (value!=[] or not required)
         status='FILLED' if filled else ('MISSING' if required else 'NOT_APPLICABLE')
         result.append({'field_id':field_id,'status':status,'value':value if filled else None,'source':source if filled else 'NONE'})
     return result
@@ -221,6 +383,8 @@ def _validation_missing(facts: dict, template: str) -> list[str]:
     elif model=='POSTPAY': require('RF007','payment.postpay_percent','payment.postpay_days')
     elif model=='MIXED': require('RF007','payment.advance_percent','payment.advance_days','payment.postpay_percent','payment.postpay_days')
     require('RF021','schedule.months','schedule.entries')
+    entries=_get(facts,'schedule.entries') or []
+    if entries and any(any(entry.get(key) in (None,'') for key in ('date','weekday','time','count','unit_price','place')) for entry in entries): missing.append('RF021') if 'RF021' not in missing else None
     if template=='PHYSICAL_PERSON': require('RF009','tax.ndfl_rate','tax.ndfl_amount')
     if template=='INDIVIDUAL_ENTREPRENEUR':
         require('RF010','tax.vat_status')
@@ -285,8 +449,10 @@ def clarification_for(decision: TrainingDecision, facts: dict, previous: dict | 
         else:
             item={'question_id':'TRAINING_PERFORMANCE_THIRD_PARTIES','question':'Будут ли привлекаться другие лица для проведения тренировок?','target_fields':['performance.third_parties'],'answer_mapping':{'yes':{'performance':{'third_parties':True}},'no':{'performance':{'third_parties':False}}}}
     elif decision.template!='NONE' and decision.missing_field_ids:
-        field_id=decision.missing_field_ids[0]
-        item={'question_id':'TRAINING_RED_'+field_id,'question':next_question(decision,facts),'target_fields':[field_id],'answer_mapping':{}}
+        specs=missing_red_inputs(decision,facts)
+        if not specs: return None
+        spec=specs[0]; field_id=spec['red_field_id']
+        item={'question_id':f'training:{field_id}:{spec["path"]}','phase':'RED_FIELDS','red_field_id':field_id,'question':spec['question'],'target_fields':[field_id],'target_paths':[spec['path']],'parser_type':spec['parser_type'],'allowed_values':spec['allowed_values'],'answer_mapping':spec['answer_mapping'],'quick_replies':spec['quick_replies']}
     else:
         targets={'D011':['contractor.status'],'D012':['subject.type'],'D013':['subject.paid']}.get(decision.matched_rule_id,[])
         if not targets: return None
@@ -297,6 +463,12 @@ def clarification_for(decision: TrainingDecision, facts: dict, previous: dict | 
         item['question']='Подтвердите отдельно: исполнитель сам проводит тренировки и других лиц не привлекает?'
     if same and item['repeat_count']>=2 and len(item['target_fields'])>1:
         item=clarification_for(decision,{**facts,'performance':{**facts['performance'],'personal':facts['performance']['personal'] if facts['performance']['personal'] is not None else True}},None) or item
+    elif same and item['repeat_count']==1 and item.get('phase')=='RED_FIELDS':
+        choices=item.get('quick_replies') or item.get('allowed_values')
+        item['question']=item['question']+(' Выберите: '+', '.join(map(str,choices))+'.' if choices else ' Проверьте формат ответа и укажите значение ещё раз.')
+    elif same and item['repeat_count']>=2 and item.get('phase')=='RED_FIELDS':
+        item['question_id']=item['question_id']+':validation'
+        item['question']='Ответ не прошёл проверку. '+item['question']
     return item
 
 

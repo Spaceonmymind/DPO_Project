@@ -26,4 +26,6 @@ backend/*.db
 storage/uploads/
 storage/generated/
 contract_templates/
+specification_templates/supply/*
+!specification_templates/supply/.gitkeep
 backups/

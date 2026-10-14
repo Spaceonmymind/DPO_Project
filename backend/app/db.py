@@ -6,6 +6,7 @@ class Settings:
  database_url=os.getenv('DATABASE_URL','sqlite:///./dpo.db')
  storage=os.getenv('DOCUMENT_STORAGE_PATH',os.getenv('STORAGE_LOCAL_PATH','../storage'))
  contract_templates_path=os.getenv('CONTRACT_TEMPLATES_PATH','../contract_templates')
+ specification_templates_path=os.getenv('SPECIFICATION_TEMPLATES_PATH','../specification_templates')
  max_upload=int(os.getenv('MAX_UPLOAD_SIZE_MB','20'))*1024*1024
  app_env=os.getenv('APP_ENV','development')
  app_secret_key=os.getenv('APP_SECRET_KEY','development-only-change-me')

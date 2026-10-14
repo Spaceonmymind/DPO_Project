@@ -19,11 +19,13 @@ from app.contracts import select_contract
 from app.contract_router import contract_router
 from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
 from app.training_contracts import apply_training_defaults, audit_payload, clarification_for, combine_patches, decide_training, empty_facts, extract_training_facts, merge_facts, parse_pending_red_answer, render_training_contract, resolve_contextual_answer, validate_training_facts, TrainingDecision
+from app.supply_specifications import SupplySpecificationDialogueEngine, SupplySpecificationRenderer, empty_supply_specification, next_question
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
 app=FastAPI(title='ДПО Ассистент API',version='1.1.0')
 orchestrator=AIOrchestrator()
+supply_engine=SupplySpecificationDialogueEngine()
 app.add_middleware(CORSMiddleware,allow_origins=os.getenv('CORS_ORIGINS','http://localhost:5173').split(','),allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 @app.middleware('http')
 async def headers(req,call):
@@ -115,7 +117,14 @@ def usersme(u=Depends(current)): return userout(u)
 def create(x:CreateCase,u=Depends(current),d:DBS=Depends(db)):
  allowed={'GET_CONTRACT','CREATE_SPECIFICATION','ANALYZE_SPECIFICATION','CREATE_SPEC_AND_GET_CONTRACT','GENERAL_PROCUREMENT_DIALOGUE','TRAINING_CONTRACT'}
  intent=x.initial_intent.upper() if x.initial_intent.upper() in allowed else 'GENERAL_PROCUREMENT_DIALOGUE'
- c=Case(user_id=u.id,title=x.title,context={'intent':intent}); d.add(c); d.flush(); d.add(ProcurementContextRecord(case_id=c.id,intent=intent,data={'intent':intent,'is_procurement':True,'missing_fields':[]})); audit(d,u.id,c.id,'CASE_CREATED',{'initial_intent':intent}); d.commit(); return caseout(c)
+ c=Case(user_id=u.id,title=x.title,context={'intent':intent}); d.add(c); d.flush()
+ context={'intent':intent,'is_procurement':True,'missing_fields':[]}
+ if intent=='CREATE_SPECIFICATION':
+  data=empty_supply_specification(); question=next_question(data); pending=supply_engine.pending(question)
+  context.update(category='supply',subject='ТЗ на поставку',specification_template='SUPPLY',pending_specification_question=pending,missing_fields=[pending['target']])
+  specification=TechnicalSpecification(case_id=c.id,data=data); d.add(specification); d.flush(); d.add(SpecVersion(spec_id=specification.id,version=1,data=data))
+  d.add(Message(case_id=c.id,role='assistant',content=question.text)); c.state='COLLECTING_SPEC_DATA'; c.title='ТЗ на поставку'
+ d.add(ProcurementContextRecord(case_id=c.id,intent=intent,data=context,category=context.get('category',''),subject=context.get('subject',''),missing_fields=context['missing_fields'])); audit(d,u.id,c.id,'CASE_CREATED',{'initial_intent':intent}); d.commit(); return caseout(c)
 @app.get('/api/v1/cases')
 def cases(q:str|None=Query(default=None,max_length=200),u=Depends(current),d:DBS=Depends(db)):
  query=d.query(Case).outerjoin(ProcurementContextRecord,ProcurementContextRecord.case_id==Case.id).filter(Case.user_id==u.id)
@@ -141,6 +150,10 @@ def delete_case(cid:str,u=Depends(current),d:DBS=Depends(db)):
  if spec: d.query(SpecVersion).filter_by(spec_id=spec.id).delete(); d.delete(spec)
  d.query(Message).filter_by(case_id=cid).delete(); d.query(Attachment).filter_by(case_id=cid).delete(); d.query(ProcurementContextRecord).filter_by(case_id=cid).delete(); d.query(ContractRecommendation).filter_by(case_id=cid).delete(); d.query(AuditEvent).filter_by(case_id=cid).delete(); d.query(AIRun).filter_by(case_id=cid).delete()
  for path in (Path(settings.storage)/'generated').glob(f'{cid}.*'): path.unlink(missing_ok=True)
+ generated_specification=Path(settings.storage)/'generated'/'specifications'/u.id/cid
+ if generated_specification.is_dir():
+  import shutil
+  shutil.rmtree(generated_specification)
  d.flush(); d.delete(c); d.commit(); return Response(status_code=204)
 def title_for(text,ctx):
  t=text.lower()
@@ -214,11 +227,25 @@ def finalize_specification(c,s,u,d):
  if decision.status=='MATCHED': audit(d,u.id,c.id,'CONTRACT_SELECTED',{'template_id':decision.template.id})
  audit(d,u.id,c.id,'SPEC_CONFIRMED',{'contract_status':decision.status})
  return decision
+def supply_specification_message(c,s,text,u,d):
+ context=dict(contextout(c,d)); pending=context.get('pending_specification_question')
+ data,next_pending,answer,ready=supply_engine.process(s.data if s else None,text,pending)
+ if not s:
+  s=TechnicalSpecification(case_id=c.id,data=data); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=data))
+ else:
+  s.data=data; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=data))
+ s.status='CONFIRMED' if ready else 'DRAFT'; c.state='SPEC_READY' if ready else ('SPEC_REVIEW' if next_pending is None else 'COLLECTING_SPEC_DATA')
+ context.update(intent='CREATE_SPECIFICATION',category='supply',subject='ТЗ на поставку',specification_template='SUPPLY',pending_specification_question=next_pending,missing_fields=[] if next_pending is None else [next_pending['target']],supply_specification=data)
+ save_context(c,context,d); d.add(Message(case_id=c.id,role='assistant',content=answer)); audit(d,u.id,c.id,'SUPPLY_SPECIFICATION_TURN',{'question_id':(pending or {}).get('question_id'),'next_question_id':(next_pending or {}).get('question_id'),'ready':ready}); d.commit()
+ log.info('supply_specification_turn case_id=%s question_id=%s target=%s next_question_id=%s state=%s',c.id,(pending or {}).get('question_id'),(pending or {}).get('target'),(next_pending or {}).get('question_id'),c.state)
+ return detail(c,d)
 @app.post('/api/v1/cases/{cid}/messages')
 async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); state_before=c.state; user_message=Message(case_id=cid,role='user',content=x.content); d.add(user_message); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
  s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
  context=contextout(c,d); intent=p.intent if p else (c.context or {}).get('intent')
+ if intent=='CREATE_SPECIFICATION' and (context.get('specification_template')=='SUPPLY' or (s and s.data.get('kind')=='SUPPLY')):
+  return supply_specification_message(c,s,x.content,u,d)
  if intent in {'GET_CONTRACT','TRAINING_CONTRACT'}:
   route=contract_router.route(x.content,context)
   if route.domain=='training': return training_message(c,x.content,u,d)
@@ -273,6 +300,9 @@ def edit(cid:str,x:Changes,u=Depends(current),d:DBS=Depends(db)):
 def confirm(cid:str,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
+ if s.data.get('kind')=='SUPPLY':
+  if next_question(s.data) is not None: raise HTTPException(409,detail='Сначала заполните обязательные поля ТЗ')
+  s.data={**s.data,'confirmed':True}; s.status='CONFIRMED'; c.state='SPEC_READY'; audit(d,u.id,cid,'SPEC_CONFIRMED',{'template':'SUPPLY'}); d.commit(); return {'status':'ready','template_code':'SUPPLY','template_title':'ТЗ на поставку'}
  decision=finalize_specification(c,s,u,d)
  if decision.status!='MATCHED': d.commit(); return {'status':decision.status.lower(),'reason':decision.reason,'rules_triggered':decision.rules_triggered}
  d.commit(); return {'status':'matched','template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format,'reason':decision.reason,'rules_triggered':decision.rules_triggered}
@@ -287,6 +317,12 @@ def downloadspec(cid:str,format:str='docx',u=Depends(current),d:DBS=Depends(db))
  if not s: raise HTTPException(404,detail='Техническое задание не создано')
  fmt=format.lower();
  if fmt not in {'docx','pdf','xlsx'}: raise HTTPException(422,detail='Доступны DOCX, PDF и XLSX')
+ if s.data.get('kind')=='SUPPLY' and fmt=='docx':
+  if not s.data.get('confirmed'): raise HTTPException(409,detail='Сначала подтвердите техническое задание')
+  p=Path(settings.storage)/'generated'/'specifications'/u.id/cid/'Техническое_задание_на_поставку.docx'
+  try: SupplySpecificationRenderer(Path(settings.specification_templates_path)).render(s.data,p)
+  except (ValueError,FileNotFoundError) as exc: log.error('supply_specification_render_failed case_id=%s error=%s',cid,exc); raise HTTPException(409,detail='Не удалось сформировать ТЗ: проверьте шаблон и обязательные поля')
+  audit(d,u.id,cid,'SUPPLY_SPECIFICATION_RENDERED'); d.commit(); return FileResponse(p,filename='Техническое_задание_на_поставку.docx',media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
  p=Path(settings.storage)/'generated'/f'{cid}.{fmt}'; p.parent.mkdir(parents=True,exist_ok=True); render_specification(s.data,p,fmt); media={'docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','pdf':'application/pdf','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}[fmt]; return FileResponse(p,filename=f'Техническое_задание.{fmt}',media_type=media)
 @app.get('/api/v1/cases/{cid}/contract-template')
 def downloadtemplate(cid:str,u=Depends(current),d:DBS=Depends(db)):

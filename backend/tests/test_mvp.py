@@ -12,12 +12,16 @@ os.environ['STORAGE_LOCAL_PATH'] = tempfile.mkdtemp()
 os.environ['SEED_DEMO_USERS'] = 'true'
 template_directory = Path(tempfile.mkdtemp())
 os.environ['CONTRACT_TEMPLATES_PATH'] = str(template_directory)
+specification_template_directory = Path(tempfile.mkdtemp())
+os.environ['SPECIFICATION_TEMPLATES_PATH'] = str(specification_template_directory)
 os.environ['CONTRACT_TEMPLATE_ALLOW_DYNAMIC_CHECKSUMS'] = 'true'
 for filename in ('Договор_подряда.docx','договор возмездного оказания услуг (образец).docx','Shablon-agentskogo-dogovora.docx'):
     fixture=Document(); fixture.add_paragraph(filename); fixture.save(template_directory/filename)
 (template_directory/'договор поставки.rtf').write_bytes(b'{\\rtf1\\ansi approved supply fixture}')
 training_fixture_root=Path('/app/contract_templates/training') if Path('/app/contract_templates/training').is_dir() else Path(__file__).resolve().parents[2]/'contract_templates'/'training'
 shutil.copytree(training_fixture_root,template_directory/'training')
+supply_specification_source=Path(__file__).resolve().parents[2]/'specification_templates'/'supply'
+shutil.copytree(supply_specification_source,specification_template_directory/'supply')
 
 from fastapi.testclient import TestClient
 import fitz
@@ -400,23 +404,26 @@ def test_equivalent_service_answers_resolve_goods_services_question():
         assert 'передача товара или самостоятельное оказание услуг' not in final['messages'][-1]['content']
 
 
-def test_partial_date_answer_only_asks_acceptance_criteria():
+def test_full_supply_specification_api_dialogue_reaches_ready_and_downloads_docx():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
-    for text in ('Нужно разработать лендинг','Продвижение мероприятия','Адаптивный лендинг'):
-        client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':text})
-    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'25 октября'}).json()
-    assert body['technical_specification']['data']['deadline']=='25 октября'
-    assert body['procurement_context']['missing_fields']==['acceptance_criteria']
-    assert 'критерии приёмки' in body['messages'][-1]['content'] and 'срок' not in body['messages'][-1]['content'].lower()
-
-
-def test_natural_date_october_25_is_saved():
-    client=TestClient(app); headers=auth(client)
-    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
-    client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужно разработать лендинг'})
-    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'октябрь 25'}).json()
-    assert body['technical_specification']['data']['deadline']=='октябрь 25'
+    body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json(); seen=[]
+    answers={
+      'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
+      'items[0].part_number':'21ABC','items[0].manufacturer':'Lenovo','items[0].warranty_term':'3 года',
+      'items[0].unit_price':'100 тыс. руб.','items[0].quantity':'10 шт.','delivery_address':'Москва, ул. Большая Татарская, 11',
+      'currency':'рубли','vat_mode':'С НДС','vat_rate':'20%','delivery_term':'10 рабочих дней',
+      'support_required':'Нет','warranty_service_description':'ремонт и замена неисправных компонентов',
+      'warranty_terms_url':'https://example.test/warranty',
+    }
+    while pending:=body['procurement_context'].get('pending_specification_question'):
+        seen.append(pending['question_id'])
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answers[pending['target']]}).json()
+    assert len(seen)==len(set(seen)) and body['state']=='SPEC_REVIEW'
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Подтверждаю'}).json()
+    assert body['state']=='SPEC_READY' and body['technical_specification']['status']=='CONFIRMED'
+    response=client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format=docx',headers=headers)
+    assert response.status_code==200 and response.content.startswith(b'PK')
 
 
 def test_text_confirmation_uses_same_transition_as_button_after_xlsx():
@@ -470,10 +477,11 @@ def test_invalid_short_and_test_placeholders_are_not_saved_or_returned():
     assert 'ТЕст' not in body['technical_specification']['data'].values()
 
 
-def test_loop_detector_never_repeats_identical_question_three_times():
+def test_supply_dialogue_does_not_repeat_question_after_valid_answer():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
-    questions=[]
-    for text in ('Нужно разработать лендинг','не знаю','не уверен','затрудняюсь'):
-        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':text}).json(); questions.append(body['messages'][-1]['content'])
-    assert len(set(questions[-3:]))==3
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'компьютерное оборудование'}).json()
+    first=body['procurement_context']['pending_specification_question']['question_id']
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'2'}).json()
+    second=body['procurement_context']['pending_specification_question']['question_id']
+    assert first=='SUPPLY_ITEM_COUNT' and second=='SUPPLY_ITEM_1_DESCRIPTION' and first!=second

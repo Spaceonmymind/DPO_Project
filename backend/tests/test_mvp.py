@@ -277,6 +277,35 @@ def test_contract_router_training_ip_npd_and_clarification():
     assert confirmed['procurement_context']['contract_domain']=='training'
 
 
+def test_training_composite_yes_and_explicit_answers_via_api():
+    client=TestClient(app); headers=auth(client)
+    for answer in ('Да','ЛИЧНО БЕЗ ПРИВЛЕЧЕНИЯ ДРУГИХ ЛИЦ'):
+        case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+        first=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужен тренер для проведения тренировок, исполнитель физлицо без ИП и НПД'}).json()
+        pending=first['procurement_context']['pending_clarification']
+        assert pending['question_id']=='TRAINING_PERFORMANCE_COMPOSITE'
+        assert first['procurement_context']['training_facts']['contractor']['status']=='PHYSICAL_NO_IP_NO_NPD'
+        previous_question=first['messages'][-1]['content']
+        second=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answer}).json()
+        persisted=client.get(f'/api/v1/cases/{case_id}').json()
+        performance=persisted['procurement_context']['training_facts']['performance']
+        assert persisted['procurement_context']['training_facts']['contractor']['status']=='PHYSICAL_NO_IP_NO_NPD'
+        assert performance['personal'] is True and performance['third_parties'] is False
+        assert persisted['messages'][-1]['content']!=previous_question
+        assert not {'performance.personal','performance.third_parties'} & set(persisted['procurement_context']['pending_clarification']['target_fields'])
+        assert persisted['recommendation']['contract_status_text']=='Подходит шаблон для физического лица',persisted['procurement_context']['training_decision']
+
+
+def test_training_composite_no_requests_disambiguation_without_inference():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']
+    client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужен тренер для тренировок, исполнитель физлицо без ИП и НПД'})
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нет'}).json()
+    assert body['procurement_context']['training_facts']['performance']=={'personal':None,'third_parties':None}
+    assert body['procurement_context']['pending_clarification']['question_id']=='TRAINING_PERFORMANCE_DISAMBIGUATION'
+    assert 'Уточните' in body['messages'][-1]['content']
+
+
 def test_mixed_contract_flow_returns_clarification():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'GET_CONTRACT'}).json()['id']

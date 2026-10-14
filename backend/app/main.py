@@ -18,7 +18,7 @@ from app.documents.service import extract,render_specification,SpreadsheetSpecif
 from app.contracts import select_contract
 from app.contract_router import contract_router
 from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
-from app.training_contracts import audit_payload, decide_training, empty_facts, extract_training_facts, merge_facts, next_question, render_training_contract, TrainingDecision
+from app.training_contracts import audit_payload, clarification_for, combine_patches, decide_training, empty_facts, extract_training_facts, merge_facts, render_training_contract, resolve_contextual_answer, TrainingDecision
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
@@ -65,7 +65,9 @@ def rec(c,d):
  stored=d.query(ContractRecommendation).filter_by(case_id=c.id).first()
  if stored:
   template=d.get(ContractTemplate,stored.template_id) if stored.template_id else None
-  return {'status':stored.status,'reason':stored.reason,'rules_triggered':stored.rules_triggered,'template_id':template.id if template else None,'template_code':stored.template_code,'template_title':stored.template_title,'name':template.name if template else stored.template_title,'description':template.description if template else None,'filename':template.filename if template else None,'file_format':template.file_format if template else None}
+  training=(contextout(c,d).get('training_decision') or {}); template_code=stored.template_code or (training.get('template') if training.get('template')!='NONE' else '')
+  status_text=('Договор готов к формированию' if stored.status=='READY' else 'Текущие шаблоны неприменимы' if stored.status=='BLOCKED' else f'Подходит шаблон для {"физического лица" if template_code=="PHYSICAL_PERSON" else "ИП"}' if template_code else 'Требуется уточнение данных')
+  return {'status':stored.status,'reason':stored.reason,'contract_status_text':status_text,'rules_triggered':stored.rules_triggered,'template_id':template.id if template else None,'template_code':template_code,'template_title':stored.template_title,'name':template.name if template else stored.template_title,'description':template.description if template else None,'filename':template.filename if template else None,'file_format':template.file_format if template else None}
  decision=select_contract(d,contextout(c,d))
  if decision.status!='MATCHED': return None
  return {'status':'MATCHED','reason':decision.reason,'rules_triggered':decision.rules_triggered,'template_id':decision.template.id,'template_code':decision.template.code,'template_title':decision.template.name,'name':decision.template.name,'description':decision.template.description,'filename':decision.template.filename,'file_format':decision.template.file_format}
@@ -169,15 +171,21 @@ def save_training_recommendation(c,decision,d):
  c.state={'BLOCKED':'TRAINING_BLOCKED','NEEDS_INPUT':'TRAINING_TEMPLATE_SELECTED' if decision.template!='NONE' else 'TRAINING_APPLICABILITY','READY':'TRAINING_READY'}[decision.render_status]
  return stored
 def training_message(c,text,u,d):
- context=dict(contextout(c,d)); facts=merge_facts(context.get('training_facts') or empty_facts(),extract_training_facts(text,context.get('training_facts')))
+ state_before=c.state; context=dict(contextout(c,d)); pending=context.get('pending_clarification'); current=context.get('training_facts') or empty_facts()
+ contextual_patch,answer_type,forced_question=resolve_contextual_answer(text,pending); explicit_patch=extract_training_facts(text,current)
+ patch=combine_patches(contextual_patch,explicit_patch); facts=merge_facts(current,patch)
  facts['subject']['type']='TRAINING_SERVICE'
  decision=decide_training(facts); payload=audit_payload(decision)
- context.update(intent='GET_CONTRACT',contract_domain='training',pending_contract_domain=None,category='training_contract',subject='Договор на проведение тренировок',training_facts=facts,training_decision=payload,red_fields=decision.red_fields,missing_fields=decision.missing_field_ids,suggested_options=[])
+ next_pending=clarification_for(decision,facts,pending)
+ if forced_question: next_pending={'question_id':'TRAINING_PERFORMANCE_DISAMBIGUATION','question':forced_question,'target_fields':['performance.personal','performance.third_parties'],'answer_mapping':{},'repeat_count':0}
+ context.update(intent='GET_CONTRACT',contract_domain='training',pending_contract_domain=None,category='training_contract',subject='Договор на проведение тренировок',training_facts=facts,training_decision=payload,red_fields=decision.red_fields,missing_fields=decision.missing_field_ids,pending_clarification=next_pending,last_clarification_id=pending.get('question_id') if pending else None,last_target_fields=pending.get('target_fields',[]) if pending else [],last_question=pending.get('question') if pending else None,clarification_repeat_count=(next_pending or {}).get('repeat_count',0),suggested_options=[])
  save_context(c,context,d); save_training_recommendation(c,decision,d)
  if c.title=='Новое обращение': c.title='Договор на проведение тренировок'
- answer=decision.reason if decision.render_status=='BLOCKED' or (decision.render_status=='NEEDS_INPUT' and decision.template=='NONE') else (f'{decision.reason} {next_question(decision,facts)}' if decision.render_status=='NEEDS_INPUT' else 'Все обязательные данные заполнены. Документ готов к формированию.')
+ answer=decision.reason if decision.render_status=='BLOCKED' else ((next_pending or {}).get('question',decision.reason) if decision.render_status=='NEEDS_INPUT' else 'Все обязательные данные заполнены. Документ готов к формированию.')
  d.add(Message(case_id=c.id,role='assistant',content=answer)); audit(d,u.id,c.id,'TRAINING_DECISION',payload); d.commit()
- log.info('training_decision case_id=%s applicability=%s template=%s matched_rule_id=%s reason_code=%s render_status=%s missing_field_ids=%s',c.id,decision.applicability,decision.template,decision.matched_rule_id,decision.reason_code,decision.render_status,decision.missing_field_ids)
+ safe_facts={'subject':facts['subject'],'customer':facts['customer'],'contractor':facts['contractor'],'performance':facts['performance'],'labor':facts['labor']}
+ safe_patch={key:patch[key] for key in ('subject','customer','contractor','performance','labor') if key in patch}
+ log.info('training_message case_id=%s workflow_state_before=%s pending_clarification_id=%s pending_fields_before=%s user_answer_type=%s resolved_patch=%s facts_after=%s matched_rule_id=%s applicability=%s template=%s missing_fields_after=%s workflow_state_after=%s next_clarification_id=%s',c.id,state_before,pending.get('question_id') if pending else None,pending.get('target_fields',[]) if pending else [],answer_type,safe_patch,safe_facts,decision.matched_rule_id,decision.applicability,decision.template,decision.missing_field_ids,c.state,next_pending.get('question_id') if next_pending else None)
  return detail(c,d)
 def contract_clarification(context,decision):
  fields=decision.missing_fields; previous=context.get('last_clarification_fields',[]); repeats=context.get('clarification_repeat_count',0)+1 if fields==previous else 0

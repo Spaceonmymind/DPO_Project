@@ -6,7 +6,7 @@ import openpyxl
 from docx import Document
 
 from app.documents.service import generate_xlsx
-from app.training_contracts import decide_training, empty_facts, extract_training_facts, load_occurrences, render_training_contract
+from app.training_contracts import clarification_for, decide_training, empty_facts, extract_training_facts, load_occurrences, merge_facts, render_training_contract, resolve_contextual_answer
 
 
 _repository_templates=Path('/app/contract_templates') if Path('/app/contract_templates/training').is_dir() else Path(__file__).resolve().parents[2]/'contract_templates'
@@ -46,6 +46,42 @@ def test_decision_priority_and_readiness():
         assert len(decision.red_fields)==25 and not decision.missing_field_ids
     incomplete=complete_facts(); incomplete['schedule']['entries']=None
     assert decide_training(incomplete).render_status=='NEEDS_INPUT' and 'RF021' in decide_training(incomplete).missing_field_ids
+
+
+def test_contextual_composite_answers_and_partial_free_text():
+    facts=empty_facts(); facts['subject'].update(type='TRAINING_SERVICE',paid=True); facts['contractor']['status']='PHYSICAL_NO_IP_NO_NPD'
+    decision=decide_training(facts); pending=clarification_for(decision,facts)
+    assert pending['target_fields']==['performance.personal','performance.third_parties']
+    for answer in ('Да','ДА','Верно','Подтверждаю'):
+        patch,kind,forced=resolve_contextual_answer(answer,pending); merged=merge_facts(facts,patch)
+        assert kind=='contextual_yes' and forced is None and merged['performance']=={'personal':True,'third_parties':False}
+        assert clarification_for(decide_training(merged),merged)['question_id']!='TRAINING_PERFORMANCE_COMPOSITE'
+    patch,_,forced=resolve_contextual_answer('Нет',pending)
+    assert patch=={} and 'Уточните' in forced
+    direct=extract_training_facts('Лично без привлечения других лиц')
+    assert direct['performance']=={'personal':True,'third_parties':False}
+    direct=extract_training_facts('Сам проводит, никого не привлекает')
+    assert direct['performance']=={'personal':True,'third_parties':False}
+    personal=merge_facts(facts,extract_training_facts('Лично'))
+    assert personal['performance']=={'personal':True,'third_parties':None}
+    assert clarification_for(decide_training(personal),personal)['target_fields']==['performance.third_parties']
+    third=merge_facts(facts,extract_training_facts('Без привлечения других лиц'))
+    assert third['performance']=={'personal':None,'third_parties':False}
+    assert clarification_for(decide_training(third),third)['target_fields']==['performance.personal']
+    blocked=merge_facts(facts,extract_training_facts('Будут ещё другие тренеры'))
+    assert blocked['performance']['third_parties'] is True and decide_training(blocked).matched_rule_id=='D008'
+
+
+def test_repeated_composite_clarification_rephrases_then_splits():
+    facts=empty_facts(); facts['subject'].update(type='TRAINING_SERVICE',paid=True); facts['contractor']['status']='PHYSICAL_NO_IP_NO_NPD'
+    decision=decide_training(facts)
+    first=clarification_for(decision,facts)
+    second=clarification_for(decision,facts,first)
+    third=clarification_for(decision,facts,second)
+    assert second['question_id']=='TRAINING_PERFORMANCE_COMPOSITE'
+    assert second['question']!=first['question'] and second['repeat_count']==1
+    assert third['question_id']=='TRAINING_PERFORMANCE_THIRD_PARTIES'
+    assert third['target_fields']==['performance.third_parties']
 
 
 def test_matrix_and_both_renderers_preserve_sources(tmp_path):

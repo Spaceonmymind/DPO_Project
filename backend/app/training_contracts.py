@@ -74,6 +74,17 @@ def merge_facts(current: dict | None, patch: dict) -> dict:
     merge(result,patch); return result
 
 
+def combine_patches(*patches: dict) -> dict:
+    """Combine sparse patches without materialising UNKNOWN defaults."""
+    result: dict={}
+    def merge(target,source):
+        for key,value in source.items():
+            if isinstance(value,dict): merge(target.setdefault(key,{}),value)
+            elif value is not None: target[key]=value
+    for patch in patches: merge(result,patch)
+    return result
+
+
 def extract_training_facts(text: str, current: dict | None=None) -> dict:
     """Mock-compatible fact extraction only; it never decides applicability."""
     t=' '.join(text.lower().replace('ё','е').split()); patch: dict[str,Any]={}
@@ -97,9 +108,10 @@ def extract_training_facts(text: str, current: dict | None=None) -> dict:
     elif statuses: put('contractor.status',statuses[0])
     if any(x in t for x in ('гражданин рф','гражданка рф','российское гражданство')): put('contractor.citizenship','RU')
     if any(x in t for x in ('старше 18','совершеннолет')): put('contractor.age_18_plus',True)
-    if any(x in t for x in ('лично','сам проводит','сама проводит')): put('performance.personal',True)
+    if any(x in t for x in ('лично','сам проводит','сама проводит','самостоятельно проводит')): put('performance.personal',True)
     if any(x in t for x in ('не лично','сотрудник','субподряд','другие тренер','замещающ','помощник')): put('performance.personal',False); put('performance.third_parties',True)
-    if any(x in t for x in ('без третьих лиц','других тренеров не','замены не','помощники не','сотрудники не привлека')): put('performance.third_parties',False); put('performance.personal',True)
+    if any(x in t for x in ('без третьих лиц','без привлечения других лиц','других тренеров не','замены не','помощники не','сотрудники не привлека','никого не привлека')): put('performance.third_parties',False)
+    if any(x in t for x in ('будут еще другие тренеры','будут ещё другие тренеры','привлекать других исполнителей','привлекать третьих лиц')): put('performance.third_parties',True)
     labor={'salary_or_position':('оклад','должност','в штат','штатная'), 'internal_rules':('внутренн','трудов распоряд'), 'fixed_workday':('рабочий день','с 9 до 18'), 'leave_benefits':('отпуск','больничн')}
     for field,words in labor.items():
         if any(word in t for word in words): put('labor.'+field,True)
@@ -260,6 +272,46 @@ def next_question(decision: TrainingDecision, facts: dict) -> str:
     if decision.template=='NONE': return decision.reason
     questions={'RF001':'Какая форма договора используется: типовая или иная?','RF005':'Как точно называются услуги?','RF006':'Уточните налоговые показатели исполнителя.','RF007':'Оплата: аванс, аванс+остаток или постоплата?','RF008':'Требуется банковская гарантия?','RF009':'Укажите ставку и сумму НДФЛ.','RF010':'ИП является плательщиком НДС?','RF014':'Является ли ИП плательщиком НДС?','RF016':'Включить запрос документов о ресурсах ИП?','RF020':'Мест проведения несколько или адрес не указан в договоре?','RF021':'За какие месяцы составляется график?','RF022':'Нужны дополнительные тренировки или сопровождение?','RF023':'Каков максимальный объём дополнительной опции?','RF024':'Укажите паспортные данные и СНИЛС исполнителя.','RF025':'Укажите ОГРНИП.'}
     return questions.get(decision.missing_field_ids[0],f'Уточните поле {decision.missing_field_ids[0]}.') if decision.missing_field_ids else 'Данные заполнены. Документ готов к формированию.'
+
+
+def clarification_for(decision: TrainingDecision, facts: dict, previous: dict | None=None) -> dict | None:
+    """Build an explicit, persisted clarification contract for the next answer."""
+    personal=_get(facts,'performance.personal'); third=_get(facts,'performance.third_parties')
+    if decision.matched_rule_id=='D014':
+        if personal is None and third is None:
+            item={'question_id':'TRAINING_PERFORMANCE_COMPOSITE','question':'Тренировки исполнитель проводит лично и без привлечения других лиц?','target_fields':['performance.personal','performance.third_parties'],'answer_mapping':{'yes':{'performance':{'personal':True,'third_parties':False}}}}
+        elif personal is None:
+            item={'question_id':'TRAINING_PERFORMANCE_PERSONAL','question':'Исполнитель будет проводить тренировки лично?','target_fields':['performance.personal'],'answer_mapping':{'yes':{'performance':{'personal':True}},'no':{'performance':{'personal':False}}}}
+        else:
+            item={'question_id':'TRAINING_PERFORMANCE_THIRD_PARTIES','question':'Будут ли привлекаться другие лица для проведения тренировок?','target_fields':['performance.third_parties'],'answer_mapping':{'yes':{'performance':{'third_parties':True}},'no':{'performance':{'third_parties':False}}}}
+    elif decision.template!='NONE' and decision.missing_field_ids:
+        field_id=decision.missing_field_ids[0]
+        item={'question_id':'TRAINING_RED_'+field_id,'question':next_question(decision,facts),'target_fields':[field_id],'answer_mapping':{}}
+    else:
+        targets={'D011':['contractor.status'],'D012':['subject.type'],'D013':['subject.paid']}.get(decision.matched_rule_id,[])
+        if not targets: return None
+        item={'question_id':'TRAINING_'+decision.matched_rule_id,'question':decision.reason,'target_fields':targets,'answer_mapping':{}}
+    same=bool(previous and previous.get('question_id')==item['question_id'] and previous.get('target_fields')==item['target_fields'])
+    item['repeat_count']=(int(previous.get('repeat_count',0))+1) if same else 0
+    if same and item['repeat_count']==1 and item['question_id']=='TRAINING_PERFORMANCE_COMPOSITE':
+        item['question']='Подтвердите отдельно: исполнитель сам проводит тренировки и других лиц не привлекает?'
+    if same and item['repeat_count']>=2 and len(item['target_fields'])>1:
+        item=clarification_for(decision,{**facts,'performance':{**facts['performance'],'personal':facts['performance']['personal'] if facts['performance']['personal'] is not None else True}},None) or item
+    return item
+
+
+def resolve_contextual_answer(text: str, pending: dict | None) -> tuple[dict, str, str | None]:
+    """Resolve short replies only against the clarification that produced them."""
+    normalized=' '.join(text.lower().replace('ё','е').strip(' .!?').split())
+    answer_type='free_text'; key=None
+    if normalized in {'да','верно','именно','подтверждаю','правильно'}: key='yes'; answer_type='contextual_yes'
+    elif normalized in {'нет','неверно'}: key='no'; answer_type='contextual_no'
+    if not key or not pending: return {},answer_type,None
+    mapping=(pending.get('answer_mapping') or {}).get(key)
+    if mapping is not None: return mapping,answer_type,None
+    if key=='no' and pending.get('question_id')=='TRAINING_PERFORMANCE_COMPOSITE':
+        return {},answer_type,'Уточните, пожалуйста: исполнитель сам не проводит тренировки или планируется привлечение других лиц?'
+    return {},answer_type,None
 
 
 def training_root(root: Path) -> Path: return root/'training'

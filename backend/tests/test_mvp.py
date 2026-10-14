@@ -309,14 +309,14 @@ def test_training_composite_no_requests_disambiguation_without_inference():
     assert 'Уточните' in body['messages'][-1]['content']
 
 
-def run_training_dialogue(client,headers,initial,vat='NO_VAT'):
+def run_training_dialogue(client,headers,initial,vat='NO_VAT',schedule_answer='2026-11-10, вторник, 10:00, 1, 120000, Москва'):
     answers={
       'service.name':'Проведение тренировок по плаванию','term.start':'2026-11-01','term.end':'2027-01-31',
       'price.total':'120 000 рублей','tax.ndfl_rate':'13%','tax.ndfl_amount':'15 600 рублей',
       'tax.vat_status':'Без НДС' if vat=='NO_VAT' else 'С НДС','tax.no_vat_basis':'Применение УСН',
       'tax.vat_rate':'20%','tax.vat_amount':'20 000 рублей','payment.model':'Постоплата',
       'payment.postpay_percent':'100%','payment.postpay_days':'10 дней','places.multiple_or_not_in_contract':'Нет',
-      'schedule.months':'2026-11','schedule.entries':'2026-11-10, вторник, 10:00, 1, 120000, Москва',
+      'schedule.months':'2026-10','schedule.entries':schedule_answer,
       'extra_option.enabled':'Нет','physical.passport':'45 01 123456, выдан 01.01.2020',
       'physical.snils':'123-456-789 00','ip.ogrnip':'123456789012345','ip.long_term_resources_clause':'Нет',
     }
@@ -361,6 +361,16 @@ def test_training_negative_flows_stop_before_red_fields():
         body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':phrase}).json()
         assert body['state']=='TRAINING_BLOCKED',phrase
         assert body['procurement_context']['pending_clarification'] is None
+
+
+def test_full_api_schedule_with_three_rows_and_address_commas_progresses():
+    client=TestClient(app); headers=auth(client)
+    schedule='20.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11; 22.10.2026, четверг, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11; 27.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11'
+    body,_=run_training_dialogue(client,headers,'Нужен тренер, обычное физлицо без ИП и НПД, гражданин РФ, совершеннолетний, проводит лично без привлечения других лиц',schedule_answer=schedule)
+    entries=body['procurement_context']['training_facts']['schedule']['entries']
+    assert len(entries)==3 and [entry['date'] for entry in entries]==['20.10.2026','22.10.2026','27.10.2026']
+    assert all(entry['place']=='Москва, ул. Большая Татарская, 11' for entry in entries)
+    assert body['procurement_context']['pending_clarification'] is None
 
 
 def test_mixed_contract_flow_returns_clarification():

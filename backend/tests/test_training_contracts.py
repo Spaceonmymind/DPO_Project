@@ -7,7 +7,7 @@ import pytest
 from docx import Document
 
 from app.documents.service import generate_xlsx
-from app.training_contracts import RED_FIELD_REGISTRY, apply_training_defaults, clarification_for, decide_training, empty_facts, extract_training_facts, load_occurrences, merge_facts, parse_pending_red_answer, red_field_values, render_training_contract, resolve_contextual_answer
+from app.training_contracts import RED_FIELD_REGISTRY, apply_training_defaults, clarification_for, decide_training, empty_facts, extract_training_facts, load_occurrences, merge_facts, parse_pending_red_answer, parse_schedule_rows, red_field_values, render_training_contract, resolve_contextual_answer
 
 
 _repository_templates=Path('/app/contract_templates') if Path('/app/contract_templates/training').is_dir() else Path(__file__).resolve().parents[2]/'contract_templates'
@@ -138,6 +138,47 @@ def test_general_extractor_closes_multiple_red_dependencies_in_one_message():
     assert patch['payment']['model']=='POSTPAY' and patch['payment']['postpay_days']==10
     payment=extract_training_facts('30% авансом за 5 дней, остаток 70% после оказания услуг за 10 дней')
     assert payment['payment']=={'advance_percent':30.0,'advance_days':5,'postpay_percent':70.0,'postpay_days':10,'model':'MIXED'}
+
+
+@pytest.mark.parametrize(('text','count','check'),[
+ ('20.10.2026, вторник, 19:00, 1, 5000 руб., Москва',1,('date','20.10.2026')),
+ ('20.10.2026, вторник, 19:00, 1, 5000 руб., Москва; 22.10.2026, четверг, 19:00, 1, 5000 руб., Москва',2,('weekday','четверг')),
+ ('20.10.2026, вторник, 19:00, 1, 5000 руб., Москва; 22.10.2026, четверг, 19:00, 1, 5000 руб., Москва; 27.10.2026, вторник, 19:00, 1, 5000 руб., Москва',3,('count',1)),
+ ('20.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11',1,('place','Москва, ул. Большая Татарская, 11')),
+ ('20.10.2026, вторник, 19:00, 1, 5 000 руб., Москва',1,('unit_price',5000)),
+ ('20.10.2026, вторник, 19:00, 1, 5000 рублей, Москва',1,('unit_price',5000)),
+ ('20.10.2026, вторник, 19.00, 1, 5000 руб., Москва',1,('time','19:00')),
+ ('20.10.2026, вт, 19:00, 1, 5000 руб., Москва',1,('weekday','вторник')),
+ ('20.10.2026, вторник, 19:00, 1, 5000 руб., Москва\n22.10.2026, четверг, 19:00, 1, 5000 руб., Москва',2,('date','22.10.2026')),
+])
+def test_schedule_parser_regression_formats(text,count,check):
+    entries,error=parse_schedule_rows(text)
+    assert error is None and len(entries)==count
+    assert entries[-1][check[0]]==check[1]
+
+
+@pytest.mark.parametrize(('raw','expected'),[
+ ('20.10.2026','20.10.2026'),('20.10.26','20.10.2026'),('20 октября 2026','20.10.2026'),('20 октября','20.10'),
+])
+def test_schedule_date_formats_and_derived_weekday(raw,expected):
+    entries,error=parse_schedule_rows(f'{raw}, 19 часов, 1 тренировка, 5 тыс. руб., Москва')
+    assert error is None and entries[0]['date']==expected and entries[0]['time']=='19:00' and entries[0]['unit_price']==5000
+    if raw!='20 октября': assert entries[0]['weekday']=='вторник'
+
+
+def test_schedule_incomplete_row_returns_specific_validation_error():
+    entries,error=parse_schedule_rows('20.10.2026, вторник, 19:00')
+    assert entries==[] and 'строки 1' in error and 'количество' in error and 'стоимость' in error and 'место' in error
+
+
+def test_schedule_renderer_writes_all_three_rows_and_full_places(tmp_path):
+    facts=complete_facts(); facts['schedule']['months']=['2026-10']
+    text='20.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11; 22.10.2026, четверг, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11; 27.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11'
+    facts['schedule']['entries'],error=parse_schedule_rows(text); assert error is None
+    decision=decide_training(facts); assert decision.render_status=='READY'
+    output=tmp_path/'schedule.docx'; render_training_contract(CONTRACT_ROOT,facts,decision,output)
+    document=Document(output); cells='\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+    for value in ('20.10.2026','22.10.2026','27.10.2026','вторник','четверг','19:00','5000','Москва, ул. Большая Татарская, 11'): assert value in cells
 
 
 def test_matrix_and_both_renderers_preserve_sources(tmp_path):

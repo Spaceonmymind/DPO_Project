@@ -86,6 +86,93 @@ def combine_patches(*patches: dict) -> dict:
     return result
 
 
+WEEKDAYS={'понедельник':'понедельник','пн':'понедельник','вторник':'вторник','вт':'вторник','среда':'среда','ср':'среда','четверг':'четверг','чт':'четверг','пятница':'пятница','пт':'пятница','суббота':'суббота','сб':'суббота','воскресенье':'воскресенье','вс':'воскресенье'}
+MONTHS_RU={'января':1,'февраля':2,'марта':3,'апреля':4,'мая':5,'июня':6,'июля':7,'августа':8,'сентября':9,'октября':10,'ноября':11,'декабря':12}
+NUMBER_WORDS={'один':1,'одна':1,'одно':1,'два':2,'две':2,'три':3,'четыре':4,'пять':5,'шесть':6,'семь':7,'восемь':8,'девять':9,'десять':10}
+
+
+def _parse_schedule_date(raw: str) -> tuple[str | None,date | None]:
+    value=' '.join(raw.lower().replace('ё','е').split())
+    for pattern,order in ((r'^(\d{1,2})[.](\d{1,2})[.](\d{4}|\d{2})$', 'dmy'),(r'^(20\d{2})-(\d{1,2})-(\d{1,2})$', 'ymd')):
+        match=re.fullmatch(pattern,value)
+        if match:
+            parts=list(map(int,match.groups())); day,month,year=(parts[0],parts[1],parts[2]) if order=='dmy' else (parts[2],parts[1],parts[0])
+            if year<100: year+=2000
+            try:
+                parsed=date(year,month,day); return parsed.strftime('%d.%m.%Y'),parsed
+            except ValueError: return None,None
+    match=re.fullmatch(r'(\d{1,2})\s+([а-я]+)(?:\s+(20\d{2}))?',value)
+    if match and match.group(2) in MONTHS_RU:
+        day,month,year=int(match.group(1)),MONTHS_RU[match.group(2)],int(match.group(3)) if match.group(3) else None
+        if year:
+            try:
+                parsed=date(year,month,day); return parsed.strftime('%d.%m.%Y'),parsed
+            except ValueError: return None,None
+        if 1<=day<=31: return f'{day:02d}.{month:02d}',None
+    return None,None
+
+
+def _parse_schedule_time(raw: str) -> str | None:
+    value=raw.lower().strip().replace(' часов','').replace(' часа','').replace(' час','').replace('.',':')
+    match=re.fullmatch(r'(\d{1,2})(?::(\d{1,2}))?',value)
+    if not match: return None
+    hour=int(match.group(1)); minute=int(match.group(2) or 0)
+    return f'{hour:02d}:{minute:02d}' if 0<=hour<=23 and 0<=minute<=59 else None
+
+
+def _parse_schedule_count(raw: str) -> int | None:
+    value=raw.lower().strip(); match=re.search(r'\d+',value)
+    if match: result=int(match.group(0)); return result if result>0 else None
+    word=value.split()[0] if value else ''; return NUMBER_WORDS.get(word)
+
+
+def _parse_schedule_price(raw: str) -> float | int | None:
+    value=' '.join(raw.lower().replace('ё','е').split()); match=re.search(r'(\d[\d ]*(?:[,.]\d+)?)',value)
+    if match:
+        result=float(match.group(1).replace(' ','').replace(',','.'))
+        if re.search(r'\bтыс(?:\.|яч[аи]?)?',value): result*=1000
+    else:
+        word=value.split()[0] if value else ''; result=float(NUMBER_WORDS.get(word,0))*1000 if 'тысяч' in value else 0
+    if result<=0: return None
+    return int(result) if result.is_integer() else result
+
+
+def parse_schedule_rows(text: str) -> tuple[list[dict[str,Any]],str | None]:
+    """Parse schedule rows while treating everything after price as one place."""
+    rows=[row.strip(' \t.;') for row in re.split(r'\s*;\s*|\r?\n+',text.strip()) if row.strip(' \t.;')]
+    entries=[]
+    weekday_pattern='|'.join(sorted(map(re.escape,WEEKDAYS),key=len,reverse=True))
+    pattern=re.compile(rf'^\s*(?P<date>[^,]+)\s*,\s*(?:(?P<weekday>{weekday_pattern})\s*,\s*)?(?P<time>[^,]+)\s*,\s*(?P<count>[^,]+)\s*,\s*(?P<price>[^,]+)\s*,\s*(?P<place>.+?)\s*$',re.I)
+    labels=('дата','день недели или время','время','количество','стоимость одной тренировки','место')
+    for index,row in enumerate(rows,1):
+        match=pattern.match(row)
+        if not match:
+            parts=[part.strip() for part in re.split(r'\s*,\s*',row)]
+            missing=[]
+            # With weekday: six components; without it: five.  Report the
+            # business fields that are definitely absent instead of a generic error.
+            if len(parts)<4: missing=['количество','стоимость одной тренировки','место'][max(0,len(parts)-3):]
+            elif len(parts)==4: missing=['стоимость одной тренировки','место']
+            elif len(parts)==5 and parts[1].lower() in WEEKDAYS: missing=['место']
+            else: missing=['структура строки']
+            return [],f'Для строки {index} не указаны или не распознаны: {", ".join(missing)}. Пример: 20.10.2026, вторник, 19:00, 1, 5000 руб., Москва.'
+        date_value,parsed_date=_parse_schedule_date(match.group('date'))
+        weekday=WEEKDAYS.get((match.group('weekday') or '').lower())
+        time_value=_parse_schedule_time(match.group('time')); count=_parse_schedule_count(match.group('count')); price=_parse_schedule_price(match.group('price')); place=match.group('place').strip(' ,')
+        errors=[]
+        if not date_value: errors.append('дата (например, 20.10.2026)')
+        if not time_value: errors.append('время (например, 19:00)')
+        if count is None: errors.append('количество тренировок (например, 1)')
+        if price is None: errors.append('стоимость одной тренировки (например, 5000 руб.)')
+        if not place: errors.append('место проведения')
+        if errors: return [],f'Для строки {index} не распознаны: {", ".join(errors)}.'
+        derived_weekday=('понедельник','вторник','среда','четверг','пятница','суббота','воскресенье')[parsed_date.weekday()] if parsed_date else None
+        if weekday and derived_weekday and weekday!=derived_weekday:
+            return [],f'В строке {index} день недели «{weekday}» не соответствует дате {date_value} ({derived_weekday}).'
+        entries.append({'date':date_value,'weekday':weekday or derived_weekday or '', 'time':time_value,'count':count,'unit_price':price,'place':place})
+    return entries,None
+
+
 def extract_training_facts(text: str, current: dict | None=None) -> dict:
     """Mock-compatible fact extraction only; it never decides applicability."""
     t=' '.join(text.lower().replace('ё','е').split()); patch: dict[str,Any]={}
@@ -166,15 +253,13 @@ def extract_training_facts(text: str, current: dict | None=None) -> dict:
     if 'свыше года' in t or 'более года' in t: put('term.more_than_one_year',True)
     elif 'не более года' in t: put('term.more_than_one_year',False)
     if 'запрос документов о ресурсах' in t: put('ip.long_term_resources_clause',True)
-    schedule=[]
-    for match in re.finditer(r'(20\d{2}-\d{2}-\d{2})\s*,\s*([^,;]+),\s*([^,;]+),\s*(\d+)\s*,\s*([\d.]+)\s*,\s*([^;]+)',text):
-        schedule.append(dict(date=match.group(1),weekday=match.group(2).strip(),time=match.group(3).strip(),count=int(match.group(4)),unit_price=float(match.group(5)),place=match.group(6).strip()))
+    schedule,schedule_error=parse_schedule_rows(text)
     if not schedule and months:
         time_match=re.search(r'\b([01]?\d|2[0-3]):[0-5]\d\b',t); count_match=re.search(r'(\d+)\s*трениров',t); price_match=re.search(r'по\s*([\d ]+)\s*(?:руб|₽)',t)
         weekdays=[word for word in ('понедельник','вторник','сред','четверг','пятниц','суббот','воскресень') if word in t]
         if time_match or count_match or price_match or weekdays:
             schedule=[{'date':None,'weekday':' и '.join(weekdays) or None,'time':time_match.group(0) if time_match else None,'count':int(count_match.group(1)) if count_match else None,'unit_price':float(price_match.group(1).replace(' ','')) if price_match else None,'place':None}]
-    if schedule: put('schedule.entries',schedule)
+    if schedule and not schedule_error: put('schedule.entries',schedule)
     return patch
 
 
@@ -261,7 +346,7 @@ def missing_red_inputs(decision: TrainingDecision, facts: dict) -> list[dict[str
     specs += [
       _input('RF020','places.multiple_or_not_in_contract','BOOLEAN','Мест проведения несколько или адрес будет указан только в графике?', ['Да','Нет']),
       _input('RF021','schedule.months','LIST','За какие месяцы нужен график? Укажите в формате ГГГГ-ММ.'),
-      _input('RF021','schedule.entries','SCHEDULE','Укажите строки графика: дата, день недели, время, количество, цена одной тренировки, место. Строки разделите точкой с запятой.'),
+      _input('RF021','schedule.entries','SCHEDULE','Укажите график тренировок. Для каждой строки нужны: дата, день недели, время, количество тренировок, стоимость одной тренировки и место проведения. Пример: 20.10.2026, вторник, 19:00, 1, 5000 руб., Москва, ул. Большая Татарская, 11. Несколько строк разделите точкой с запятой.'),
       _input('RF022','extra_option.enabled','BOOLEAN','Нужны дополнительные тренировки или сопровождение?', ['Да','Нет']),
     ]
     if _get(facts,'extra_option.enabled') is True: specs += [_input('RF023','extra_option.limit','INTEGER','Каково максимальное количество дополнительных услуг?')]
@@ -306,8 +391,8 @@ def parse_pending_red_answer(text: str, pending: dict | None) -> tuple[dict,str,
     elif parser=='LIST':
         value=list(dict.fromkeys(re.findall(r'\b20\d{2}-(?:0[1-9]|1[0-2])\b',normalized))) or None
     elif parser=='SCHEDULE':
-        extracted=extract_training_facts(text)
-        value=_get(extracted,'schedule.entries')
+        value,schedule_error=parse_schedule_rows(text)
+        if schedule_error: return {},'schedule',schedule_error
     elif parser=='OGRNIP':
         match=re.search(r'\b\d{15}\b',normalized); value=match.group(0) if match else None
     elif parser in {'STRING','PERSON_DETAILS'}:
@@ -548,10 +633,11 @@ def render_training_contract(root: Path, facts: dict, decision: TrainingDecision
         if table_index >= len(document.tables): continue
         table=document.tables[table_index]
         for index,entry in enumerate(entries):
-            row_index=2+index
-            if row_index>=len(table.rows): break
+            # Approved templates alternate a month-label row and a data row.
+            row_index=2+(index*2)
+            while row_index>=len(table.rows): table.add_row()
             values=[entry.get(k,'') for k in ('date','weekday','time','count','unit_price','place')]
-            for cell,value in zip(table.rows[row_index].cells,values): cell.text=str(value)
+            for column,value in zip((0,1,2,3,4,6),values): table.rows[row_index].cells[column].text=str(value)
     for paragraph in document.paragraphs:
         for run in paragraph.runs:
             if run.font.color.rgb and str(run.font.color.rgb).upper() in {'FF0000','F00000','C00000'}: run.text=''; run.font.color.rgb=None

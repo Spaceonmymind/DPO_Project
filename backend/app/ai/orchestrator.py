@@ -1,3 +1,4 @@
+import re
 from .config import get_llm_settings
 from .gateway import LLMGateway
 from .prompts import PromptManager
@@ -87,7 +88,7 @@ class AIOrchestrator:
             if intent == 'CONFIRM_SPECIFICATION': answer = 'Техническое задание готово к подтверждению. Проверьте карточку и нажмите «Подтвердить».'
             elif intent == 'UPDATE_SPECIFICATION' and changed: answer = 'Изменения внесены только в указанные поля технического задания.'
             elif missing:
-                answer,fields,repeats=clarification(missing[:2],existing_context.get('last_clarification_fields',[]),existing_context.get('clarification_repeat_count',0))
+                answer,fields,repeats=clarification(missing[:1],existing_context.get('last_clarification_fields',[]),existing_context.get('clarification_repeat_count',0))
                 context_data.update(last_clarification_fields=fields,last_clarification_question=answer,clarification_repeat_count=repeats)
             else: answer = 'Черновик технического задания готов. Проверьте данные и подтвердите их.'
         else:
@@ -109,6 +110,10 @@ class AIOrchestrator:
         messages = [LLMMessage(role='system',content=system),LLMMessage(role='user',content=f'{task}\n<UNTRUSTED_DOCUMENT>\n{safe}\n</UNTRUSTED_DOCUMENT>')]
         _, extracted = await self.gateway.generate(messages,RequirementsExtractionResult,LLMOptions(metadata={'prompt_version':version,'untrusted_document':True}),db,case.id,user.id,'analyse_specification',full_document=True)
         data = {field:getattr(extracted,field,'') for field in SPEC_FIELDS}
+        delivery_match=re.search(r'срок\s+(?:поставки|выполнения)\s*[:—-]\s*([^\n.;]+)',text,re.I)
+        if delivery_match:
+            data['delivery_term']=delivery_match.group(1).strip()
+            if not data.get('deadline'): data['deadline']=data['delivery_term']
         if structured:
             for key, value in structured.items():
                 if value not in (None,'',[]): data[key] = value

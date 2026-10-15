@@ -110,6 +110,9 @@ def normalize_user_message(text: str, existing_context: dict, current_spec: dict
 
 
 def clarification(fields: list[str], previous_fields: list[str], repeat_count: int) -> tuple[str, list[str], int]:
+    # A dialogue turn owns one atomic target even when several fields are missing.
+    fields = fields[:1]
+    previous_fields = previous_fields[:1]
     same = fields == previous_fields
     repeats = repeat_count + 1 if same else 0
     labels = {'purpose':'основная цель закупки','scope':'требуемый объём','deadline':'срок выполнения','acceptance_criteria':'критерии приёмки результата'}
@@ -119,8 +122,6 @@ def clarification(fields: list[str], previous_fields: list[str], repeat_count: i
         question = 'Не удалось однозначно интерпретировать ответ. Укажите, пожалуйста, отдельно: ' + '; '.join(labels.get(field, field) for field in fields) + '.'
     elif repeats == 1:
         question = 'Осталось уточнить: ' + ' и '.join(labels.get(field, field) for field in fields) + '. Можно ответить свободным текстом.'
-    elif len(fields) == 1:
-        question = {'deadline':'Какой срок выполнения требуется?','acceptance_criteria':'Какими должны быть критерии приёмки результата?','purpose':'Какова основная цель закупки?','scope':'Какой объём товаров, работ или услуг требуется?'}.get(fields[0], f'Уточните: {labels.get(fields[0], fields[0])}?')
     else:
-        question = 'Уточните, пожалуйста: ' + ' и '.join(labels.get(field, field) for field in fields[:2]) + '?'
+        question = {'deadline':'Какой срок выполнения требуется?','acceptance_criteria':'Какими должны быть критерии приёмки результата?','purpose':'Какова основная цель закупки?','scope':'Какой объём товаров, работ или услуг требуется?'}.get(fields[0], f'Уточните: {labels.get(fields[0], fields[0])}?')
     return question, fields, repeats

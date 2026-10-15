@@ -29,6 +29,7 @@ import openpyxl
 import xlwt
 from app.db import Base, engine
 from app.documents.service import SpreadsheetSpecificationParser
+from app.ai.dialogue import clarification
 
 Base.metadata.create_all(engine)
 from app.seed import seed
@@ -40,6 +41,12 @@ def auth(client: TestClient, name: str = 'ivanov') -> dict[str, str]:
     response = client.post('/api/v1/auth/login', json={'external_id': name, 'password': name.capitalize()})
     assert response.status_code == 200
     return {'x-csrf-token': response.json()['csrf_token']}
+
+
+def test_clarification_asks_only_one_atomic_field():
+    question, fields, _ = clarification(['purpose', 'deadline'], [], 0)
+    assert fields == ['purpose']
+    assert 'цель' in question.lower() and 'срок' not in question.lower()
 
 
 def test_full_flow_and_versions():
@@ -421,7 +428,7 @@ def test_full_supply_specification_api_dialogue_reaches_ready_and_downloads_docx
         body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answers[pending['target']]}).json()
     assert len(seen)==len(set(seen)) and body['state']=='SPEC_REVIEW'
     body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Подтверждаю'}).json()
-    assert body['state']=='SPEC_READY' and body['technical_specification']['status']=='CONFIRMED'
+    assert body['state']=='SPEC_READY' and body['technical_specification']['status']=='READY'
     response=client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format=docx',headers=headers)
     assert response.status_code==200 and response.content.startswith(b'PK')
 
@@ -485,3 +492,69 @@ def test_supply_dialogue_does_not_repeat_question_after_valid_answer():
     body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'2'}).json()
     second=body['procurement_context']['pending_specification_question']['question_id']
     assert first=='SUPPLY_ITEM_COUNT' and second=='SUPPLY_ITEM_1_DESCRIPTION' and first!=second
+
+
+def complete_supply_case(client,headers):
+    case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json()
+    answers={'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
+      'items[0].manufacturer':'Lenovo','items[0].warranty_term':'3 года','items[0].unit_price':'100 тыс. руб.',
+      'items[0].quantity':'5 шт.','delivery_address':'Москва, ул. Большая Татарская, 11','currency':'рубли',
+      'vat_mode':'С НДС','vat_rate':'22%','delivery_term':'10 рабочих дней','support_required':'Нет',
+      'warranty_service_description':'ремонт и замена','warranty_terms_url':'https://example.test/warranty'}
+    while pending:=body['procurement_context'].get('pending_specification_question'):
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answers[pending['target']]}).json()
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Подтверждаю'}).json()
+    return case_id,body
+
+
+def test_supply_owner_can_patch_draft_and_foreign_user_cannot():
+    owner=TestClient(app); owner_headers=auth(owner); case_id=owner.post('/api/v1/cases',headers=owner_headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
+    response=owner.patch(f'/api/v1/cases/{case_id}/technical-specification',headers=owner_headers,json={'changes':[{'field':'delivery_term','value':'30 дней'}]})
+    assert response.status_code==200 and response.json()['data']['delivery_term']=='30 дней'
+    foreign=TestClient(app); foreign_headers=auth(foreign,'petrova')
+    response=foreign.patch(f'/api/v1/cases/{case_id}/technical-specification',headers=foreign_headers,json={'changes':[{'field':'delivery_term','value':'1 день'}]})
+    assert response.status_code==404
+
+
+def test_supply_ready_reopens_then_right_panel_patch_persists():
+    client=TestClient(app); headers=auth(client); case_id,_=complete_supply_case(client,headers)
+    reopened=client.post(f'/api/v1/cases/{case_id}/technical-specification/reopen',headers=headers)
+    assert reopened.status_code==200 and reopened.json()['status']=='EDITING'
+    patched=client.patch(f'/api/v1/cases/{case_id}/technical-specification',headers=headers,json={'changes':[{'field':'items[0].quantity','value':'10'}]})
+    assert patched.status_code==200 and patched.json()['data']['items'][0]['quantity']==10
+    persisted=client.get(f'/api/v1/cases/{case_id}',headers=headers).json()
+    assert persisted['technical_specification']['data']['items'][0]['quantity']==10
+
+
+def test_supply_chat_sparse_edits_subject_lock_and_undo():
+    client=TestClient(app); headers=auth(client); case_id,body=complete_supply_case(client,headers)
+    subject=body['technical_specification']['data']['subject']; original_address=body['technical_specification']['data']['delivery_address']
+    edits=('Поменяй количество первой позиции на 10','Исправь срок поставки на 30 дней','Добавь критерий приёмки: оборудование должно быть новым','Добавь критерий приёмки: упаковка не повреждена','Поменяй гарантию на 36 месяцев')
+    for message in edits:
+        body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':message}).json()
+        assert body['technical_specification']['data']['subject']==subject
+    data=body['technical_specification']['data']
+    assert data['items'][0]['quantity']==10 and data['delivery_term']=='30 дней'
+    assert 'оборудование должно быть новым' in data['acceptance_criteria'] and data['items'][0]['warranty_term']=='36 месяцев'
+    assert data['delivery_address']==original_address
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Отмени последнее изменение'}).json()
+    assert body['technical_specification']['data']['items'][0]['warranty_term']=='3 года'
+
+
+def test_supply_without_part_number_ready_download_completed_and_contract_handoff():
+    client=TestClient(app); headers=auth(client); case_id,body=complete_supply_case(client,headers)
+    assert body['technical_specification']['status']=='READY' and body['technical_specification']['data']['items'][0].get('part_number','')==''
+    assert body['recommendation']['template_code']=='SUPPLY' and body['procurement_context']['contract_status']=='READY'
+    response=client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format=docx',headers=headers)
+    assert response.status_code==200
+    document=Document(io.BytesIO(response.content)); assert document.tables[0].rows[1].cells[1].text==''
+    body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json()
+    assert body['technical_specification']['status']=='COMPLETED' and body['state']=='COMPLETED'
+
+
+def test_uploaded_tz_extracts_delivery_term():
+    client=TestClient(app); headers=auth(client); case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
+    source=Document(); source.add_paragraph('Предмет закупки: поставка ноутбуков'); source.add_paragraph('Срок поставки — 22 календарных дня'); payload=io.BytesIO(); source.save(payload)
+    body=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('existing.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()['case']
+    assert body['technical_specification']['data']['delivery_term']=='22 календарных дня'

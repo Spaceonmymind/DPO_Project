@@ -42,11 +42,13 @@ class SpecificationRouter:
 def empty_supply_specification() -> dict[str, Any]:
     return {
         'kind': 'SUPPLY', 'template_code': 'SUPPLY', 'equipment_category': '',
+        'subject': '', 'subject_locked': False, 'acceptance_criteria': [],
         'delivery_address': '', 'currency': '', 'vat_mode': '', 'vat_rate': None,
         'vat_basis': '', 'delivery_term': '', 'support_required': None,
         'support_services': '', 'support_term': '', 'support_start_condition': '',
         'warranty_service_description': '', 'warranty_terms_url': '', 'items': [],
         'total_amount': '0', 'vat_amount': '0', 'confirmed': False,
+        'artifact_status': 'NONE', 'provenance': {}, 'previous_state': None,
     }
 
 
@@ -139,11 +141,11 @@ class Question:
 
 BASE_QUESTIONS = (
     Question('SUPPLY_CATEGORY', 'equipment_category', 'TEXT', 'Что закупаем? Укажите категорию оборудования.'),
-    Question('SUPPLY_ITEM_COUNT', 'item_count', 'INTEGER', 'Сколько товарных позиций будет в ТЗ?'),
+    Question('SUPPLY_ITEM_COUNT', 'item_count', 'INTEGER', 'Сколько разных видов товаров будет в ТЗ? Например, ноутбуки и мониторы — это 2 позиции.'),
     Question('SUPPLY_ADDRESS', 'delivery_address', 'TEXT', 'Укажите полный адрес доставки.'),
     Question('SUPPLY_CURRENCY', 'currency', 'CURRENCY', 'В какой валюте указаны цены? Например: рубли.'),
     Question('SUPPLY_VAT_MODE', 'vat_mode', 'VAT_MODE', 'Цены указаны с НДС или без НДС?'),
-    Question('SUPPLY_VAT_RATE', 'vat_rate', 'RATE', 'Укажите ставку НДС, например 20%.', lambda d: d.get('vat_mode') == 'VAT_PAYER'),
+    Question('SUPPLY_VAT_RATE', 'vat_rate', 'RATE', 'Укажите ставку НДС, например 22%.', lambda d: d.get('vat_mode') == 'VAT_PAYER'),
     Question('SUPPLY_VAT_BASIS', 'vat_basis', 'TEXT', 'Укажите основание, по которому НДС не облагается.', lambda d: d.get('vat_mode') == 'NO_VAT'),
     Question('SUPPLY_DELIVERY_TERM', 'delivery_term', 'TEXT', 'Укажите срок поставки товара.'),
     Question('SUPPLY_SUPPORT_REQUIRED', 'support_required', 'BOOLEAN', 'Нужна ли техническая поддержка производителя?'),
@@ -157,7 +159,7 @@ BASE_QUESTIONS = (
 
 def _item_question(index: int, field: str) -> Question:
     labels = {
-        'description': ('TEXT', 'описание товара'), 'part_number': ('TEXT', 'парт-номер'),
+        'description': ('TEXT', 'описание товара'),
         'manufacturer': ('TEXT', 'производителя'), 'warranty_term': ('WARRANTY', 'срок гарантии'),
         'unit_price': ('MONEY', 'цену за единицу'), 'quantity': ('INTEGER', 'количество'),
     }
@@ -200,7 +202,7 @@ def _parse(parser: str, text: str) -> tuple[Any, str | None]:
         return None, 'Укажите «С НДС» или «Без НДС».'
     if parser == 'RATE':
         match = re.search(r'(\d+(?:[,.]\d+)?)\s*%', raw)
-        return (float(match.group(1).replace(',', '.')), None) if match else (None, 'Укажите ставку в процентах, например 20%.')
+        return (float(match.group(1).replace(',', '.')), None) if match else (None, 'Укажите ставку в процентах, например 22%.')
     if parser == 'CURRENCY':
         if any(x in low for x in ('руб', 'rub', '₽')): return 'рублей', None
         if any(x in low for x in ('доллар', 'usd', '$')): return 'долларов США', None
@@ -230,7 +232,7 @@ def next_question(data: dict[str, Any]) -> Question | None:
     if not data.get('items'):
         return BASE_QUESTIONS[1]
     for index, item in enumerate(data['items']):
-        for field in ('description', 'part_number', 'manufacturer', 'warranty_term', 'unit_price', 'quantity'):
+        for field in ('description', 'manufacturer', 'warranty_term', 'unit_price', 'quantity'):
             if item.get(field) in (None, ''):
                 return _item_question(index, field)
     for question in BASE_QUESTIONS[2:]:
@@ -248,24 +250,115 @@ def summary(data: dict[str, Any]) -> str:
             f"НДС: {vat}\nТехподдержка: {support}\n\nВсё верно?")
 
 
+def _snapshot(data: dict[str, Any]) -> dict[str, Any]:
+    snapshot = deepcopy(data)
+    snapshot['previous_state'] = None
+    return snapshot
+
+
+class SupplySpecificationUpdateService:
+    """The single sparse-update path used by chat and HTTP editing."""
+    editable_fields = {
+        'equipment_category', 'subject', 'delivery_address', 'currency', 'vat_mode',
+        'vat_rate', 'vat_basis', 'delivery_term', 'support_required', 'support_services',
+        'support_term', 'support_start_condition', 'warranty_service_description',
+        'warranty_terms_url', 'acceptance_criteria', 'items',
+    }
+
+    def apply(self, data: dict[str, Any], changes: list[dict[str, Any]], source: str = 'USER_EXPLICIT') -> dict[str, Any]:
+        updated = deepcopy(data)
+        updated.setdefault('provenance', {})
+        updated.setdefault('acceptance_criteria', [])
+        updated.setdefault('artifact_status', 'NONE')
+        before = _snapshot(data)
+        changed = False
+        for change in changes:
+            field = change.get('field', '')
+            operation = change.get('operation', 'replace')
+            value = change.get('value')
+            item_match = re.fullmatch(r'items\[(\d+)]\.(description|part_number|manufacturer|warranty_term|unit_price|quantity)', field)
+            if item_match:
+                index, item_field = int(item_match.group(1)), item_match.group(2)
+                if not 0 <= index < len(updated['items']): raise ValueError('Позиция не найдена')
+                if item_field == 'quantity':
+                    value = parse_positive_integer(str(value))
+                    if value is None: raise ValueError('Количество должно быть целым числом больше нуля')
+                elif item_field == 'unit_price':
+                    parsed = parse_money(str(value))
+                    if parsed is None: raise ValueError('Цена должна быть положительным числом')
+                    value = _decimal_string(parsed)
+                updated['items'][index][item_field] = '' if operation == 'delete' else value
+                updated['provenance'][field] = source; changed = True; continue
+            if field == 'items.add':
+                item = deepcopy(value or {})
+                item.setdefault('part_number', '')
+                item.setdefault('total_price', '0')
+                updated['items'].append(item); updated['provenance'][f'items[{len(updated["items"])-1}]'] = source; changed = True; continue
+            if field == 'items.remove':
+                index = int(value)
+                if not 0 <= index < len(updated['items']): raise ValueError('Позиция не найдена')
+                updated['items'].pop(index); changed = True; continue
+            if field not in self.editable_fields: raise ValueError(f'Недопустимое поле: {field}')
+            if field == 'acceptance_criteria':
+                if isinstance(value, str): value = [part.strip(' -•') for part in re.split(r'[;\n]+', value) if part.strip(' -•')]
+                if not isinstance(value, list): raise ValueError('Критерии приёмки должны быть текстом или списком')
+            if field == 'subject' and updated.get('subject_locked') and source != 'USER_EXPLICIT':
+                continue
+            updated[field] = ([] if field in {'items', 'acceptance_criteria'} else '') if operation == 'delete' else value
+            updated['provenance'][field] = source
+            if field == 'subject' and source == 'USER_EXPLICIT': updated['subject_locked'] = True
+            changed = True
+        if changed:
+            updated['previous_state'] = before
+            updated['confirmed'] = False
+            updated['artifact_status'] = 'STALE' if data.get('artifact_status') == 'CURRENT' else data.get('artifact_status', 'NONE')
+        return recalculate(updated)
+
+    def undo(self, data: dict[str, Any]) -> dict[str, Any]:
+        previous = data.get('previous_state')
+        if not previous: raise ValueError('Нет изменения для отмены')
+        restored = deepcopy(previous); restored['previous_state'] = None
+        restored['confirmed'] = False
+        restored['artifact_status'] = 'STALE' if data.get('artifact_status') == 'CURRENT' else restored.get('artifact_status', 'NONE')
+        return recalculate(restored)
+
+
 class SupplySpecificationDialogueEngine:
+    def __init__(self):
+        self.updates = SupplySpecificationUpdateService()
+
     def process(self, data: dict[str, Any] | None, text: str, pending: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any] | None, str, bool]:
         data = deepcopy(data or empty_supply_specification())
+        # Keep older/in-progress JSON documents compatible now that part number is optional.
+        for item in data.get('items', []):
+            item.setdefault('part_number', '')
         normalized = re.sub(r'[.!?]+$', '', text.strip().lower())
+        if normalized in {'отмени последнее изменение', 'верни как было', 'откатить последнее изменение'}:
+            try: data = self.updates.undo(data)
+            except ValueError as exc: return data, pending, str(exc) + '.', False
+            question = next_question(data)
+            return data, self.pending(question), 'Последнее изменение отменено.' + (f'\n\n{question.text}' if question else '\n\n' + summary(data)), False
         if normalized in CONFIRMATIONS and next_question(data) is None:
             data['confirmed'] = True
             return recalculate(data), None, 'Техническое задание готово. Сформируйте и скачайте DOCX.', True
 
-        edit_message = self._apply_edit(data, text)
-        if edit_message:
+        edit = self._parse_edit(data, text)
+        if edit:
+            changes, edit_message = edit
+            try: data = self.updates.apply(data, changes)
+            except ValueError as exc: return data, pending, str(exc) + '.', False
             question = next_question(data)
-            return recalculate(data), self.pending(question), edit_message + (f'\n\n{question.text}' if question else '\n\n' + summary(data)), False
+            tail = f'\n\n{question.text}' if question else '\n\nМожете внести ещё правки или подтвердить ТЗ.'
+            return data, self.pending(question), edit_message + '\nОстальные данные ТЗ оставил без изменений.' + tail, False
 
         extracted = extract_items(text)
         if extracted and (not data.get('items') or not pending or pending.get('target') in {'equipment_category', 'item_count'}):
             data['items'] = extracted
             if not data.get('equipment_category'):
                 data['equipment_category'] = 'компьютерное оборудование' if any(re.search(r'ноутбук|монитор|компьютер', x['description'], re.I) for x in extracted) else extracted[0]['description']
+                data['subject'] = 'Поставка ' + data['equipment_category']
+                data['subject_locked'] = True
+                data['provenance']['subject'] = 'EXTRACTED'
 
         if pending:
             target, parser = pending['target'], pending['parser']
@@ -279,8 +372,12 @@ class SupplySpecificationDialogueEngine:
                 if error:
                     return data, pending, error, False
                 _set_target(data, target, value)
+                data['provenance'][target] = 'USER_EXPLICIT'
         elif not data.get('equipment_category') and not extracted:
             data['equipment_category'] = _clean(text)
+            data['subject'] = 'Поставка ' + data['equipment_category']
+            data['subject_locked'] = True
+            data['provenance'].update(equipment_category='USER_EXPLICIT', subject='DERIVED')
 
         recalculate(data)
         question = next_question(data)
@@ -293,31 +390,43 @@ class SupplySpecificationDialogueEngine:
         return None if not question else {'question_id': question.question_id, 'target': question.target,
                                           'parser': question.parser, 'question': question.text}
 
-    def _apply_edit(self, data: dict[str, Any], text: str) -> str | None:
+    def _parse_edit(self, data: dict[str, Any], text: str) -> tuple[list[dict[str, Any]], str] | None:
         low = text.lower()
-        if not any(word in low for word in ('поменяй', 'измени', 'убери', 'удали', 'добавь')):
+        if not any(word in low for word in ('поменяй', 'измени', 'исправь', 'убери', 'удали', 'добавь')):
             return None
         remove = re.search(r'(?:убери|удали)\s+(?:позицию\s*)?(\d+|перв\w+|втор\w+|треть\w+)', low)
         if remove:
             token = remove.group(1); index = int(token) - 1 if token.isdigit() else {'перв': 0, 'втор': 1, 'трет': 2}[token[:4]]
             if 0 <= index < len(data['items']):
-                data['items'].pop(index)
-                return 'Позиция удалена.'
+                return [{'field':'items.remove','value':index}], 'Готово. Позиция удалена.'
+        subject = re.search(r'(?:теперь закупаем|предмет закупки\s*[:—-]?|замени предмет на)\s*(.+)', text, re.I)
+        if subject:
+            return [{'field':'subject','value':_clean(subject.group(1))}], 'Готово. Предмет закупки изменён.'
         address = re.search(r'(?:адрес(?:\s+доставки)?)(?:\s+на|\s*[:—-])\s*(.+)', text, re.I)
         if address:
-            data['delivery_address'] = address.group(1).strip()
-            return 'Адрес доставки изменён.'
-        quantity = re.search(r'(?:количеств\w*|на)\s+(\d+)\s*(?:шт\.?)?', low)
+            return [{'field':'delivery_address','value':address.group(1).strip()}], 'Готово. Адрес доставки изменён.'
+        delivery = re.search(r'(?:срок поставки)(?:\s+на|\s*[:—-])\s*(.+)', text, re.I)
+        if delivery:
+            return [{'field':'delivery_term','value':delivery.group(1).strip(' .')}], 'Готово. Срок поставки изменён.'
+        criterion = re.search(r'(?:критери[йяи]\s+при[её]мки)(?:\s*[:—-])?\s*(.+)', text, re.I)
+        if criterion:
+            existing = list(data.get('acceptance_criteria') or []); existing.append(criterion.group(1).strip(' .'))
+            return [{'field':'acceptance_criteria','value':existing}], 'Готово. Критерии приёмки обновлены.'
+        warranty = re.search(r'(?:гаранти[юя]|срок гарантии)(?:\s+на|\s*[:—-])\s*(\d+\s*(?:месяц(?:ев|а)?|мес\.?|год(?:а|ов)?))', text, re.I)
+        if warranty and data['items']:
+            index_match=re.search(r'(перв\w+|втор\w+|треть\w+|\d+)\s+позици',low)
+            index=0 if not index_match else (int(index_match.group(1))-1 if index_match.group(1).isdigit() else {'перв':0,'втор':1,'трет':2}[index_match.group(1)[:4]])
+            return [{'field':f'items[{index}].warranty_term','value':warranty.group(1)}], 'Готово. Срок гарантии изменён.'
+        quantity = re.search(r'(?:количеств\w*(?:\s+(?:перв\w+|втор\w+|треть\w+)\s+позици\w*)?|на)\s+(\d+)\s*(?:шт\.?)?', low)
         if quantity and data['items']:
+            ordinal=re.search(r'(перв\w+|втор\w+|треть\w+)\s+позици',low)
             descriptor = re.search(r'(?:количеств\w*)\s+(.+?)\s+на\s+\d+', low)
-            index = next((i for i, item in enumerate(data['items']) if descriptor and descriptor.group(1) in item.get('description', '').lower()), 0)
-            data['items'][index]['quantity'] = int(quantity.group(1))
-            return 'Количество позиции изменено.'
+            index = ({'перв':0,'втор':1,'трет':2}[ordinal.group(1)[:4]] if ordinal else next((i for i, item in enumerate(data['items']) if descriptor and descriptor.group(1) in item.get('description', '').lower()), 0))
+            return [{'field':f'items[{index}].quantity','value':int(quantity.group(1))}], 'Готово. Количество позиции изменено.'
         if 'добавь' in low:
             additions = extract_items(text)
             if additions:
-                data['items'].extend(additions)
-                return 'Новая позиция добавлена.'
+                return ([{'field':'items.add','value':item} for item in additions], 'Готово. Новая позиция добавлена.')
         return None
 
 

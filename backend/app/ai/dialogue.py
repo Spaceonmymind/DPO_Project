@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -115,13 +116,17 @@ def clarification(fields: list[str], previous_fields: list[str], repeat_count: i
     previous_fields = previous_fields[:1]
     same = fields == previous_fields
     repeats = repeat_count + 1 if same else 0
-    labels = {'purpose':'основная цель закупки','scope':'требуемый объём','deadline':'срок выполнения','acceptance_criteria':'критерии приёмки результата'}
+    labels = {'subject':'предмет закупки','purpose':'основная цель закупки','scope':'требуемый объём','deadline':'срок выполнения','acceptance_criteria':'критерии приёмки результата'}
+    for field in fields:
+        if field not in labels:
+            logging.getLogger(__name__).warning('Missing user-facing field label for %s', field)
+    safe_labels = [labels.get(field, 'сведения о закупке') for field in fields]
     if repeats >= 3:
-        question = 'Ответ пока не распознан. Напишите значения отдельными сообщениями или укажите «нужна помощь ДПО»: ' + '; '.join(labels.get(field, field) for field in fields) + '.'
+        question = 'Ответ пока не распознан. Напишите значение отдельным сообщением или укажите «нужна помощь ДПО»: ' + '; '.join(safe_labels) + '.'
     elif repeats == 2:
-        question = 'Не удалось однозначно интерпретировать ответ. Укажите, пожалуйста, отдельно: ' + '; '.join(labels.get(field, field) for field in fields) + '.'
+        question = 'Не удалось однозначно интерпретировать ответ. Укажите, пожалуйста: ' + '; '.join(safe_labels) + '.'
     elif repeats == 1:
-        question = 'Осталось уточнить: ' + ' и '.join(labels.get(field, field) for field in fields) + '. Можно ответить свободным текстом.'
+        question = 'Осталось уточнить: ' + ' и '.join(safe_labels) + '. Можно ответить свободным текстом.'
     else:
-        question = {'deadline':'Какой срок выполнения требуется?','acceptance_criteria':'Какими должны быть критерии приёмки результата?','purpose':'Какова основная цель закупки?','scope':'Какой объём товаров, работ или услуг требуется?'}.get(fields[0], f'Уточните: {labels.get(fields[0], fields[0])}?')
+        question = {'subject':'Укажите предмет закупки.','deadline':'Какой срок выполнения требуется?','acceptance_criteria':'Какими должны быть критерии приёмки результата?','purpose':'Какова основная цель закупки?','scope':'Какой объём товаров, работ или услуг требуется?'}.get(fields[0], 'Уточните, пожалуйста, сведения о закупке.')
     return question, fields, repeats

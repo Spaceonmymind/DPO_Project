@@ -151,6 +151,7 @@ class Question:
 
 BASE_QUESTIONS = (
     Question('SUPPLY_CATEGORY', 'equipment_category', 'TEXT', 'Что закупаем? Укажите категорию оборудования.'),
+    Question('SUPPLY_SUBJECT', 'subject', 'TEXT', 'Укажите предмет закупки.'),
     Question('SUPPLY_ITEM_COUNT', 'item_count', 'INTEGER', 'Сколько разных видов товаров будет в ТЗ? Например, ноутбуки и мониторы — это 2 позиции.'),
     Question('SUPPLY_ADDRESS', 'delivery_address', 'TEXT', 'Укажите полный адрес доставки.'),
     Question('SUPPLY_CURRENCY', 'currency', 'CURRENCY', 'В какой валюте указаны цены? Например: рубли.'),
@@ -239,13 +240,15 @@ def _ensure_items(data: dict[str, Any], count: int) -> None:
 def next_question(data: dict[str, Any]) -> Question | None:
     if not data.get('equipment_category'):
         return BASE_QUESTIONS[0]
-    if not data.get('items'):
+    if not data.get('subject'):
         return BASE_QUESTIONS[1]
+    if not data.get('items'):
+        return BASE_QUESTIONS[2]
     for index, item in enumerate(data['items']):
         for field in ('description', 'manufacturer', 'warranty_term', 'unit_price', 'quantity'):
             if item.get(field) in (None, ''):
                 return _item_question(index, field)
-    for question in BASE_QUESTIONS[2:]:
+    for question in BASE_QUESTIONS[3:]:
         if question.dependency(data) and _get_target(data, question.target) in (None, ''):
             return question
     return None
@@ -262,6 +265,19 @@ def summary(data: dict[str, Any]) -> str:
             f"Общая стоимость: {money(data['total_amount'])} {data['currency']}\n\nВсё верно?")
 
 
+def extract_delivery_term(text: str) -> str | None:
+    """Extract a term only from a local delivery/deadline semantic anchor."""
+    patterns = (
+        r'(?:срок\s+(?:поставки|выполнения))\s*[:—-]?\s*(\d+(?:[,.]\d+)?\s*(?:календарн\w*|рабоч\w*)?\s*(?:дн(?:я|ей)|месяц(?:а|ев)?|недел(?:и|ь)))',
+        r'(?:поставить|поставка)\s+в\s+течение\s+(\d+\s*(?:календарн\w*|рабоч\w*)?\s*(?:дн(?:я|ей)|месяц(?:а|ев)?|недел(?:и|ь)))',
+        r'(?:срок\s+(?:поставки|выполнения))\s*[:—-]?\s*(до\s+\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match: return _clean(match.group(1))
+    return None
+
+
 def supply_from_import(generic: dict[str, Any], text: str = '') -> dict[str, Any]:
     """Convert imported legacy extraction into the canonical supply state."""
     data = empty_supply_specification()
@@ -276,11 +292,11 @@ def supply_from_import(generic: dict[str, Any], text: str = '') -> dict[str, Any
     } for index,item in enumerate(generic_items,1)]
     subject = generic.get('subject') or (data['items'][0]['description'] if data['items'] else '')
     data.update(subject=subject,subject_locked=bool(subject),equipment_category=subject,
-                delivery_term=generic.get('delivery_term') or generic.get('delivery_terms') or generic.get('deadline') or '',
+                delivery_term=extract_delivery_term(text),
                 acceptance_criteria=generic.get('acceptance_criteria') if isinstance(generic.get('acceptance_criteria'),list) else ([generic['acceptance_criteria']] if generic.get('acceptance_criteria') else []))
     address = re.search(r'(?:адрес\s+доставки|поставка\s+по\s+адресу)\s*[:—-]?\s*([^\n.;]+)', text, re.I)
     if address: data['delivery_address'] = address.group(1).strip()
-    vat = re.search(r'ндс\s*(\d+(?:[,.]\d+)?)\s*%', text, re.I)
+    vat = re.search(r'ндс(?:\s*\([^)]*\))?\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', text, re.I)
     if vat: data.update(vat_mode='VAT_PAYER',vat_rate=float(vat.group(1).replace(',','.')))
     elif re.search(r'без\s+ндс',text,re.I): data.update(vat_mode='NO_VAT',vat_basis='Указано в исходном ТЗ')
     if re.search(r'\b(?:руб(?:ль|ля|лей|\.)?|₽)\b',text,re.I): data['currency']='рублей'
@@ -372,6 +388,9 @@ class SupplySpecificationDialogueEngine:
             item.setdefault('part_number', '')
         normalized = re.sub(r'[.!?]+$', '', text.strip().lower())
         intent = confirmation_intent(text)
+        selected = self._selected_edit_field(normalized, data) if pending is None and next_question(data) is None else None
+        if selected:
+            return data, self.pending(selected), selected.text, False
         if next_question(data) is None and intent == 'REJECT_CONFIRMATION':
             data['confirmed'] = False
             return data, None, 'Хорошо. Что нужно изменить в ТЗ?', False
@@ -407,7 +426,14 @@ class SupplySpecificationDialogueEngine:
 
         if pending:
             target, parser = pending['target'], pending['parser']
-            if target == 'item_count':
+            if parser == 'EDIT_COMMAND':
+                parsed = self._parse_edit(data, text)
+                if not parsed:
+                    return data, pending, 'Опишите изменение, например: «Поменяй количество первой позиции на 10».', False
+                changes, _ = parsed
+                try: data = self.updates.apply(data, changes)
+                except ValueError as exc: return data, pending, str(exc) + '.', False
+            elif target == 'item_count':
                 count = parse_positive_integer(text)
                 if not count:
                     return data, pending, 'Укажите целое количество позиций больше нуля.', False
@@ -417,6 +443,7 @@ class SupplySpecificationDialogueEngine:
                 if error:
                     return data, pending, error, False
                 _set_target(data, target, value)
+                if target == 'acceptance_criteria': data[target] = [value]
                 data['provenance'][target] = 'USER_EXPLICIT'
         elif not data.get('equipment_category') and not extracted:
             data['equipment_category'] = _clean(text)
@@ -434,6 +461,27 @@ class SupplySpecificationDialogueEngine:
     def pending(question: Question | None) -> dict[str, Any] | None:
         return None if not question else {'question_id': question.question_id, 'target': question.target,
                                           'parser': question.parser, 'question': question.text}
+
+    @staticmethod
+    def _selected_edit_field(text: str, data: dict[str, Any]) -> Question | None:
+        aliases = {
+            'delivery_term': {'срок','срок поставки'}, 'delivery_address': {'адрес','доставка','адрес доставки'},
+            'acceptance_criteria': {'критерии','приёмка','приемка','критерии приёмки','критерии приемки'},
+            'support_required': {'поддержка','техподдержка','техническая поддержка'},
+        }
+        if text in {'ндс','налог','ставка ндс'}:
+            return Question('EDIT_VAT_RATE','vat_rate','RATE','Укажите новую ставку НДС, например 22%.') if data.get('vat_mode')=='VAT_PAYER' else Question('EDIT_VAT_MODE','vat_mode','VAT_MODE','Товар облагается НДС или поставляется без НДС?')
+        if text in {'позиция','позиции','товары'}:
+            return Question('EDIT_ITEMS','edit_items','EDIT_COMMAND','Опишите изменение позиции, например: «Поменяй количество первой позиции на 10».')
+        for target, values in aliases.items():
+            if text in values:
+                parser = 'BOOLEAN' if target=='support_required' else 'TEXT'
+                prompt = {'delivery_term':'Укажите новый срок поставки.','delivery_address':'Укажите новый адрес доставки.','acceptance_criteria':'Укажите новые критерии приёмки.','support_required':'Нужна ли техническая поддержка производителя?'}[target]
+                return Question('EDIT_'+target.upper(),target,parser,prompt)
+        item_fields = {'количество':('quantity','INTEGER','Укажите новое количество первой позиции.'),'кол-во':('quantity','INTEGER','Укажите новое количество первой позиции.'),'цена':('unit_price','MONEY','Укажите новую цену за единицу первой позиции.'),'стоимость за штуку':('unit_price','MONEY','Укажите новую цену за единицу первой позиции.'),'гарантия':('warranty_term','WARRANTY','Укажите новый срок гарантии первой позиции.')}
+        if text in item_fields and data.get('items'):
+            field,parser,prompt=item_fields[text]; return Question('EDIT_ITEM_'+field.upper(),f'items[0].{field}',parser,prompt)
+        return None
 
     def _parse_edit(self, data: dict[str, Any], text: str) -> tuple[list[dict[str, Any]], str] | None:
         low = text.lower()

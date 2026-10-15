@@ -8,11 +8,13 @@ from app.supply_specifications import (
     SupplySpecificationDialogueEngine,
     SupplySpecificationRenderer,
     empty_supply_specification,
+    extract_delivery_term,
     extract_items,
     next_question,
     parse_money,
     parse_positive_integer,
     recalculate,
+    supply_from_import,
 )
 
 
@@ -28,7 +30,7 @@ def complete_data(item_count=1, vat_mode='VAT_PAYER', support=True):
                       'manufacturer':'Lenovo','warranty_term':'3 года','unit_price':str(100000+index*1000),
                       'quantity':index+1,'total_price':'0'})
     data=empty_supply_specification()
-    data.update(equipment_category='компьютерное оборудование',delivery_address='Москва, ул. Большая Татарская, 11',
+    data.update(equipment_category='компьютерное оборудование',subject='Поставка компьютерного оборудования',subject_locked=True,delivery_address='Москва, ул. Большая Татарская, 11',
                 currency='рублей',vat_mode=vat_mode,vat_rate=20 if vat_mode=='VAT_PAYER' else None,
                 vat_basis='' if vat_mode=='VAT_PAYER' else 'НДС не облагается на основании применения УСН',
                 delivery_term='в течение 10 рабочих дней',support_required=support,
@@ -97,7 +99,7 @@ def test_total_calculation_two_items():
 def test_schema_dialogue_never_repeats_valid_question_and_confirms():
     engine=SupplySpecificationDialogueEngine(); data=empty_supply_specification(); pending=engine.pending(next_question(data)); seen=[]
     answers={
-      'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
+      'equipment_category':'компьютерное оборудование','subject':'Поставка ноутбуков','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
       'items[0].part_number':'21ABC','items[0].manufacturer':'Lenovo','items[0].warranty_term':'3 года',
       'items[0].unit_price':'100 тыс. руб.','items[0].quantity':'10 шт.','delivery_address':'Москва, ул. Большая Татарская, 11',
       'currency':'рубли','vat_mode':'С НДС','vat_rate':'20%','delivery_term':'10 рабочих дней',
@@ -116,3 +118,13 @@ def test_editing_via_chat_is_sparse():
     assert changed['items'][0]['quantity']==12 and changed['items'][1]['part_number']==original['part_number']
     changed,_,_,_=engine.process(changed,'Убери вторую позицию.',None)
     assert len(changed['items'])==1
+
+
+def test_delivery_term_extraction_never_uses_vat_rate():
+    text='НДС: 22%.\nСрок поставки: 10 дней.'
+    data=supply_from_import({'subject':'Поставка ноутбуков'},text)
+    assert data['vat_rate']==22
+    assert data['delivery_term']=='10 дней'
+    assert data['delivery_term'] not in {'22','22.0'}
+    assert extract_delivery_term('НДС: 22%.') is None
+    assert supply_from_import({'subject':'Поставка ноутбуков'},'НДС: 22%.')['delivery_term'] is None

@@ -49,6 +49,13 @@ def test_clarification_asks_only_one_atomic_field():
     assert 'цель' in question.lower() and 'срок' not in question.lower()
 
 
+def test_clarification_never_exposes_internal_field_name():
+    question, _, _ = clarification(['subject'], [], 0)
+    assert question == 'Укажите предмет закупки.' and 'subject' not in question.lower()
+    fallback, _, _ = clarification(['internal_unknown'], [], 0)
+    assert fallback == 'Уточните, пожалуйста, сведения о закупке.' and 'internal_unknown' not in fallback
+
+
 def test_full_flow_and_versions():
     client = TestClient(app); headers = auth(client)
     case_id = client.post('/api/v1/cases', headers=headers, json={'title': 'Лендинг'}).json()['id']
@@ -413,7 +420,7 @@ def test_full_supply_specification_api_dialogue_reaches_ready_and_downloads_docx
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
     body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json(); seen=[]
     answers={
-      'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
+      'equipment_category':'компьютерное оборудование','subject':'Поставка ноутбуков','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
       'items[0].part_number':'21ABC','items[0].manufacturer':'Lenovo','items[0].warranty_term':'3 года',
       'items[0].unit_price':'100 тыс. руб.','items[0].quantity':'10 шт.','delivery_address':'Москва, ул. Большая Татарская, 11',
       'currency':'рубли','vat_mode':'С НДС','vat_rate':'20%','delivery_term':'10 рабочих дней',
@@ -486,15 +493,18 @@ def test_supply_dialogue_does_not_repeat_question_after_valid_answer():
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
     body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'компьютерное оборудование'}).json()
     first=body['procurement_context']['pending_specification_question']['question_id']
-    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'2'}).json()
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Поставка компьютерного оборудования'}).json()
     second=body['procurement_context']['pending_specification_question']['question_id']
-    assert first=='SUPPLY_ITEM_COUNT' and second=='SUPPLY_ITEM_1_DESCRIPTION' and first!=second
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'2'}).json()
+    third=body['procurement_context']['pending_specification_question']['question_id']
+    assert first=='SUPPLY_SUBJECT' and second=='SUPPLY_ITEM_COUNT' and third=='SUPPLY_ITEM_1_DESCRIPTION'
+    assert len({first,second,third})==3
 
 
 def complete_supply_case(client,headers,confirm=True):
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
     body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json()
-    answers={'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
+    answers={'equipment_category':'компьютерное оборудование','subject':'Поставка ноутбуков','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
       'items[0].manufacturer':'Lenovo','items[0].warranty_term':'3 года','items[0].unit_price':'100 тыс. руб.',
       'items[0].quantity':'5 шт.','delivery_address':'Москва, ул. Большая Татарская, 11','currency':'рубли',
       'vat_mode':'С НДС','vat_rate':'22%','delivery_term':'10 рабочих дней','support_required':'Нет',
@@ -510,7 +520,11 @@ def test_general_new_case_enters_canonical_supply_flow():
     case_id=client.post('/api/v1/cases',headers=headers,json={}).json()['id']
     body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужно купить ноутбуки.'}).json()
     assert body['technical_specification']['data']['kind']=='SUPPLY'
+    assert body['supply_specification']['data']['kind']=='SUPPLY'
+    assert body['procurement_context']['procurement_type']=='SUPPLY'
+    assert body['procurement_context']['workflow_type']=='SUPPLY_SPECIFICATION'
     assert body['procurement_context']['specification_template']=='SUPPLY'
+    assert body['procurement_context']['pending_specification_question']['question_id'].startswith('SUPPLY_')
 
 
 def test_supply_reject_confirmation_enters_editing_without_repeating_summary():
@@ -520,6 +534,17 @@ def test_supply_reject_confirmation_enters_editing_without_repeating_summary():
     assert body['technical_specification']['status']=='EDITING'
     assert body['messages'][-1]['content']=='Хорошо. Что нужно изменить в ТЗ?'
     assert body['messages'][-1]['content']!=previous
+
+
+def test_supply_reject_then_select_vat_field_asks_specific_question():
+    client=TestClient(app); headers=auth(client); case_id,body=complete_supply_case(client,headers,confirm=False)
+    client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'нет'})
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'НДС'}).json()
+    assert body['messages'][-1]['content']=='Укажите новую ставку НДС, например 22%.'
+    assert 'Проверьте ТЗ' not in body['messages'][-1]['content']
+    assert body['procurement_context']['pending_specification_question']['target']=='vat_rate'
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'18%'}).json()
+    assert body['technical_specification']['data']['vat_rate']==18
 
 
 def test_supply_reject_confirmation_with_sparse_patch():
@@ -589,3 +614,14 @@ def test_uploaded_tz_extracts_delivery_term():
     source=Document(); source.add_paragraph('Предмет закупки: поставка ноутбуков'); source.add_paragraph('Срок поставки — 22 календарных дня'); payload=io.BytesIO(); source.save(payload)
     body=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('existing.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()['case']
     assert body['technical_specification']['data']['delivery_term']=='22 календарных дня'
+    assert body['supply_specification']['data']['kind']=='SUPPLY'
+    assert body['procurement_context']['workflow_type']=='SUPPLY_SPECIFICATION'
+
+
+def test_uploaded_supply_tz_keeps_vat_and_delivery_term_separate():
+    client=TestClient(app); headers=auth(client); case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
+    source=Document(); source.add_paragraph('Предмет закупки: поставка ноутбуков'); source.add_paragraph('НДС: 22%.'); source.add_paragraph('Срок поставки: 10 дней.'); payload=io.BytesIO(); source.save(payload)
+    body=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('supply.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()['case']
+    data=body['supply_specification']['data']
+    assert data['vat_rate']==22 and data['delivery_term']=='10 дней'
+    assert data['delivery_term'] not in {'22','22.0'}

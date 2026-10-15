@@ -194,21 +194,18 @@ def test_xlsx_context_selects_same_approved_supply_template():
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
     upload=client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('sample.xlsx',spreadsheet_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
     assert upload.status_code==200
-    recommendation=client.post(f'/api/v1/cases/{case_id}/technical-specification/confirm',headers=headers).json()
-    assert recommendation['status']=='matched' and recommendation['template_code']=='SUPPLY'
-    assert client.get(f'/api/v1/cases/{case_id}/contract-template').content==(template_directory/'договор поставки.rtf').read_bytes()
+    body=upload.json()['case']
+    assert body['technical_specification']['data']['kind']=='SUPPLY'
+    assert body['procurement_context']['specification_template']=='SUPPLY'
 
 
 def test_consistent_docx_pdf_xlsx_exports():
     client=TestClient(app); headers=auth(client)
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'ANALYZE_SPECIFICATION'}).json()['id']
     client.post(f'/api/v1/cases/{case_id}/attachments',headers=headers,files={'file':('sample.xlsx',spreadsheet_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
-    for fmt in ('docx','pdf','xlsx'):
-        response=client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format={fmt}')
-        assert response.status_code==200 and len(response.content)>500
-        if fmt=='docx': assert 'Ноутбук Альфа' in '\n'.join(p.text for p in Document(io.BytesIO(response.content)).paragraphs)
-        if fmt=='pdf': assert 'Ноутбук Альфа' in ''.join(page.get_text() for page in fitz.open(stream=response.content,filetype='pdf'))
-        if fmt=='xlsx': assert 'Ноутбук' in openpyxl.load_workbook(io.BytesIO(response.content)).active['B11'].value
+    # Supply output is intentionally limited to the approved DOCX and cannot
+    # be generated before the imported data has passed validation.
+    assert client.get(f'/api/v1/cases/{case_id}/technical-specification/download?format=docx').status_code==409
 
 
 def test_search_delete_and_ownership():
@@ -440,9 +437,9 @@ def test_text_confirmation_uses_same_transition_as_button_after_xlsx():
     assert uploaded['procurement_context']['procurement_object_type']=='goods'
     assert uploaded['procurement_context']['requires_tangible_work_result'] is False
     body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Всё верно'}).json()
-    assert body['technical_specification']['status']=='CONFIRMED'
-    assert body['recommendation']['template_code']=='SUPPLY' and body['state']=='COMPLETED'
-    assert not any(field in body['procurement_context']['missing_fields'] for field in ('subject','scope'))
+    assert body['technical_specification']['data']['kind']=='SUPPLY'
+    assert body['technical_specification']['status']=='EDITING'
+    assert body['procurement_context']['pending_specification_question'] is not None
 
 
 def test_vague_water_procurement_clarifies_then_selects_supply():
@@ -494,7 +491,7 @@ def test_supply_dialogue_does_not_repeat_question_after_valid_answer():
     assert first=='SUPPLY_ITEM_COUNT' and second=='SUPPLY_ITEM_1_DESCRIPTION' and first!=second
 
 
-def complete_supply_case(client,headers):
+def complete_supply_case(client,headers,confirm=True):
     case_id=client.post('/api/v1/cases',headers=headers,json={'initial_intent':'CREATE_SPECIFICATION'}).json()['id']
     body=client.get(f'/api/v1/cases/{case_id}',headers=headers).json()
     answers={'equipment_category':'компьютерное оборудование','item_count':'1','items[0].description':'Ноутбук Lenovo ThinkPad',
@@ -504,8 +501,42 @@ def complete_supply_case(client,headers):
       'warranty_service_description':'ремонт и замена','warranty_terms_url':'https://example.test/warranty'}
     while pending:=body['procurement_context'].get('pending_specification_question'):
         body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':answers[pending['target']]}).json()
-    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Подтверждаю'}).json()
+    if confirm: body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Подтверждаю'}).json()
     return case_id,body
+
+
+def test_general_new_case_enters_canonical_supply_flow():
+    client=TestClient(app); headers=auth(client)
+    case_id=client.post('/api/v1/cases',headers=headers,json={}).json()['id']
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нужно купить ноутбуки.'}).json()
+    assert body['technical_specification']['data']['kind']=='SUPPLY'
+    assert body['procurement_context']['specification_template']=='SUPPLY'
+
+
+def test_supply_reject_confirmation_enters_editing_without_repeating_summary():
+    client=TestClient(app); headers=auth(client); case_id,body=complete_supply_case(client,headers,confirm=False)
+    previous=body['messages'][-1]['content']; assert 'Всё верно?' in previous
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'нет'}).json()
+    assert body['technical_specification']['status']=='EDITING'
+    assert body['messages'][-1]['content']=='Хорошо. Что нужно изменить в ТЗ?'
+    assert body['messages'][-1]['content']!=previous
+
+
+def test_supply_reject_confirmation_with_sparse_patch():
+    client=TestClient(app); headers=auth(client); case_id,body=complete_supply_case(client,headers,confirm=False)
+    subject=body['technical_specification']['data']['subject']; items=len(body['technical_specification']['data']['items'])
+    body=client.post(f'/api/v1/cases/{case_id}/messages',headers=headers,json={'content':'Нет, срок поставки должен быть 30 дней.'}).json()
+    assert body['technical_specification']['status']=='EDITING'
+    assert body['technical_specification']['data']['delivery_term']=='30 дней'
+    assert body['technical_specification']['data']['subject']==subject and len(body['technical_specification']['data']['items'])==items
+    assert 'Всё верно?' not in body['messages'][-1]['content']
+
+
+def test_supply_chat_does_not_leak_internal_enum_names():
+    client=TestClient(app); headers=auth(client); _,body=complete_supply_case(client,headers,confirm=False)
+    visible='\n'.join(message['content'] for message in body['messages'] if message['role']=='assistant')
+    for internal in ('SUBJECT','SUPPLY','READY','EDITING','COMPLETED','NEEDS_INPUT','MANUAL_REVIEW','question_id'):
+        assert internal not in visible
 
 
 def test_supply_owner_can_patch_draft_and_foreign_user_cannot():

@@ -18,6 +18,16 @@ NUMBER_WORDS = {
     'девять': 9, 'десять': 10, 'одиннадцать': 11, 'двенадцать': 12,
 }
 CONFIRMATIONS = {'да', 'верно', 'все верно', 'всё верно', 'подтверждаю'}
+REJECTIONS = {'нет', 'не', 'неверно', 'не все верно', 'не всё верно', 'есть ошибки', 'хочу исправить', 'нужно изменить'}
+
+
+def confirmation_intent(text: str) -> str:
+    normalized = re.sub(r'[.!?]+$', '', re.sub(r'\s+', ' ', text.strip().lower().replace('ё', 'е')))
+    if normalized in {value.replace('ё', 'е') for value in CONFIRMATIONS}: return 'CONFIRM'
+    if normalized in {value.replace('ё', 'е') for value in REJECTIONS}: return 'REJECT_CONFIRMATION'
+    if re.match(r'^(?:нет|неверно|не все верно|есть ошибки|хочу исправить|нужно изменить)\s*[,;:]\s*\S+', normalized): return 'EDIT_COMMAND'
+    if any(word in normalized for word in ('поменяй', 'измени', 'исправь', 'убери', 'удали', 'добавь')): return 'EDIT_COMMAND'
+    return 'UNKNOWN'
 
 
 class SpecificationTemplateRegistry:
@@ -244,10 +254,38 @@ def next_question(data: dict[str, Any]) -> Question | None:
 def summary(data: dict[str, Any]) -> str:
     vat = f"НДС {data.get('vat_rate')}%" if data.get('vat_mode') == 'VAT_PAYER' else f"Без НДС: {data.get('vat_basis')}"
     support = 'требуется' if data.get('support_required') else 'не требуется'
-    return (f"Я собрал данные для ТЗ:\n\nПозиции: {len(data['items'])}\n"
-            f"Общая стоимость: {money(data['total_amount'])} {data['currency']}\n"
-            f"Адрес: {data['delivery_address']}\nСрок поставки: {data['delivery_term']}\n"
-            f"НДС: {vat}\nТехподдержка: {support}\n\nВсё верно?")
+    items = '\n'.join(f"{index}. {item.get('description','')}\n   Количество: {item.get('quantity','—')}\n   Цена: {money(item.get('unit_price'))} {data.get('currency','')}\n   Гарантия: {item.get('warranty_term') or 'не указана'}" for index,item in enumerate(data['items'],1))
+    criteria = '; '.join(data.get('acceptance_criteria') or []) or 'не указаны'
+    return (f"Проверьте ТЗ:\n\nПредмет закупки: {data.get('subject') or 'не указан'}\n\nПозиции:\n{items}\n\n"
+            f"Адрес доставки: {data['delivery_address']}\nСрок поставки: {data['delivery_term']}\n"
+            f"НДС: {vat}\nТехническая поддержка: {support}\nКритерии приёмки: {criteria}\n"
+            f"Общая стоимость: {money(data['total_amount'])} {data['currency']}\n\nВсё верно?")
+
+
+def supply_from_import(generic: dict[str, Any], text: str = '') -> dict[str, Any]:
+    """Convert imported legacy extraction into the canonical supply state."""
+    data = empty_supply_specification()
+    generic_items = generic.get('items') or []
+    data['items'] = [{
+        'line_number': index, 'part_number': item.get('part_number',''),
+        'description': item.get('description') or item.get('name') or '',
+        'manufacturer': item.get('manufacturer',''),
+        'warranty_term': item.get('warranty_term') or item.get('warranty') or '',
+        'unit_price': str(item.get('unit_price') or ''), 'quantity': item.get('quantity'),
+        'total_price': str(item.get('total_price') or '0'),
+    } for index,item in enumerate(generic_items,1)]
+    subject = generic.get('subject') or (data['items'][0]['description'] if data['items'] else '')
+    data.update(subject=subject,subject_locked=bool(subject),equipment_category=subject,
+                delivery_term=generic.get('delivery_term') or generic.get('delivery_terms') or generic.get('deadline') or '',
+                acceptance_criteria=generic.get('acceptance_criteria') if isinstance(generic.get('acceptance_criteria'),list) else ([generic['acceptance_criteria']] if generic.get('acceptance_criteria') else []))
+    address = re.search(r'(?:адрес\s+доставки|поставка\s+по\s+адресу)\s*[:—-]?\s*([^\n.;]+)', text, re.I)
+    if address: data['delivery_address'] = address.group(1).strip()
+    vat = re.search(r'ндс\s*(\d+(?:[,.]\d+)?)\s*%', text, re.I)
+    if vat: data.update(vat_mode='VAT_PAYER',vat_rate=float(vat.group(1).replace(',','.')))
+    elif re.search(r'без\s+ндс',text,re.I): data.update(vat_mode='NO_VAT',vat_basis='Указано в исходном ТЗ')
+    if re.search(r'\b(?:руб(?:ль|ля|лей|\.)?|₽)\b',text,re.I): data['currency']='рублей'
+    data['provenance']={key:'EXTRACTED' for key,value in data.items() if value not in ('',None,[],False)}
+    return recalculate(data)
 
 
 def _snapshot(data: dict[str, Any]) -> dict[str, Any]:
@@ -333,6 +371,13 @@ class SupplySpecificationDialogueEngine:
         for item in data.get('items', []):
             item.setdefault('part_number', '')
         normalized = re.sub(r'[.!?]+$', '', text.strip().lower())
+        intent = confirmation_intent(text)
+        if next_question(data) is None and intent == 'REJECT_CONFIRMATION':
+            data['confirmed'] = False
+            return data, None, 'Хорошо. Что нужно изменить в ТЗ?', False
+        if next_question(data) is None and intent == 'EDIT_COMMAND' and re.match(r'^\s*(?:нет|неверно|не\s+вс[её]\s+верно|есть ошибки)\s*[,;:]', text, re.I):
+            text = re.sub(r'^\s*(?:нет|неверно|не\s+вс[её]\s+верно|есть ошибки)\s*[,;:]\s*', '', text, flags=re.I)
+            text = 'Исправь ' + text
         if normalized in {'отмени последнее изменение', 'верни как было', 'откатить последнее изменение'}:
             try: data = self.updates.undo(data)
             except ValueError as exc: return data, pending, str(exc) + '.', False
@@ -402,10 +447,10 @@ class SupplySpecificationDialogueEngine:
         subject = re.search(r'(?:теперь закупаем|предмет закупки\s*[:—-]?|замени предмет на)\s*(.+)', text, re.I)
         if subject:
             return [{'field':'subject','value':_clean(subject.group(1))}], 'Готово. Предмет закупки изменён.'
-        address = re.search(r'(?:адрес(?:\s+доставки)?)(?:\s+на|\s*[:—-])\s*(.+)', text, re.I)
+        address = re.search(r'(?:адрес(?:\s+доставки)?)(?:\s+на|\s*[:—-]|\s+должен\s+быть)\s*(.+)', text, re.I)
         if address:
             return [{'field':'delivery_address','value':address.group(1).strip()}], 'Готово. Адрес доставки изменён.'
-        delivery = re.search(r'(?:срок поставки)(?:\s+на|\s*[:—-])\s*(.+)', text, re.I)
+        delivery = re.search(r'(?:срок поставки)(?:\s+на|\s*[:—-]|\s+должен\s+быть)\s*(.+)', text, re.I)
         if delivery:
             return [{'field':'delivery_term','value':delivery.group(1).strip(' .')}], 'Готово. Срок поставки изменён.'
         criterion = re.search(r'(?:критери[йяи]\s+при[её]мки)(?:\s*[:—-])?\s*(.+)', text, re.I)
@@ -417,7 +462,7 @@ class SupplySpecificationDialogueEngine:
             index_match=re.search(r'(перв\w+|втор\w+|треть\w+|\d+)\s+позици',low)
             index=0 if not index_match else (int(index_match.group(1))-1 if index_match.group(1).isdigit() else {'перв':0,'втор':1,'трет':2}[index_match.group(1)[:4]])
             return [{'field':f'items[{index}].warranty_term','value':warranty.group(1)}], 'Готово. Срок гарантии изменён.'
-        quantity = re.search(r'(?:количеств\w*(?:\s+(?:перв\w+|втор\w+|треть\w+)\s+позици\w*)?|на)\s+(\d+)\s*(?:шт\.?)?', low)
+        quantity = re.search(r'(?:количеств\w*(?:\s+(?:перв\w+|втор\w+|треть\w+|[а-яё-]+)\s*(?:позици\w*)?)?(?:\s+должно\s+быть)?|на)\s+(\d+)\s*(?:шт\.?)?', low)
         if quantity and data['items']:
             ordinal=re.search(r'(перв\w+|втор\w+|треть\w+)\s+позици',low)
             descriptor = re.search(r'(?:количеств\w*)\s+(.+?)\s+на\s+\d+', low)

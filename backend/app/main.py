@@ -2,6 +2,7 @@ import hmac
 import hashlib
 import logging
 import os
+import re
 from datetime import timedelta, timezone
 from pathlib import Path
 from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Request,Response,Query
@@ -19,7 +20,7 @@ from app.contracts import select_contract
 from app.contract_router import contract_router
 from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmation
 from app.training_contracts import apply_training_defaults, audit_payload, clarification_for, combine_patches, decide_training, empty_facts, extract_training_facts, merge_facts, parse_pending_red_answer, render_training_contract, resolve_contextual_answer, validate_training_facts, TrainingDecision
-from app.supply_specifications import SupplySpecificationDialogueEngine, SupplySpecificationRenderer, SupplySpecificationUpdateService, empty_supply_specification, next_question
+from app.supply_specifications import SupplySpecificationDialogueEngine, SupplySpecificationRenderer, SupplySpecificationUpdateService, empty_supply_specification, next_question, supply_from_import, summary, confirmation_intent
 from app.security import csrf_token, session_token, verify_password
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
@@ -235,12 +236,13 @@ def supply_specification_message(c,s,text,u,d):
   s.status='EDITING'; s.data={**s.data,'confirmed':False,'artifact_status':'STALE' if s.data.get('artifact_status')=='CURRENT' else s.data.get('artifact_status','NONE')}
   question=next_question(s.data); context.update(specification_status='EDITING',pending_specification_question=supply_engine.pending(question),missing_fields=[] if question is None else [question.target]); save_context(c,context,d); c.state='SPEC_EDITING'
   answer='ТЗ открыто для редактирования. Напишите, что нужно изменить.'; d.add(Message(case_id=c.id,role='assistant',content=answer)); d.commit(); return detail(c,d)
+ explicit_edit=confirmation_intent(text) in {'REJECT_CONFIRMATION','EDIT_COMMAND'}
  data,next_pending,answer,ready=supply_engine.process(s.data if s else None,text,pending)
  if not s:
   s=TechnicalSpecification(case_id=c.id,data=data); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=data))
  else:
   s.data=data; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=data))
- s.status='READY' if ready else ('AWAITING_CONFIRMATION' if next_pending is None else 'EDITING'); c.state='SPEC_READY' if ready else ('SPEC_REVIEW' if next_pending is None else 'COLLECTING_SPEC_DATA')
+ s.status='READY' if ready else ('EDITING' if explicit_edit else ('AWAITING_CONFIRMATION' if next_pending is None else 'EDITING')); c.state='SPEC_READY' if ready else ('SPEC_EDITING' if explicit_edit else ('SPEC_REVIEW' if next_pending is None else 'COLLECTING_SPEC_DATA'))
  context.update(intent='CREATE_SPECIFICATION',category='supply',subject=data.get('subject') or 'ТЗ на поставку',subject_locked=data.get('subject_locked',False),requires_transfer_of_goods=True,requires_service_activity=False,requires_tangible_work_result=False,requires_agent_actions=False,agent_acts_in_principal_interest=False,specification_template='SUPPLY',specification_status=s.status,pending_specification_question=next_pending,missing_fields=[] if next_pending is None else [next_pending['target']],supply_specification=data)
  if ready:
   decision=apply_contract_decision(c,context,d)
@@ -258,6 +260,10 @@ async def message(cid:str,x:Text,u=Depends(current),d:DBS=Depends(db)):
  c=own(cid,u,d); state_before=c.state; user_message=Message(case_id=cid,role='user',content=x.content); d.add(user_message); audit(d,u.id,cid,'MESSAGE_SENT'); d.commit()
  s=d.query(TechnicalSpecification).filter_by(case_id=cid).first(); p=d.query(ProcurementContextRecord).filter_by(case_id=cid).first(); history=d.query(Message).filter_by(case_id=cid).order_by(Message.created_at).all()
  context=contextout(c,d); intent=p.intent if p else (c.context or {}).get('intent')
+ if intent=='GENERAL_PROCUREMENT_DIALOGUE' and not s and re.search(r'\b(?:купить|закупить|поставк\w*|товар\w*|оборудован\w*|ноутбук\w*|монитор\w*|сервер\w*)\b',x.content,re.I):
+  data=empty_supply_specification(); s=TechnicalSpecification(case_id=cid,data=data,status='EDITING'); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=data))
+  context=dict(context); context.update(intent='CREATE_SPECIFICATION',category='supply',specification_template='SUPPLY',supply_specification=data); save_context(c,context,d); intent='CREATE_SPECIFICATION'
+  if c.title=='Новое обращение': c.title=title_for(x.content,type('Context',(),{'subject':''})())
  if intent=='CREATE_SPECIFICATION' and (context.get('specification_template')=='SUPPLY' or (s and s.data.get('kind')=='SUPPLY')):
   return supply_specification_message(c,s,x.content,u,d)
  if intent in {'GET_CONTRACT','TRAINING_CONTRACT'}:
@@ -385,8 +391,16 @@ async def upload(cid:str,file:UploadFile=File(...),u=Depends(current),d:DBS=Depe
  try: result,specdata=await orchestrator.analyse_document(c,u,text,d,structured)
  except LLMError:
   d.rollback(); p.unlink(missing_ok=True); raise HTTPException(503,detail='Не удалось обработать запрос. Попробуйте повторить позднее.')
- context=result.context.model_dump(); save_context(c,context,d); c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
- if not s: s=TechnicalSpecification(case_id=cid,data=specdata); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
- elif s.status!='CONFIRMED': s.data=specdata; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=s.data))
- items=f"\nПозиции: {len(s.data.get('items',[]))}." if s.data.get('items') else ''
- msg=result.summary+'\n\nПредмет закупки: '+(s.data.get('subject') or 'требуется уточнение')+items+'\nСрок выполнения: '+(s.data.get('deadline') or s.data.get('delivery_terms') or 'требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или напишите, что нужно исправить.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}
+ context=result.context.model_dump()
+ if context.get('category')!='supply' and not (structured and structured.get('items')):
+  save_context(c,context,d); c.state='SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
+  if not s: s=TechnicalSpecification(case_id=cid,data=specdata); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
+  elif s.status!='CONFIRMED': s.data=specdata; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=s.data))
+  items=f"\nПозиции: {len(s.data.get('items',[]))}." if s.data.get('items') else ''
+  msg=result.summary+'\n\nПредмет закупки: '+(s.data.get('subject') or 'требуется уточнение')+items+'\nСрок выполнения: '+(s.data.get('deadline') or s.data.get('delivery_terms') or 'требуется уточнение')+'\n\nВсё верно? Подтвердите техническое задание или напишите, что нужно исправить.'; d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}
+ supply_data=supply_from_import(specdata,text); pending_question=next_question(supply_data); pending=supply_engine.pending(pending_question)
+ context.update(intent='CREATE_SPECIFICATION',category='supply',specification_template='SUPPLY',subject=supply_data.get('subject'),subject_locked=supply_data.get('subject_locked'),supply_specification=supply_data,pending_specification_question=pending,missing_fields=[] if pending is None else [pending['target']],specification_status='EDITING' if pending else 'AWAITING_CONFIRMATION')
+ save_context(c,context,d); c.state='COLLECTING_SPEC_DATA' if pending else 'SPEC_REVIEW'; s=d.query(TechnicalSpecification).filter_by(case_id=cid).first()
+ if not s: s=TechnicalSpecification(case_id=cid,data=supply_data,status='EDITING' if pending else 'AWAITING_CONFIRMATION'); d.add(s); d.flush(); d.add(SpecVersion(spec_id=s.id,version=1,data=s.data))
+ else: s.data=supply_data; s.status='EDITING' if pending else 'AWAITING_CONFIRMATION'; s.version+=1; d.add(SpecVersion(spec_id=s.id,version=s.version,data=s.data))
+ msg=result.summary+'\n\n'+(pending['question'] if pending else summary(supply_data)); d.add(Message(case_id=cid,role='assistant',content=msg)); audit(d,u.id,cid,'FILE_UPLOADED'); d.commit(); return {'id':a.id,'original_name':a.original_name,'analysis_ready':True,'case':detail(c,d)}

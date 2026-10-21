@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 
 const component=readFileSync(new URL('../src/TemplateAdmin.tsx',import.meta.url),'utf8');
+const catalog=readFileSync(new URL('../src/ContractCatalog.tsx',import.meta.url),'utf8');
 const app=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');
 
 test('template manager exposes catalog creation and version upload',()=>{
@@ -22,5 +23,21 @@ test('preview selection persists a structural locator instead of coordinates',()
 test('template page is role-gated in the application shell',()=>{
   assert.match(app,/dpo_specialist/);
   assert.match(app,/administrator/);
-  assert.match(app,/route==='\/templates'/);
+  assert.match(app,/route\s*===\s*["']\/templates["']/);
+});
+
+test('questionnaire builder supports field actions and multiple bindings',()=>{
+  assert.match(component,/fields/);
+  assert.match(component,/Изменить вопрос/);
+  assert.match(component,/Удалить привязку/);
+  assert.match(component,/occurrence_index/);
+  assert.match(component,/Проверить и опубликовать/);
+});
+
+test('employee questionnaire is schema driven and restores drafts',()=>{
+  assert.match(catalog,/schema\.fields/);
+  assert.match(catalog,/contract-drafts/);
+  assert.match(catalog,/Продолжить заполнение/);
+  assert.match(catalog,/Сформировать DOCX/);
+  assert.match(catalog,/Обязательное поле/);
 });

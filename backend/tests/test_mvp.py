@@ -56,6 +56,21 @@ def create_platform_template(client,headers,code='TRAINING_POC'):
     return response.json()
 
 
+def configure_platform_field(client,headers,template,version,field_key='customer_name',label='Наименование заказчика',occurrences=1):
+    field=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/fields",headers=headers,json={'field_key':field_key,'label':label,'field_type':'TEXT','required':True,'position':1,'group':'Стороны'}).json()
+    preview=client.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/preview",headers=headers).json()
+    matches=[]
+    for node in preview['nodes']:
+        start=0
+        while (index:=node['text'].find('АО «НСПК»',start))>=0:
+            matches.append((node,index)); start=index+1
+    assert len(matches)>=occurrences
+    for node,index in matches[:occurrences]:
+        response=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/bindings",headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':index,'end':index+len('АО «НСПК»'),'selected_text':'АО «НСПК»'})
+        assert response.status_code==201,response.text
+    return field
+
+
 def test_clarification_asks_only_one_atomic_field():
     question, fields, _ = clarification(['purpose', 'deadline'], [], 0)
     assert fields == ['purpose']
@@ -655,6 +670,7 @@ def test_contract_platform_rbac_ownership_versions_and_immutable_source():
     downloaded=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{first.json()['id']}/source",headers=manager_headers)
     assert downloaded.status_code==200 and downloaded.content==source and hashlib.sha256(downloaded.content).hexdigest()==digest
     assert len(manager.get(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers).json())==2
+    configure_platform_field(manager,manager_headers,template,second.json())
     published=manager.post(f"/api/v1/document-templates/{template['id']}/versions/{second.json()['id']}/publish",headers=manager_headers)
     assert published.status_code==200 and published.json()['status']=='PUBLISHED'
     metadata=manager.get(f"/api/v1/document-templates/{template['id']}",headers=manager_headers).json()
@@ -690,3 +706,41 @@ def test_docx_preview_and_binding_use_stable_structural_locator():
     locator=binding.json()['locator']; assert locator['start_run']!=locator['end_run'] and locator['structure_fingerprint']==preview['structure_fingerprint']
     invalid=client.post(f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}/bindings",headers=headers,json={'binding_key':'contract.invalid','locator':node['locator'],'start':start,'end':end,'selected_text':'другой текст'})
     assert invalid.status_code==422
+
+
+def test_contract_platform_end_to_end_multiple_occurrences_generation_and_ownership():
+    document=Document()
+    for prefix in ('Заказчик: ','Подпись заказчика: '):
+        paragraph=document.add_paragraph(); paragraph.add_run(prefix); paragraph.add_run('АО '); paragraph.add_run('«НСПК»'); paragraph.add_run(', действует на основании устава.')
+    source_buffer=io.BytesIO(); document.save(source_buffer); source=source_buffer.getvalue(); original_hash=hashlib.sha256(source).hexdigest()
+
+    manager=TestClient(app); manager_headers=auth(manager); template=create_platform_template(manager,manager_headers,'E2E_CONTRACT')
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('e2e.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    version=uploaded.json()
+    field=configure_platform_field(manager,manager_headers,template,version,occurrences=2)
+    bindings=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/bindings",headers=manager_headers).json()
+    assert [item['occurrence_index'] for item in bindings]==[1,2]
+    assert manager.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/publish",headers=manager_headers).status_code==200
+    assert manager.patch(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/fields/{field['id']}",headers=manager_headers,json={'field_key':'customer_name','label':'Изменить нельзя','field_type':'TEXT','required':True,'position':1}).status_code==409
+
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    catalog=employee.get('/api/v1/contract-catalog',headers=employee_headers).json(); assert any(item['id']==template['id'] for item in catalog)
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    draft_id=draft.json()['id']
+    assert employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=employee_headers).status_code==422
+    assert employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'unknown':'x'}}).status_code==422
+    saved=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'customer_name':'ООО «Ромашка»'}})
+    assert saved.status_code==200
+    generated=employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=employee_headers)
+    assert generated.status_code==201,generated.text
+    download=employee.get(generated.json()['download_url'],headers=employee_headers)
+    assert download.status_code==200 and 'attachment' in download.headers['content-disposition'].lower()
+    rendered=Document(io.BytesIO(download.content)); text='\n'.join(p.text for p in rendered.paragraphs)
+    assert text.count('ООО «Ромашка»')==2 and 'действует на основании устава' in text and 'АО «НСПК»' not in text
+    original=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/source",headers=manager_headers)
+    assert hashlib.sha256(original.content).hexdigest()==original_hash
+    outsider=TestClient(app); outsider_headers=auth(outsider)
+    assert outsider.get(f'/api/v1/contract-drafts/{draft_id}',headers=outsider_headers).status_code==404
+    assert outsider.get(generated.json()['download_url'],headers=outsider_headers).status_code==404

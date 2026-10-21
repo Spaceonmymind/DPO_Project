@@ -118,8 +118,19 @@ Append-only журнал операций шаблона и версии: соз
 ## План миграции
 
 1. Этап 1: versioned templates, secure upload/download, XML preview, node-range binding POC, RBAC и audit.
-2. Этап 2: CRUD анкет и полей, UI bindings, renderer по bindings, draft lifecycle, rebase/validation bindings, regression fixtures на двух тренировочных договорах.
+2. Этап 2: CRUD анкет и полей, UI bindings, renderer по bindings, draft lifecycle, rebase/validation bindings, regression fixtures на двух тренировочных договорах. Реализован для простых полей и диапазонов внутри одного структурного узла.
 3. Этап 3: подключение ONLYOFFICE/Collabora через новый adapter; callback security, WOPI/JWT, совместное редактирование и сравнение fidelity.
 4. Этап 4: миграция пользовательских маршрутов на новую платформу, импорт legacy registry, read-only compatibility layer и постепенный вывод AI/TechnicalSpecification/ContractRouter из основного UI.
 
 Удаление legacy кода возможно только после миграции данных, проверки generated artifacts и отдельного rollback-плана.
+
+## Реализация этапа 2
+
+- Поля анкеты остаются частью `QuestionnaireSchema` конкретной версии. Группа, подсказка, placeholder, правила и варианты выбора хранятся в `config`; пользовательский код и вычисляемые выражения не исполняются.
+- Один `field_key` может иметь несколько `DocumentBinding`. Каждое вхождение имеет `occurrence_index`, OOXML locator и fingerprint исходной версии.
+- Публикация проверяет обязательные поля, orphan/conflicting/stale bindings и выполняет пробный deterministic render. После публикации версия, поля и bindings неизменяемы.
+- `DocumentDraft` создаётся только из текущей опубликованной версии и сохраняет version pinning. Ответы проверяются на клиенте и сервере; изменение ответов делает предыдущую генерацию устаревшей по времени обновления draft.
+- Renderer копирует исходный ZIP package и изменяет только связанные `w:t` в `document.xml`, header/footer parts. Split runs заменяются от конца диапазонов; окружающий текст и свойства runs/paragraphs/tables остаются в package.
+- Generated DOCX хранится в закрытом `storage/generated_contracts/<draft_id>/`, выдаётся только владельцу и проверяется по SHA-256.
+
+Ограничения этапа 2: нет cross-node selection, повторяемых строк таблиц, условных секций, формул, text boxes/shapes, complex Word fields и редактирования юридического текста. Для этих структур renderer возвращает контролируемую ошибку.

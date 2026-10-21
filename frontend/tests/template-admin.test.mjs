@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 
 const component=readFileSync(new URL('../src/TemplateAdmin.tsx',import.meta.url),'utf8');
 const catalog=readFileSync(new URL('../src/ContractCatalog.tsx',import.meta.url),'utf8');
+const conditions=readFileSync(new URL('../src/conditions.ts',import.meta.url),'utf8');
 const app=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');
 
 test('template manager exposes catalog creation and version upload',()=>{
@@ -40,4 +41,21 @@ test('employee questionnaire is schema driven and restores drafts',()=>{
   assert.match(catalog,/Продолжить заполнение/);
   assert.match(catalog,/Сформировать DOCX/);
   assert.match(catalog,/Обязательное поле/);
+});
+
+test('condition editor is visual, localized and supports boolean groups',()=>{
+  assert.match(component,/Показывать вопрос, когда/);
+  assert.match(component,/Делать обязательным, когда/);
+  assert.match(component,/Все условия \(И\)/);
+  assert.match(component,/Любое условие \(ИЛИ\)/);
+  assert.match(component,/Отрицание \(НЕ\)/);
+  assert.doesNotMatch(component,/JSON\.stringify\(field\.visible_when/);
+});
+
+test('employee questionnaire reacts to conditions without dropping answers',()=>{
+  assert.match(catalog,/fieldState\(f,answers\)\.visible/);
+  assert.match(catalog,/setAnswers\(\{\.\.\.answers/);
+  assert.match(conditions,/EQUALS/);
+  assert.match(conditions,/GREATER_OR_EQUAL/);
+  assert.match(conditions,/op==='NOT'/);
 });

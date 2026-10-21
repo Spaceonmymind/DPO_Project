@@ -12,6 +12,7 @@ from fastapi import APIRouter,Depends,File,HTTPException,UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
+from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.db import DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
@@ -114,7 +115,7 @@ def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.bind
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100)
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(gt=0); selected_text:str=Field(min_length=1,max_length=10000)
 class AnswersPayload(BaseModel): answers:dict[str,Any]
 
@@ -127,6 +128,10 @@ def validate_field_payload(p):
   try: re.compile(pattern)
   except re.error: raise HTTPException(422,detail='Некорректное регулярное выражение')
  if p.field_type=='SINGLE_SELECT' and (not p.options or any(not str(x).strip() for x in p.options)): raise HTTPException(422,detail='Добавьте варианты выбора')
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'visible_when':p.visible_when,'required_when':p.required_when}
+def validate_condition_schema(fields):
+ try: ConditionEngine.validate_schema(fields)
+ except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Некорректные условия анкеты: {exc}')
 def validate_answer(field,value):
  if value in (None,''):
   return 'Обязательное поле' if field.required else None
@@ -155,7 +160,16 @@ def schema_for(version_id,s,create=False,u=None):
  x=s.query(QuestionnaireSchema).filter_by(template_version_id=version_id).order_by(QuestionnaireSchema.schema_version.desc()).first()
  if not x and create: x=QuestionnaireSchema(template_version_id=version_id,created_by_id=u.id); s.add(x); s.flush()
  return x
-def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()]}
+def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()]}
+def validate_active_answers(fields,answers):
+ errors={}
+ for field in fields:
+  state=ConditionEngine.field_state(field,answers)
+  if not state['visible']: continue
+  value=answers.get(field.field_key)
+  if state['required'] and value in (None,''): errors[field.field_key]='Обязательное поле'
+  elif value not in (None,'') and (error:=validate_answer(field,value)): errors[field.field_key]=error
+ return errors
 def validate_bindings(v,s):
  preview=adapter.preview(safe_source(v))
  if preview['structure_fingerprint']!=v.structure_fingerprint: raise HTTPException(409,detail='DOCX изменился после создания версии')
@@ -227,15 +241,16 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); known={x.field_key:x for x in fields}
+  validate_condition_schema(fields)
   if set(payload.answers)-set(known): raise HTTPException(422,detail='Анкета содержит неизвестные поля')
-  errors={k:e for k,v in payload.answers.items() if (e:=validate_answer(known[k],v))}
+  answers={**(d.answers or {}),**payload.answers}; errors=validate_active_answers(fields,answers)
   if errors: raise HTTPException(422,detail={'message':'Исправьте ответы','fields':errors})
-  d.answers={**(d.answers or {}),**payload.answers}; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
+  d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.post('/api/v1/contract-drafts/{id}/generate',status_code=201)
  def generate(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); answers=d.answers or {}; errors={x.field_key:e for x in fields if (e:=validate_answer(x,answers.get(x.field_key)))}
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {}; errors=validate_active_answers(fields,answers)
   if errors: raise HTTPException(422,detail={'message':'Заполните обязательные поля','fields':errors})
-  bindings=validate_bindings(v,s); values={x.field_key:render_value(x,answers.get(x.field_key,'')) for x in fields}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
+  bindings=validate_bindings(v,s); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; values={key:render_value(field,answers.get(key,'')) for key,field in active.items()}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
   try: render_docx(v,bindings,values,target)
   except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Не удалось безопасно сформировать DOCX: {exc}')
   raw=target.read_bytes(); g=GeneratedDocument(draft_id=d.id,template_version_id=v.id,generation_number=number,path=str(target),sha256=hashlib.sha256(raw).hexdigest(),mime_type=DOCX_MIME,size=len(raw),created_by_id=u.id); s.add(g); d.status='GENERATED'; s.commit(); return {'id':g.id,'generation_number':number,'filename':f'Договор_{number}.docx','download_url':f'/api/v1/generated-documents/{g.id}/download'}
@@ -285,7 +300,10 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); schema=schema_for(v.id,s,True,u)
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
-  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config={'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options}); s.add(x); s.commit(); return field_out(x)
+  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config=field_config(p)); s.add(x); s.flush()
+  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  except HTTPException: s.rollback(); raise
+  s.commit(); return field_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/fields/{fid}')
  def update_field(tid:str,vid:str,fid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
@@ -296,13 +314,19 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if occupied: raise HTTPException(409,detail='Позиция уже занята')
   if x.field_key!=p.field_key:
    for binding in s.query(DocumentBinding).filter_by(field_id=x.id): binding.binding_key=p.field_key
-  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config={'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options}; s.commit(); return field_out(x)
+  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=field_config(p); s.flush()
+  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  except HTTPException: s.rollback(); raise
+  s.commit(); return field_out(x)
  @r.delete(prefix+'/{tid}/versions/{vid}/fields/{fid}',status_code=204)
  def delete_field(tid:str,vid:str,fid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   if s.query(DocumentBinding).filter_by(field_id=x.id).first(): raise HTTPException(409,detail='Сначала удалите привязки поля')
-  s.delete(x); s.commit()
+  s.delete(x); s.flush()
+  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  except HTTPException: s.rollback(); raise
+  s.commit()
  @r.get(prefix+'/{tid}/versions/{vid}/bindings')
  def bindings(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); return [binding_out(x) for x in s.query(DocumentBinding).filter_by(template_version_id=v.id).all()]
@@ -329,8 +353,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not schema: raise HTTPException(422,detail='Создайте анкету')
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s)
   if not fields: raise HTTPException(422,detail='Добавьте хотя бы одно поле анкеты')
+  validate_condition_schema(fields)
   bound={x.field_id for x in bindings}
-  if any(x.required and x.id not in bound for x in fields): raise HTTPException(422,detail='Все обязательные поля должны иметь привязку в DOCX')
+  if any((x.required or (x.config or {}).get('required_when') is not None) and x.id not in bound for x in fields): raise HTTPException(422,detail='Все обязательные поля должны иметь привязку в DOCX')
   if any(not x.field_id for x in bindings): raise HTTPException(422,detail='Найдены привязки без поля анкеты')
   probe={x.field_key:('Да' if x.field_type=='BOOLEAN' else '2026-01-01' if x.field_type=='DATE' else '1') for x in fields}; temp=Path(v.source_path).parent/'publish-check.docx'
   try: render_docx(v,bindings,probe,temp); temp.unlink(missing_ok=True)

@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 import fitz
 import openpyxl
 import xlwt
-from app.db import Base, engine, SessionLocal, User
+from app.db import Base, engine, SessionLocal, User, QuestionnaireField
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -744,3 +744,59 @@ def test_contract_platform_end_to_end_multiple_occurrences_generation_and_owners
     outsider=TestClient(app); outsider_headers=auth(outsider)
     assert outsider.get(f'/api/v1/contract-drafts/{draft_id}',headers=outsider_headers).status_code==404
     assert outsider.get(generated.json()['download_url'],headers=outsider_headers).status_code==404
+
+
+def test_contract_platform_conditional_payment_question_end_to_end():
+    document=Document(); document.add_paragraph('Порядок оплаты: PAYMENT'); document.add_paragraph('Процент предоплаты: ADVANCE')
+    payload=io.BytesIO(); document.save(payload)
+    manager=TestClient(app); manager_headers=auth(manager); template=create_platform_template(manager,manager_headers,'R31_PAYMENT')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('payment.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    payment=manager.post(base+'/fields',headers=manager_headers,json={'field_key':'payment.model','label':'Какой порядок оплаты предусмотрен?','field_type':'SINGLE_SELECT','required':True,'position':1,'options':['После оказания услуг','Полная предоплата','Частичная предоплата']})
+    assert payment.status_code==201,payment.text
+    condition={'operator':'EQUALS','field_key':'payment.model','value':'Частичная предоплата'}
+    percent=manager.post(base+'/fields',headers=manager_headers,json={'field_key':'payment.advance_percent','label':'Какой процент предоплаты предусмотрен?','field_type':'INTEGER','required':False,'position':2,'visible_when':condition,'required_when':condition,'validation':{'min':1,'max':99}})
+    assert percent.status_code==201,percent.text
+    preview=manager.get(base+'/preview',headers=manager_headers).json()
+    for marker,field_id in [('PAYMENT',payment.json()['id']),('ADVANCE',percent.json()['id'])]:
+        node=next(x for x in preview['nodes'] if marker in x['text']); start=node['text'].index(marker)
+        bound=manager.post(base+'/bindings',headers=manager_headers,json={'field_id':field_id,'locator':node['locator'],'start':start,'end':start+len(marker),'selected_text':marker})
+        assert bound.status_code==201,bound.text
+    assert manager.post(base+'/publish',headers=manager_headers).status_code==200
+
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); draft_id=draft['id']
+    bypass=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':'Частичная предоплата'}})
+    assert bypass.status_code==422 and 'payment.advance_percent' in bypass.text
+    first=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':'Частичная предоплата','payment.advance_percent':30}})
+    assert first.status_code==200
+    hidden=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':'После оказания услуг'}})
+    assert hidden.status_code==200 and hidden.json()['answers']['payment.advance_percent']==30
+    generated=employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=employee_headers)
+    assert generated.status_code==201,generated.text
+    rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+    text='\n'.join(x.text for x in rendered.paragraphs)
+    assert 'После оказания услуг' in text and 'ADVANCE' in text and '30' not in text
+    restored=employee.get(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers).json()
+    assert restored['answers']['payment.advance_percent']==30
+    again=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':'Частичная предоплата'}})
+    assert again.status_code==200 and again.json()['answers']['payment.advance_percent']==30
+
+
+def test_contract_platform_rejects_invalid_condition_configuration():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'R31_INVALID')
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('conditions.docx',contract_docx_bytes(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    a=client.post(base+'/fields',headers=headers,json={'field_key':'field.a','label':'Поле А','field_type':'TEXT','position':1}).json()
+    missing=client.post(base+'/fields',headers=headers,json={'field_key':'field.bad','label':'Ошибка ссылки','field_type':'TEXT','position':2,'visible_when':{'operator':'EQUALS','field_key':'missing','value':'x'}})
+    assert missing.status_code==422
+    b=client.post(base+'/fields',headers=headers,json={'field_key':'field.b','label':'Поле Б','field_type':'TEXT','position':2,'visible_when':{'operator':'EQUALS','field_key':'field.a','value':'x'}})
+    assert b.status_code==201
+    cycle=client.patch(base+f"/fields/{a['id']}",headers=headers,json={'field_key':'field.a','label':'Поле А','field_type':'TEXT','position':1,'visible_when':{'operator':'EQUALS','field_key':'field.b','value':'x'}})
+    assert cycle.status_code==422 and 'циклическая' in cycle.text
+    wrong=client.patch(base+f"/fields/{b.json()['id']}",headers=headers,json={'field_key':'field.b','label':'Поле Б','field_type':'TEXT','position':2,'visible_when':{'operator':'GREATER_THAN','field_key':'field.a','value':'x'}})
+    assert wrong.status_code==422 and 'несовместим' in wrong.text
+    assert client.delete(base+f"/fields/{a['id']}",headers=headers).status_code==422
+    database=SessionLocal(); broken=database.query(QuestionnaireField).filter_by(id=b.json()['id']).one(); broken.config={**broken.config,'visible_when':{'operator':'EQUALS','field_key':'deleted.field','value':'x'}}; database.commit(); database.close()
+    rejected=client.post(base+'/publish',headers=headers)
+    assert rejected.status_code==422 and 'не найдено' in rejected.text

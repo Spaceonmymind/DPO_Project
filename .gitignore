@@ -25,6 +25,7 @@ frontend/dist/
 backend/*.db
 storage/uploads/
 storage/generated/
+storage/template_sources/
 contract_templates/
 specification_templates/supply/*
 !specification_templates/supply/.gitkeep

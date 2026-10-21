@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 import fitz
 import openpyxl
 import xlwt
-from app.db import Base, engine
+from app.db import Base, engine, SessionLocal, User
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -41,6 +41,19 @@ def auth(client: TestClient, name: str = 'ivanov') -> dict[str, str]:
     response = client.post('/api/v1/auth/login', json={'external_id': name, 'password': name.capitalize()})
     assert response.status_code == 200
     return {'x-csrf-token': response.json()['csrf_token']}
+
+
+def contract_docx_bytes() -> bytes:
+    document=Document(); paragraph=document.add_paragraph(); paragraph.add_run('Заказчик: '); paragraph.add_run('АО '); paragraph.add_run('«НСПК»')
+    table=document.add_table(rows=2,cols=2); table.cell(0,0).merge(table.cell(0,1)).text='Условия договора'; table.cell(1,0).text='Срок'; table.cell(1,1).text='30 дней'
+    document.sections[0].header.paragraphs[0].text='Корпоративный договор'; document.sections[0].footer.paragraphs[0].text='Конфиденциально'
+    payload=io.BytesIO(); document.save(payload); return payload.getvalue()
+
+
+def create_platform_template(client,headers,code='TRAINING_POC'):
+    response=client.post('/api/v1/document-templates',headers=headers,json={'code':code,'name':'Договор для проверки'})
+    assert response.status_code==201,response.text
+    return response.json()
 
 
 def test_clarification_asks_only_one_atomic_field():
@@ -625,3 +638,55 @@ def test_uploaded_supply_tz_keeps_vat_and_delivery_term_separate():
     data=body['supply_specification']['data']
     assert data['vat_rate']==22 and data['delivery_term']=='10 дней'
     assert data['delivery_term'] not in {'22','22.0'}
+
+
+def test_contract_platform_rbac_ownership_versions_and_immutable_source():
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    assert employee.get('/api/v1/document-templates',headers=employee_headers).status_code==403
+    assert employee.post('/api/v1/document-templates',headers=employee_headers,json={'code':'NO','name':'Нельзя'}).status_code==403
+
+    manager=TestClient(app); manager_headers=auth(manager); template=create_platform_template(manager,manager_headers,'POC_VERSIONS')
+    source=contract_docx_bytes(); digest=hashlib.sha256(source).hexdigest()
+    first=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('contract.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    second=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('contract-v2.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert first.status_code==201 and second.status_code==201
+    assert first.json()['version_number']==1 and second.json()['version_number']==2
+    assert first.json()['source_sha256']==digest
+    downloaded=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{first.json()['id']}/source",headers=manager_headers)
+    assert downloaded.status_code==200 and downloaded.content==source and hashlib.sha256(downloaded.content).hexdigest()==digest
+    assert len(manager.get(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers).json())==2
+    published=manager.post(f"/api/v1/document-templates/{template['id']}/versions/{second.json()['id']}/publish",headers=manager_headers)
+    assert published.status_code==200 and published.json()['status']=='PUBLISHED'
+    metadata=manager.get(f"/api/v1/document-templates/{template['id']}",headers=manager_headers).json()
+    assert metadata['current_version_id']==second.json()['id'] and metadata['status']=='ACTIVE'
+
+    database=SessionLocal(); petrova=database.query(User).filter_by(external_id='petrova').one(); petrova.roles=['employee','dpo_specialist']; database.commit(); database.close()
+    employee_headers=auth(employee,'petrova')
+    assert employee.get(f"/api/v1/document-templates/{template['id']}",headers=employee_headers).status_code==404
+
+
+def test_contract_platform_rejects_invalid_uploads_and_separates_publish_permission():
+    client=TestClient(app); headers=auth(client,'petrova'); template=create_platform_template(client,headers,'POC_SECURITY')
+    text=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.txt',b'plain text','text/plain')})
+    fake=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',b'not a zip','application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert text.status_code==415 and fake.status_code==422
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',contract_docx_bytes(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    denied=client.post(f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}/publish",headers=headers)
+    assert denied.status_code==403
+
+
+def test_docx_preview_and_binding_use_stable_structural_locator():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'POC_LOCATORS')
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',contract_docx_bytes(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    preview=client.get(f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}/preview",headers=headers).json()
+    assert preview['adapter']=='DOCX_XML_READ_ONLY' and preview['structure_fingerprint']==uploaded['structure_fingerprint']
+    assert any(node['part'].startswith('word/header') for node in preview['nodes'])
+    assert any(node['part'].startswith('word/footer') for node in preview['nodes'])
+    merged=next(node for node in preview['nodes'] if node['text']=='Условия договора')
+    assert merged['kind']=='table_cell' and merged['metadata']['grid_span']==2
+    node=next(node for node in preview['nodes'] if 'АО «НСПК»' in node['text']); start=node['text'].index('АО «НСПК»'); end=start+len('АО «НСПК»')
+    binding=client.post(f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}/bindings",headers=headers,json={'binding_key':'contract.customer','locator':node['locator'],'start':start,'end':end,'selected_text':'АО «НСПК»'})
+    assert binding.status_code==201
+    locator=binding.json()['locator']; assert locator['start_run']!=locator['end_run'] and locator['structure_fingerprint']==preview['structure_fingerprint']
+    invalid=client.post(f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}/bindings",headers=headers,json={'binding_key':'contract.invalid','locator':node['locator'],'start':start,'end':end,'selected_text':'другой текст'})
+    assert invalid.status_code==422

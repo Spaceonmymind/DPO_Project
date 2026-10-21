@@ -22,6 +22,7 @@ from app.ai.dialogue import clean_list, clean_text, clarification, is_confirmati
 from app.training_contracts import apply_training_defaults, audit_payload, clarification_for, combine_patches, decide_training, empty_facts, extract_training_facts, merge_facts, parse_pending_red_answer, render_training_contract, resolve_contextual_answer, validate_training_facts, TrainingDecision
 from app.supply_specifications import SupplySpecificationDialogueEngine, SupplySpecificationRenderer, SupplySpecificationUpdateService, empty_supply_specification, next_question, supply_from_import, summary, confirmation_intent
 from app.security import csrf_token, session_token, verify_password
+from app.contract_platform import build_contract_platform_router
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log=logging.getLogger('dpo.backend')
 app=FastAPI(title='ДПО Ассистент API',version='1.1.0')
@@ -47,6 +48,7 @@ def current(req:Request,d:DBS=Depends(db)):
  if not u or not u.is_active: raise HTTPException(401,detail='Учётная запись недоступна')
  if req.method not in {'GET','HEAD','OPTIONS'} and not hmac.compare_digest(req.headers.get('x-csrf-token',''),s.csrf_token or ''): raise HTTPException(403,detail='Недействительный CSRF-токен')
  return u
+app.include_router(build_contract_platform_router(current))
 def own(cid,u,d):
  c=d.get(Case,cid)
  if not c: raise HTTPException(404,detail='Обращение не найдено')

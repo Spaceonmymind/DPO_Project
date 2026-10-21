@@ -37,6 +37,14 @@ class ConditionEngine:
         cls._validate_acyclic(graph)
 
     @classmethod
+    def validate_condition(cls, condition: dict[str, Any], fields: list[Any]) -> set[str]:
+        """Validate one reusable rule against stable questionnaire field keys."""
+        by_key = {field.field_key: field for field in fields}
+        refs: set[str] = set()
+        cls._validate_node(condition, by_key, refs, 1, [0])
+        return refs
+
+    @classmethod
     def evaluate(cls, condition: dict[str, Any] | None, answers: dict[str, Any]) -> bool:
         if condition is None:
             return True

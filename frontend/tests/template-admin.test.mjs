@@ -59,3 +59,15 @@ test('employee questionnaire reacts to conditions without dropping answers',()=>
   assert.match(conditions,/GREATER_OR_EQUAL/);
   assert.match(conditions,/op==='NOT'/);
 });
+
+test('conditional DOCX areas use visual structural selection and the shared condition editor',()=>{
+  assert.match(component,/conditional-regions/);
+  assert.match(component,/CONDITIONAL_RUN/);
+  assert.match(component,/CONDITIONAL_PARAGRAPH_GROUP/);
+  assert.match(component,/CONDITIONAL_TABLE_ROW/);
+  assert.match(component,/CONDITIONAL_TABLE/);
+  assert.match(component,/Начало блока/);
+  assert.match(component,/Конец блока/);
+  assert.match(component,/Включать область, когда/);
+  assert.doesNotMatch(component,/OOXML-путь|JSON вручную/);
+});

@@ -800,3 +800,49 @@ def test_contract_platform_rejects_invalid_condition_configuration():
     database=SessionLocal(); broken=database.query(QuestionnaireField).filter_by(id=b.json()['id']).one(); broken.config={**broken.config,'visible_when':{'operator':'EQUALS','field_key':'deleted.field','value':'x'}}; database.commit(); database.close()
     rejected=client.post(base+'/publish',headers=headers)
     assert rejected.status_code==422 and 'не найдено' in rejected.text
+
+
+def test_r32_conditional_legal_payment_alternatives_generate_only_selected_branch():
+    source_doc=Document(); source_doc.add_paragraph('Вариант А: оплата после оказания услуг.'); source_doc.add_paragraph('Вариант Б: полная предоплата.')
+    source_buffer=io.BytesIO(); source_doc.save(source_buffer); source=source_buffer.getvalue(); digest=hashlib.sha256(source).hexdigest()
+    manager=TestClient(app); manager_headers=auth(manager); template=create_platform_template(manager,manager_headers,'R32_PAYMENT')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('legal-payment.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    field=manager.post(base+'/fields',headers=manager_headers,json={'field_key':'payment.model','label':'Порядок оплаты','field_type':'SINGLE_SELECT','position':1,'options':['После оказания услуг','Предоплата']})
+    assert field.status_code==201,field.text
+    nodes=manager.get(base+'/preview',headers=manager_headers).json()['nodes']; after=next(x for x in nodes if 'Вариант А' in x['text']); advance=next(x for x in nodes if 'Вариант Б' in x['text'])
+    rules=[('after_services',after,{'operator':'AND','conditions':[{'operator':'EQUALS','field_key':'payment.model','value':'После оказания услуг'},{'operator':'NOT','condition':{'operator':'EQUALS','field_key':'payment.model','value':'Предоплата'}}]}),('prepayment',advance,{'operator':'EQUALS','field_key':'payment.model','value':'Предоплата'})]
+    for key,node,condition in rules:
+        created=manager.post(base+'/conditional-regions',headers=manager_headers,json={'region_key':key,'region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':condition})
+        assert created.status_code==201,created.text
+    assert manager.post(base+'/publish',headers=manager_headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    for choice,present,absent in [('После оказания услуг','Вариант А','Вариант Б'),('Предоплата','Вариант Б','Вариант А')]:
+        draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); draft_id=draft['id']
+        assert employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':choice}}).status_code==200
+        generated=employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=employee_headers); assert generated.status_code==201,generated.text
+        rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content)); text='\n'.join(x.text for x in rendered.paragraphs)
+        assert present in text and absent not in text
+    original=manager.get(base+'/source',headers=manager_headers)
+    assert hashlib.sha256(original.content).hexdigest()==digest
+
+
+def test_r32_supports_all_region_types_and_rejects_overlap_and_stale_locator():
+    document=Document(); document.add_paragraph('Префикс: условный фрагмент.'); document.add_paragraph('Отдельный пункт.'); document.add_paragraph('Начало группы.'); document.add_paragraph('Конец группы.')
+    first=document.add_table(rows=2,cols=2); first.cell(0,0).merge(first.cell(0,1)).text='Объединённый заголовок'; first.cell(1,0).text='Удаляемая'; first.cell(1,1).text='строка'
+    second=document.add_table(rows=1,cols=1); second.cell(0,0).text='Удаляемая таблица'
+    payload=io.BytesIO(); document.save(payload)
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'R32_TYPES')
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('regions.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    assert client.post(base+'/fields',headers=headers,json={'field_key':'enabled','label':'Включить условия','field_type':'BOOLEAN','position':1}).status_code==201
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes']; condition={'operator':'EQUALS','field_key':'enabled','value':True}
+    run=next(x for x in nodes if 'условный фрагмент' in x['text']); start=run['text'].index('условный фрагмент')
+    requests=[{'region_key':'run','region_type':'CONDITIONAL_RUN','start_locator':run['locator'],'start':start,'end':start+len('условный фрагмент'),'selected_text':'условный фрагмент'}, {'region_key':'paragraph','region_type':'CONDITIONAL_PARAGRAPH','start_locator':next(x for x in nodes if x['text']=='Отдельный пункт.')['locator']}, {'region_key':'group','region_type':'CONDITIONAL_PARAGRAPH_GROUP','start_locator':next(x for x in nodes if x['text']=='Начало группы.')['locator'],'end_locator':next(x for x in nodes if x['text']=='Конец группы.')['locator']}, {'region_key':'row','region_type':'CONDITIONAL_TABLE_ROW','start_locator':next(x for x in nodes if x['text']=='Удаляемая')['locator']}, {'region_key':'table','region_type':'CONDITIONAL_TABLE','start_locator':next(x for x in nodes if x['text']=='Удаляемая таблица')['locator']}]
+    for body in requests:
+        response=client.post(base+'/conditional-regions',headers=headers,json={**body,'include_when':condition}); assert response.status_code==201,response.text
+        assert response.json()['locator']['structure_fingerprint']==version['structure_fingerprint']
+    overlap=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'overlap','region_type':'CONDITIONAL_PARAGRAPH','start_locator':run['locator'],'include_when':condition})
+    assert overlap.status_code==422 and 'пересекаются' in overlap.text
+    listed=client.get(base+'/conditional-regions',headers=headers).json(); assert {x['region_type'] for x in listed}=={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}
+    database=SessionLocal(); from app.db import ConditionalDocumentRegion
+    stale=database.query(ConditionalDocumentRegion).filter_by(region_key='table',template_version_id=version['id']).one(); stale.locator={**stale.locator,'structure_fingerprint':'0'*64}; database.commit(); database.close()
+    rejected=client.post(base+'/publish',headers=headers); assert rejected.status_code==422 and 'устарел' in rejected.text

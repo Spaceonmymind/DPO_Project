@@ -13,10 +13,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
 from app.conditions import ConditionConfigurationError,ConditionEngine
-from app.db import DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
 WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT'}
+REGION_TYPES={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}
 
 def db():
  s=SessionLocal()
@@ -112,11 +113,16 @@ def template_out(x,s): return {'id':x.id,'code':x.code,'name':x.name,'category':
 def version_out(x): return {'id':x.id,'template_id':x.template_id,'version_number':x.version_number,'status':x.status,'original_filename':x.original_filename,'source_sha256':x.source_sha256,'structure_fingerprint':x.structure_fingerprint,'preview_metadata':x.preview_metadata,'created_at':x.created_at,'published_at':x.published_at}
 def field_out(x): return {'id':x.id,'schema_id':x.schema_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config}
 def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.binding_key,'occurrence_index':x.occurrence_index,'selected_text':x.selected_text,'locator':x.locator,'status':x.status}
+def region_out(x): return {'id':x.id,'region_key':x.region_key,'region_type':x.region_type,'locator':x.locator,'include_when':x.include_when,'original_text':x.original_text,'status':x.status}
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(gt=0); selected_text:str=Field(min_length=1,max_length=10000)
+class RegionPayload(BaseModel):
+ region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); region_type:str; start_locator:str; end_locator:str|None=None; start:int|None=Field(default=None,ge=0); end:int|None=Field(default=None,gt=0); selected_text:str|None=Field(default=None,max_length=10000); include_when:dict[str,Any]
+class RegionUpdatePayload(BaseModel):
+ region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]
 class AnswersPayload(BaseModel): answers:dict[str,Any]
 
 def validate_field_payload(p):
@@ -170,6 +176,10 @@ def validate_active_answers(fields,answers):
   if state['required'] and value in (None,''): errors[field.field_key]='Обязательное поле'
   elif value not in (None,'') and (error:=validate_answer(field,value)): errors[field.field_key]=error
  return errors
+def condition_answers(fields,answers):
+ """Hidden answers stay persisted, but are absent for legal-block decisions."""
+ visible={x.field_key for x in ConditionEngine.active_fields(fields,answers)}
+ return {key:value for key,value in answers.items() if key in visible}
 def validate_bindings(v,s):
  preview=adapter.preview(safe_source(v))
  if preview['structure_fingerprint']!=v.structure_fingerprint: raise HTTPException(409,detail='DOCX изменился после создания версии')
@@ -182,6 +192,103 @@ def validate_bindings(v,s):
   if any(start<e and end>s0 for s0,e in ranges): raise HTTPException(422,detail='Диапазоны привязок пересекаются')
   ranges.append((start,end))
  return bindings
+def _element_hash(node): return hashlib.sha256(ET.tostring(node,encoding='utf-8')).hexdigest()
+def _part_root(path,part):
+ with zipfile.ZipFile(path) as z: return ET.fromstring(z.read(part))
+def _body(root): return root.find('w:body',NS) if root.tag.endswith('document') else root
+def _unsafe(node):
+ names=('fldChar','instrText','drawing','pict','object','bookmarkStart','bookmarkEnd')
+ return next((name for name in names if node.find(f'.//w:{name}',NS) is not None),None)
+def _table_parts(locator):
+ match=re.fullmatch(r'(.+)#/tbl\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]/p\[(\d+)\]',locator)
+ return (match.group(1),*map(int,match.groups()[1:])) if match else None
+def _top_paragraph(locator):
+ match=re.fullmatch(r'(.+)#/p\[(\d+)\]',locator)
+ return (match.group(1),int(match.group(2))) if match else None
+def _paragraph_text(node): return ''.join(x.text or '' for x in node.findall('.//w:t',NS))
+def _resolve_region(path,p:RegionPayload,structure_fingerprint):
+ if p.region_type not in REGION_TYPES: raise ValueError('Неподдерживаемый тип условной области')
+ preview=adapter.preview(path); nodes={x['locator']:x for x in preview['nodes']}; source=nodes.get(p.start_locator)
+ if not source: raise ValueError('Начало области не найдено в исходном DOCX')
+ part=source['part']; root=_part_root(path,part); body=_body(root); targets=[]; locator={'locator_version':2,'structure_fingerprint':structure_fingerprint,'part':part,'region_type':p.region_type}
+ if p.region_type=='CONDITIONAL_RUN':
+  if p.start is None or p.end is None or not p.selected_text: raise ValueError('Выделите текст условного фрагмента')
+  adapter.get_structural_locator(path,adapter.select_range(path,p.start_locator,p.start,p.end,p.selected_text)); node=paragraph_for(root,p.start_locator); targets=[node]; locator.update({'node':p.start_locator,'nodes':[p.start_locator],'text_start':p.start,'text_end':p.end,'element_hash':_element_hash(node)})
+ elif p.region_type=='CONDITIONAL_PARAGRAPH':
+  node=paragraph_for(root,p.start_locator); targets=[node]; locator.update({'node':p.start_locator,'nodes':[p.start_locator],'element_hash':_element_hash(node)})
+ elif p.region_type=='CONDITIONAL_PARAGRAPH_GROUP':
+  first=_top_paragraph(p.start_locator); last=_top_paragraph(p.end_locator or '')
+  if not first or not last or first[0]!=last[0] or first[0]!=part: raise ValueError('Блок можно создать только из соседних абзацев одной части документа')
+  a,b=first[1],last[1]
+  if a>b: raise ValueError('Конец блока должен находиться после начала')
+  paragraphs=body.findall('./w:p',NS)
+  if b>len(paragraphs): raise ValueError('Границы блока устарели')
+  targets=paragraphs[a-1:b]; locators=[f'{part}#/p[{i}]' for i in range(a,b+1)]; locator.update({'nodes':locators,'start_node':locators[0],'end_node':locators[-1],'element_hashes':[_element_hash(x) for x in targets]})
+ elif p.region_type in {'CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}:
+  parsed=_table_parts(p.start_locator)
+  if not parsed: raise ValueError('Выберите ячейку нужной таблицы')
+  _,table_no,row_no,_,_=parsed; table=body.findall('./w:tbl',NS)[table_no-1]
+  if p.region_type=='CONDITIONAL_TABLE_ROW':
+   row=table.findall('./w:tr',NS)[row_no-1]
+   if row.find('.//w:vMerge',NS) is not None: raise ValueError('Нельзя условно удалить строку с вертикально объединёнными ячейками')
+   targets=[row]; locator.update({'table':table_no,'row':row_no,'nodes':[f'{part}#/tbl[{table_no}]/tr[{row_no}]'],'element_hash':_element_hash(row)})
+  else: targets=[table]; locator.update({'table':table_no,'nodes':[f'{part}#/tbl[{table_no}]'],'element_hash':_element_hash(table)})
+ bad=next((_unsafe(x) for x in targets if _unsafe(x)),None)
+ if bad: raise ValueError(f'Область содержит неподдерживаемую структуру Word ({bad})')
+ original='\n'.join(_paragraph_text(x) for target in targets for x in ([target] if target.tag==f'{{{WORD_NS}}}p' else target.findall('.//w:p',NS)))
+ if not original.strip(): raise ValueError('Условная область не содержит текста')
+ return locator,original
+def _binding_inside_region(binding,region):
+ node=binding.locator['node']; loc=region.locator; kind=region.region_type
+ if kind=='CONDITIONAL_RUN': return node==loc['node'] and binding.locator['text_start']>=loc['text_start'] and binding.locator['text_end']<=loc['text_end']
+ if kind in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: return node in loc.get('nodes',[])
+ prefix=f"{loc['part']}#/tbl[{loc['table']}]"
+ return node.startswith(prefix+(f"/tr[{loc['row']}]" if kind=='CONDITIONAL_TABLE_ROW' else ''))
+def validate_regions(v,s,bindings=None):
+ fields=[]; schema=schema_for(v.id,s)
+ if schema: fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all()
+ regions=s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id,status='ACTIVE').all(); seen=[]
+ for region in regions:
+  try: ConditionEngine.validate_condition(region.include_when,fields)
+  except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Условная область «{region.region_key}»: {exc}')
+  loc=region.locator or {}
+  if loc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Locator области «{region.region_key}» устарел')
+  # Re-resolve stored boundaries and fingerprints against the immutable source.
+  root=_part_root(safe_source(v),loc.get('part',''))
+  try:
+   if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: actual=[paragraph_for(root,loc['node'])]
+   elif region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': actual=[paragraph_for(root,x) for x in loc['nodes']]
+   elif region.region_type=='CONDITIONAL_TABLE_ROW': actual=[_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1]]
+   else: actual=[_body(root).findall('./w:tbl',NS)[loc['table']-1]]
+  except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Границы области «{region.region_key}» устарели')
+  hashes=loc.get('element_hashes') or [loc.get('element_hash')]
+  if [_element_hash(x) for x in actual]!=hashes: raise HTTPException(422,detail=f'Locator области «{region.region_key}» устарел')
+  for old in seen:
+   if _regions_overlap(old,region): raise HTTPException(422,detail=f'Условные области «{old.region_key}» и «{region.region_key}» пересекаются или вложены')
+  seen.append(region)
+ if bindings:
+  for b in bindings:
+   for r in regions:
+    if r.region_type=='CONDITIONAL_RUN' and b.locator['node']==r.locator['node']:
+     a,z=b.locator['text_start'],b.locator['text_end']; c,d=r.locator['text_start'],r.locator['text_end']
+     if a<d and z>c and not (a>=c and z<=d): raise HTTPException(422,detail='Обычная привязка частично пересекает условный фрагмент')
+ return regions
+def _regions_overlap(a,b):
+ la,lb=a.locator,b.locator
+ if la.get('part')!=lb.get('part'): return False
+ def paragraphs(region):
+  loc=region.locator
+  if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: return {loc['node']}
+  if region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': return set(loc['nodes'])
+  prefix=f"{loc['part']}#/tbl[{loc['table']}]"
+  return {prefix+(f"/tr[{loc['row']}]" if region.region_type=='CONDITIONAL_TABLE_ROW' else '')}
+ pa,pb=paragraphs(a),paragraphs(b)
+ for x in pa:
+  for y in pb:
+   if x==y or x.startswith(y+'/') or y.startswith(x+'/'):
+    if a.region_type==b.region_type=='CONDITIONAL_RUN': return la['text_start']<lb['text_end'] and la['text_end']>lb['text_start']
+    return True
+ return False
 def paragraph_for(root,locator):
  path=locator.split('#/',1)[1]; body=root.find('w:body',NS) if root.tag.endswith('document') else root
  m=re.fullmatch(r'p\[(\d+)\]',path)
@@ -199,18 +306,39 @@ def replace_range(p,start,end,value):
  for node,s,e,text in touched:
   prefix=text[:max(0,start-s)] if node is first[0] else ''; suffix=text[max(0,end-s):] if node is last[0] else ''; node.text=(prefix+str(value)+suffix) if node is first[0] else suffix
   if node.text.startswith(' ') or node.text.endswith(' '): node.set('{http://www.w3.org/XML/1998/namespace}space','preserve')
-def render_docx(v,bindings,values,target):
+def _parent_of(root,node):
+ for parent in root.iter():
+  if node in list(parent): return parent
+ return None
+def render_docx(v,bindings,values,target,regions=None,included_region_ids=None):
+ regions=regions or []; included_region_ids=set(included_region_ids or [])
+ excluded=[x for x in regions if x.id not in included_region_ids]
+ bindings=[b for b in bindings if not any(_binding_inside_region(b,r) for r in excluded)]
  grouped={}
- for b in bindings: grouped.setdefault(b.locator['part'],[]).append(b)
+ for b in bindings: grouped.setdefault(b.locator['part'],{'bindings':[],'regions':[]})['bindings'].append(b)
+ for r in excluded: grouped.setdefault(r.locator['part'],{'bindings':[],'regions':[]})['regions'].append(r)
  with zipfile.ZipFile(safe_source(v),'r') as src,zipfile.ZipFile(target,'w') as dst:
   for info in src.infolist():
    raw=src.read(info.filename)
    if info.filename in grouped:
     root=ET.fromstring(raw); by_node={}
-    for b in grouped[info.filename]: by_node.setdefault(b.locator['node'],[]).append(b)
+    for b in grouped[info.filename]['bindings']: by_node.setdefault(b.locator['node'],[]).append((b.locator['text_start'],b.locator['text_end'],values[b.binding_key]))
+    for region in grouped[info.filename]['regions']:
+     if region.region_type=='CONDITIONAL_RUN': by_node.setdefault(region.locator['node'],[]).append((region.locator['text_start'],region.locator['text_end'],''))
     for locator,items in by_node.items():
      p=paragraph_for(root,locator)
-     for b in sorted(items,key=lambda x:x.locator['text_start'],reverse=True): replace_range(p,b.locator['text_start'],b.locator['text_end'],values[b.binding_key])
+     for start,end,value in sorted(items,key=lambda x:x[0],reverse=True): replace_range(p,start,end,value)
+    removals=[]
+    for region in grouped[info.filename]['regions']:
+     loc=region.locator
+     if region.region_type=='CONDITIONAL_RUN': continue
+     elif region.region_type in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: removals.extend(paragraph_for(root,x) for x in loc['nodes'])
+     elif region.region_type=='CONDITIONAL_TABLE_ROW': removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1])
+     else: removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1])
+    for node in removals:
+     parent=_parent_of(root,node)
+     if parent is None: raise ValueError('Не удалось безопасно удалить OOXML-область')
+     parent.remove(node)
     raw=ET.tostring(root,encoding='utf-8',xml_declaration=True)
    dst.writestr(info,raw)
  validate_docx(target.name,DOCX_MIME,target.read_bytes())
@@ -250,8 +378,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def generate(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {}; errors=validate_active_answers(fields,answers)
   if errors: raise HTTPException(422,detail={'message':'Заполните обязательные поля','fields':errors})
-  bindings=validate_bindings(v,s); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; values={key:render_value(field,answers.get(key,'')) for key,field in active.items()}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
-  try: render_docx(v,bindings,values,target)
+  bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; values={key:render_value(field,answers.get(key,'')) for key,field in active.items()}; legal_answers=condition_answers(fields,answers); included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal_answers)}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
+  try: render_docx(v,bindings,values,target,regions,included)
   except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Не удалось безопасно сформировать DOCX: {exc}')
   raw=target.read_bytes(); g=GeneratedDocument(draft_id=d.id,template_version_id=v.id,generation_number=number,path=str(target),sha256=hashlib.sha256(raw).hexdigest(),mime_type=DOCX_MIME,size=len(raw),created_by_id=u.id); s.add(g); d.status='GENERATED'; s.commit(); return {'id':g.id,'generation_number':number,'filename':f'Договор_{number}.docx','download_url':f'/api/v1/generated-documents/{g.id}/download'}
  @r.get('/api/v1/generated-documents/{id}/download')
@@ -301,7 +429,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
   x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config=field_config(p)); s.add(x); s.flush()
-  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  try:
+   validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+   validate_regions(v,s)
   except HTTPException: s.rollback(); raise
   s.commit(); return field_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/fields/{fid}')
@@ -315,7 +445,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if x.field_key!=p.field_key:
    for binding in s.query(DocumentBinding).filter_by(field_id=x.id): binding.binding_key=p.field_key
   x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=field_config(p); s.flush()
-  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  try:
+   validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+   validate_regions(v,s)
   except HTTPException: s.rollback(); raise
   s.commit(); return field_out(x)
  @r.delete(prefix+'/{tid}/versions/{vid}/fields/{fid}',status_code=204)
@@ -324,7 +456,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   if s.query(DocumentBinding).filter_by(field_id=x.id).first(): raise HTTPException(409,detail='Сначала удалите привязки поля')
   s.delete(x); s.flush()
-  try: validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+  try:
+   validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
+   validate_regions(v,s)
   except HTTPException: s.rollback(); raise
   s.commit()
  @r.get(prefix+'/{tid}/versions/{vid}/bindings')
@@ -347,18 +481,54 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(DocumentBinding,bid)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Привязка не найдена')
   s.delete(x); s.commit()
+ @r.get(prefix+'/{tid}/versions/{vid}/conditional-regions')
+ def conditional_regions(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  return [region_out(x) for x in s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id).order_by(ConditionalDocumentRegion.created_at).all()]
+ @r.post(prefix+'/{tid}/versions/{vid}/conditional-regions',status_code=201)
+ def create_region(tid:str,vid:str,p:RegionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s); fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+  if s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id,region_key=p.region_key).first(): raise HTTPException(409,detail='Область с таким ключом уже существует')
+  try:
+   ConditionEngine.validate_condition(p.include_when,fields); locator,original=_resolve_region(safe_source(v),p,v.structure_fingerprint)
+  except (ConditionConfigurationError,ValueError,IndexError) as exc: raise HTTPException(422,detail=str(exc))
+  x=ConditionalDocumentRegion(template_version_id=v.id,region_key=p.region_key,region_type=p.region_type,locator=locator,include_when=p.include_when,original_text=original,created_by_id=u.id); s.add(x); s.flush()
+  try: validate_regions(v,s,validate_bindings(v,s))
+  except HTTPException: s.rollback(); raise
+  s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='CONDITIONAL_REGION_CREATED',metadata_json={'region_id':x.id,'region_type':x.region_type})); s.commit(); return region_out(x)
+ @r.patch(prefix+'/{tid}/versions/{vid}/conditional-regions/{rid}')
+ def update_region(tid:str,vid:str,rid:str,p:RegionUpdatePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(ConditionalDocumentRegion,rid)
+  if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Условная область не найдена')
+  duplicate=s.query(ConditionalDocumentRegion).filter(ConditionalDocumentRegion.template_version_id==v.id,ConditionalDocumentRegion.region_key==p.region_key,ConditionalDocumentRegion.id!=x.id).first()
+  if duplicate: raise HTTPException(409,detail='Область с таким ключом уже существует')
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
+  try: ConditionEngine.validate_condition(p.include_when,fields)
+  except ConditionConfigurationError as exc: raise HTTPException(422,detail=str(exc))
+  x.region_key=p.region_key; x.include_when=p.include_when; s.flush()
+  try: validate_regions(v,s,validate_bindings(v,s))
+  except HTTPException: s.rollback(); raise
+  s.commit(); return region_out(x)
+ @r.delete(prefix+'/{tid}/versions/{vid}/conditional-regions/{rid}',status_code=204)
+ def delete_region(tid:str,vid:str,rid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(ConditionalDocumentRegion,rid)
+  if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Условная область не найдена')
+  s.delete(x); s.commit()
  @r.post(prefix+'/{tid}/versions/{vid}/publish')
  def publish(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); require_publisher(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s)
   if not schema: raise HTTPException(422,detail='Создайте анкету')
-  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s)
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings)
   if not fields: raise HTTPException(422,detail='Добавьте хотя бы одно поле анкеты')
   validate_condition_schema(fields)
   bound={x.field_id for x in bindings}
   if any((x.required or (x.config or {}).get('required_when') is not None) and x.id not in bound for x in fields): raise HTTPException(422,detail='Все обязательные поля должны иметь привязку в DOCX')
   if any(not x.field_id for x in bindings): raise HTTPException(422,detail='Найдены привязки без поля анкеты')
   probe={x.field_key:('Да' if x.field_type=='BOOLEAN' else '2026-01-01' if x.field_type=='DATE' else '1') for x in fields}; temp=Path(v.source_path).parent/'publish-check.docx'
-  try: render_docx(v,bindings,probe,temp); temp.unlink(missing_ok=True)
+  try:
+   render_docx(v,bindings,probe,temp,regions,{x.id for x in regions}); temp.unlink(missing_ok=True)
+   render_docx(v,bindings,probe,temp,regions,set()); temp.unlink(missing_ok=True)
   except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Проверка генерации не пройдена: {exc}')
   for old in s.query(TemplateVersion).filter(TemplateVersion.template_id==t.id,TemplateVersion.status=='PUBLISHED'): old.status='SUPERSEDED'
   v.status='PUBLISHED'; v.published_by_id=u.id; v.published_at=now(); schema.status='PUBLISHED'; t.status='ACTIVE'; t.current_version_id=v.id; s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='VERSION_PUBLISHED')); s.commit(); return version_out(v)

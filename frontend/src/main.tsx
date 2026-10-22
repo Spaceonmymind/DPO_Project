@@ -34,6 +34,8 @@ import {
 } from "./specificationPresentation.js";
 import { TemplateAdmin } from "./TemplateAdmin";
 import { ContractCatalog } from "./ContractCatalog";
+import { ContractHome } from "./ContractHome";
+import { MyDocuments } from "./MyDocuments";
 const API = "/api/v1",
   S: any = {
     NEW: "Новое",
@@ -113,7 +115,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
       </svg>
       {!compact && (
         <span>
-          <b>ДПО</b> <strong>Ассистент</strong>
+          <b>ДПО</b> <strong>Договоры</strong>
         </span>
       )}
     </div>
@@ -171,10 +173,10 @@ function Login({ setUser }: any) {
         <Brand />
         <div>
           <p>Корпоративное рабочее пространство</p>
-          <h1>Закупочные документы. В одном понятном процессе.</h1>
+          <h1>Корпоративные договоры. В одном понятном процессе.</h1>
           <span>
-            Подготовка технических заданий и подбор договорных шаблонов для
-            команд НСПК.
+            Выбор утверждённого шаблона, заполнение анкеты и формирование
+            готового документа.
           </span>
         </div>
       </section>
@@ -209,7 +211,7 @@ function Login({ setUser }: any) {
     </main>
   );
 }
-function Sidebar({ u, cases, route, go, create, logout }: any) {
+function Sidebar({ u, route, go, logout }: any) {
   let [closed, setClosed] = useState(localStorage.getItem("side") === "1"),
     [profile, setProfile] = useState(false),
     reduce = useReducedMotion();
@@ -237,11 +239,11 @@ function Sidebar({ u, cases, route, go, create, logout }: any) {
       </header>
       <button
         className="new"
-        onClick={create}
-        title={closed ? "Новое обращение" : ""}
+        onClick={() => go("/contracts")}
+        title={closed ? "Создать договор" : ""}
       >
         <Plus />
-        {!closed && "Новое обращение"}
+        {!closed && "Создать договор"}
       </button>
       <nav>
         <button
@@ -253,20 +255,20 @@ function Sidebar({ u, cases, route, go, create, logout }: any) {
           {!closed && "Главная"}
         </button>
         <button
-          className={route === "/cases" ? "active" : ""}
-          title={closed ? "Мои обращения" : ""}
-          onClick={() => go("/cases")}
-        >
-          <MessageSquare />
-          {!closed && "Мои обращения"}
-        </button>
-        <button
           className={route === "/contracts" ? "active" : ""}
-          title={closed ? "Договоры" : ""}
+          title={closed ? "Каталог договоров" : ""}
           onClick={() => go("/contracts")}
         >
           <FileText />
-          {!closed && "Договоры"}
+          {!closed && "Каталог договоров"}
+        </button>
+        <button
+          className={route === "/documents" ? "active" : ""}
+          title={closed ? "Мои документы" : ""}
+          onClick={() => go("/documents")}
+        >
+          <MessageSquare />
+          {!closed && "Мои документы"}
         </button>
         {u.roles?.some((r: string) =>
           ["dpo_specialist", "administrator"].includes(r),
@@ -281,17 +283,6 @@ function Sidebar({ u, cases, route, go, create, logout }: any) {
           </button>
         )}
       </nav>
-      {!closed && (
-        <section className="recent">
-          <p>Последние обращения</p>
-          {cases.slice(0, 5).map((c: any) => (
-            <button onClick={() => go("/cases/" + c.id)} key={c.id}>
-              <b>{c.title}</b>
-              <small>{S[c.state]}</small>
-            </button>
-          ))}
-        </section>
-      )}
       <footer>
         <button
           className="user"
@@ -989,9 +980,14 @@ function Shell({ u, logout }: any) {
   useEffect(() => {
     load().catch(logout);
   }, [route]);
+  useEffect(() => {
+    const navigate = () => setRoute(location.pathname);
+    addEventListener("popstate", navigate);
+    return () => removeEventListener("popstate", navigate);
+  }, []);
   function go(x: string) {
     history.pushState({}, "", x);
-    setRoute(x);
+    setRoute(new URL(x, location.origin).pathname);
   }
   async function work(f: any) {
     setBusy(true);
@@ -1018,20 +1014,15 @@ function Shell({ u, logout }: any) {
     <div className="shell">
       <Sidebar
         u={u}
-        cases={cases}
         route={route}
         go={go}
-        create={() => create()}
         logout={logout}
       />
       <main className="content">
         {route === "/" ? (
-          <Dashboard
-            u={u}
-            cases={cases}
-            open={(x: any) => go("/cases/" + x)}
-            create={create}
-          />
+          <ContractHome api={api} user={u} go={go} />
+        ) : route === "/documents" ? (
+          <MyDocuments api={api} go={go} />
         ) : route === "/cases" ? (
           <Cases
             cases={cases}
@@ -1043,9 +1034,15 @@ function Shell({ u, logout }: any) {
             }
           />
         ) : route === "/templates" ? (
-          <TemplateAdmin api={api} />
+          u.roles?.some((r: string) =>
+            ["dpo_specialist", "administrator"].includes(r),
+          ) ? (
+            <TemplateAdmin api={api} />
+          ) : (
+            <div className="page platform-empty"><FileCheck2 /><h2>Раздел недоступен</h2><p>Конструктор шаблонов доступен специалистам ДПО и администраторам.</p></div>
+          )
         ) : route === "/contracts" ? (
-          <ContractCatalog api={api} />
+          <ContractCatalog api={api} go={go} manager={u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r))} />
         ) : (
           c && (
             <div className="workspace">

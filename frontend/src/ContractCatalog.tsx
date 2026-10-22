@@ -18,7 +18,7 @@ const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
   `row-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-export function ContractCatalog({ api }: { api: Api }) {
+export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (path: string) => void; manager?: boolean }) {
   const [catalog, setCatalog] = useState<any[]>([]),
     [drafts, setDrafts] = useState<any[]>([]),
     [draft, setDraft] = useState<any>(),
@@ -28,8 +28,11 @@ export function ContractCatalog({ api }: { api: Api }) {
     [notice, setNotice] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [document, setDocument] = useState<any>();
+    [document, setDocument] = useState<any>(),
+    [review, setReview] = useState(false),
+    [loading, setLoading] = useState(true);
   const autosaveReady = useRef(false);
+  const savedSnapshot = useRef("{}");
   async function load() {
     let [c, d] = await Promise.all([
       api("/contract-catalog"),
@@ -39,8 +42,23 @@ export function ContractCatalog({ api }: { api: Api }) {
     setDrafts(d);
   }
   useEffect(() => {
-    load().catch((e) => setError(e.message));
+    load()
+      .then(async () => {
+        const id = new URLSearchParams(location.search).get("draft");
+        if (id) await restore(id);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
   }, []);
+  useEffect(() => {
+    if (!draft) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (JSON.stringify(answers) === savedSnapshot.current) return;
+      event.preventDefault();
+    };
+    addEventListener("beforeunload", warn);
+    return () => removeEventListener("beforeunload", warn);
+  }, [draft, answers]);
   useEffect(() => {
     if (!draft || !autosaveReady.current) return;
     let timer = setTimeout(
@@ -49,9 +67,11 @@ export function ContractCatalog({ api }: { api: Api }) {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ answers }),
-        }).catch((e: any) =>
-          setError(`Автосохранение не выполнено: ${e.message}`),
-        ),
+        })
+          .then(() => { savedSnapshot.current = JSON.stringify(answers); })
+          .catch((e: any) =>
+            setError(`Автосохранение не выполнено: ${e.message}`),
+          ),
       650,
     );
     return () => clearTimeout(timer);
@@ -92,8 +112,10 @@ export function ContractCatalog({ api }: { api: Api }) {
     autosaveReady.current = false;
     setDraft(x);
     setAnswers(x.answers || {});
+    savedSnapshot.current = JSON.stringify(x.answers || {});
     setErrors({});
     setDocument(null);
+    setReview(false);
     setTimeout(() => {
       autosaveReady.current = true;
     }, 0);
@@ -158,6 +180,7 @@ export function ContractCatalog({ api }: { api: Api }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers }),
       });
+      savedSnapshot.current = JSON.stringify(answers);
       setNotice("Ответы сохранены. Можно продолжить позже.");
       await load();
     });
@@ -171,6 +194,7 @@ export function ContractCatalog({ api }: { api: Api }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers }),
       });
+      savedSnapshot.current = JSON.stringify(answers);
       let result = await api(`/contract-drafts/${draft.id}/generate`, {
         method: "POST",
       });
@@ -212,6 +236,14 @@ export function ContractCatalog({ api }: { api: Api }) {
   const calculated = draft
     ? calculateAnswers(draft.schema, answers)
     : { values: {}, groups: {} };
+  const activeFields = draft
+    ? draft.schema.fields.filter((f: any) => fieldState(f, answers).visible && !f.config?.calculated)
+    : [];
+  const completedFields = activeFields.filter((f: any) => {
+    const value = answers[f.field_key];
+    return value !== undefined && value !== null && value !== "";
+  }).length;
+  const progress = activeFields.length ? Math.round((completedFields / activeFields.length) * 100) : 100;
   if (draft)
     return (
       <div className="page contract-questionnaire">
@@ -225,6 +257,10 @@ export function ContractCatalog({ api }: { api: Api }) {
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
+        <section className="questionnaire-progress" aria-label="Прогресс заполнения">
+          <div><b>{review ? "Шаг 2 из 2 · Проверка" : "Шаг 1 из 2 · Анкета"}</b><span>{progress}% заполнено</span></div>
+          <progress max="100" value={progress}>{progress}%</progress>
+        </section>
         {error && (
           <div className="platform-error" role="alert">
             {error}
@@ -235,7 +271,9 @@ export function ContractCatalog({ api }: { api: Api }) {
             {notice}
           </div>
         )}
-        <form className="dynamic-form" onSubmit={generate}>
+        <form className="dynamic-form" onSubmit={review ? generate : (event) => { event.preventDefault(); if (validate()) setReview(true); }}>
+          {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{String(answers[f.field_key] ?? "—")}</b></div>)}</section>}
+          {!review && <>
           {groups(
             draft.schema.fields.filter(
               (f: any) => fieldState(f, answers).visible,
@@ -286,7 +324,9 @@ export function ContractCatalog({ api }: { api: Api }) {
                 }
               />
             ))}
+          </>}
           <div className="form-actions">
+            {review && <button type="button" className="secondary" onClick={() => setReview(false)}><ArrowLeft size={16}/>Вернуться к анкете</button>}
             <button
               type="button"
               className="secondary"
@@ -297,7 +337,7 @@ export function ContractCatalog({ api }: { api: Api }) {
               Сохранить ответы
             </button>
             <button className="primary" disabled={busy}>
-              Сформировать DOCX
+              {review ? "Сформировать DOCX" : "Перейти к проверке"}
             </button>
           </div>
           {document && (
@@ -345,11 +385,20 @@ export function ContractCatalog({ api }: { api: Api }) {
               {x.description || "Утверждённый корпоративный шаблон договора."}
             </p>
             <button className="primary" onClick={() => begin(x.id)}>
-              Заполнить анкету
+              Заполнить договор
             </button>
           </article>
         ))}
       </section>
+      {loading && <section className="catalog-loading" role="status">Загружаем доступные договоры…</section>}
+      {!loading && filtered.length === 0 && (
+        <section className="platform-empty catalog-empty">
+          <FileText />
+          <h2>{query ? "Ничего не найдено" : "Пока нет доступных договоров"}</h2>
+          <p>{query ? "Измените поисковый запрос." : "Опубликованные шаблоны появятся здесь после их утверждения специалистами ДПО."}</p>
+          {!query && manager && go && <button className="primary" onClick={() => go("/templates")}>Перейти в конструктор</button>}
+        </section>
+      )}
       {drafts.length > 0 && (
         <section className="saved-drafts">
           <h2>Продолжить заполнение</h2>

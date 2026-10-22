@@ -764,6 +764,9 @@ def test_contract_platform_end_to_end_multiple_occurrences_generation_and_owners
     draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
     assert draft.status_code==201,draft.text
     draft_id=draft.json()['id']
+    history=employee.get('/api/v1/contract-drafts',headers=employee_headers).json()
+    history_item=next(item for item in history if item['id']==draft_id)
+    assert history_item['created_at'] and history_item['template_version']==version['version_number']
     assert employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=employee_headers).status_code==422
     assert employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'unknown':'x'}}).status_code==422
     saved=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'customer_name':'ООО «Ромашка»'}})

@@ -10,6 +10,8 @@ import {
   CheckCircle2,
   Pencil,
   GitBranch,
+  Search,
+  ArrowLeft,
 } from "lucide-react";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
@@ -64,7 +66,9 @@ export function TemplateAdmin({ api }: { api: Api }) {
     [category, setCategory] = useState("Другое"),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [stage, setStage] = useState(1),
+    [docQuery, setDocQuery] = useState("");
   async function load() {
     setTemplates(await api("/document-templates"));
   }
@@ -89,10 +93,12 @@ export function TemplateAdmin({ api }: { api: Api }) {
     setPreview(null);
     setSchema(null);
     setBindings([]);
+    setStage(1);
     setVersions(await api(`/document-templates/${x.id}/versions`));
   }
   async function openVersion(x: any) {
     setVersion(x);
+    setStage(2);
     setSelection(null);
     setRepeatingBinding("");
     setRegionDraft(null);
@@ -190,6 +196,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
     });
   }
   function editField(x: any) {
+    setStage(4);
     setEditing(x.id);
     setField({
       ...x,
@@ -405,7 +412,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
     });
   }
   return (
-    <div className="page template-admin">
+    <div className={`page template-admin ${selected ? "template-open" : ""}`}>
       <header className="pagehead">
         <div>
           <p>КОНСТРУКТОР ДОГОВОРОВ</p>
@@ -486,6 +493,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
             <>
               <header className="template-title">
                 <div>
+                  <button className="back-link" onClick={() => setSelected(undefined)}><ArrowLeft size={15}/>К списку шаблонов</button>
                   <span className="draft-state">
                     {version?.status === "PUBLISHED"
                       ? "Опубликовано"
@@ -506,6 +514,9 @@ export function TemplateAdmin({ api }: { api: Api }) {
                   />
                 </label>
               </header>
+              <nav className="builder-stages" aria-label="Этапы настройки шаблона">
+                {["Общие сведения", "Исходный документ", "Поля и привязки", "Анкета", "Условия и повторяемые таблицы", "Проверка и публикация"].map((label, index) => <button key={label} className={stage === index + 1 ? "active" : ""} aria-current={stage === index + 1 ? "step" : undefined} onClick={() => setStage(index + 1)}><span>{index + 1}</span>{label}</button>)}
+              </nav>
               <div className="version-grid">
                 <section className="version-list">
                   <h3>Версии</h3>
@@ -544,7 +555,12 @@ export function TemplateAdmin({ api }: { api: Api }) {
                         </a>
                       </header>
                       <div className="builder-grid">
-                        <section>
+                        <aside className="document-outline">
+                          <h3>Структура документа</h3>
+                          <label><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент"/></label>
+                          <nav>{preview.nodes.filter((node:any) => node.text.trim().toLowerCase().includes(docQuery.toLowerCase())).slice(0, 80).map((node:any, index:number) => <button key={node.locator} onClick={() => document.querySelector(`[data-locator="${CSS.escape(node.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})}><span>{node.kind === "table_cell" ? "Ячейка" : "Абзац"} {index + 1}</span><b>{node.text.trim() || "Пустой фрагмент"}</b></button>)}</nav>
+                        </aside>
+                        <section className="document-canvas">
                           <div className="preview-notice">
                             Выделите текст для привязки или условного фрагмента.
                             Для структурной области используйте действия у
@@ -557,6 +573,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
                             {preview.nodes.map((node: any) => (
                               <div
                                 key={node.locator}
+                                tabIndex={0}
                                 className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""}`}
                               >
                                 <p
@@ -979,10 +996,11 @@ export function TemplateAdmin({ api }: { api: Api }) {
                             </section>
                           )}
                         </section>
-                        <aside className="questionnaire-builder">
-                          <h3>Вопросы анкеты</h3>
+                        <aside className={`questionnaire-builder builder-stage-${stage}`}>
+                          {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
+                          <h3 className="panel-questionnaire">Вопросы анкеты</h3>
                           {version.status === "DRAFT" && (
-                            <form onSubmit={saveField}>
+                            <form className="field-editor" onSubmit={saveField}>
                               <label>
                                 Раздел
                                 <input
@@ -1190,7 +1208,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
                               </button>
                             </form>
                           )}
-                          <div className="field-list">
+                          <div className="field-list panel-fields">
                             {schema?.fields.map((x: any) => (
                               <article key={x.id}>
                                 <div>
@@ -1228,8 +1246,8 @@ export function TemplateAdmin({ api }: { api: Api }) {
                               </article>
                             ))}
                           </div>
-                          <h3>Привязки</h3>
-                          <div className="binding-list">
+                          <h3 className="panel-bindings">Привязки</h3>
+                          <div className="binding-list panel-bindings">
                             {bindings.map((b: any) => (
                               <article key={b.id}>
                                 <span>
@@ -1254,8 +1272,8 @@ export function TemplateAdmin({ api }: { api: Api }) {
                               </article>
                             ))}
                           </div>
-                          <h3>Условные области</h3>
-                          <div className="binding-list region-list">
+                          <h3 className="panel-conditions">Условные области</h3>
+                          <div className="binding-list region-list panel-conditions">
                             {regions.length === 0 && (
                               <p className="region-empty">
                                 Области ещё не настроены.
@@ -1286,8 +1304,8 @@ export function TemplateAdmin({ api }: { api: Api }) {
                               </article>
                             ))}
                           </div>
-                          <h3>Повторяемые строки</h3>
-                          <div className="repeat-group-list">
+                          <h3 className="panel-conditions">Повторяемые строки</h3>
+                          <div className="repeat-group-list panel-conditions">
                             {repeatingGroups.length === 0 && (
                               <p className="region-empty">
                                 Повторяемые строки ещё не настроены.
@@ -1380,7 +1398,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
                           </div>
                           {groupField && version.status === "DRAFT" && (
                             <form
-                              className="repeat-field-form"
+                              className="repeat-field-form panel-conditions"
                               onSubmit={saveGroupField}
                             >
                               <h3>
@@ -1537,7 +1555,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
                           )}
                           {version.status === "DRAFT" && (
                             <button
-                              className="publish"
+                              className="publish panel-publish"
                               onClick={publish}
                               disabled={busy}
                             >
@@ -1546,7 +1564,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
                             </button>
                           )}
                           {version.status === "PUBLISHED" && (
-                            <p className="binding-ok">
+                            <p className="binding-ok panel-publish">
                               <CheckCircle2 />
                               Версия доступна сотрудникам.
                             </p>

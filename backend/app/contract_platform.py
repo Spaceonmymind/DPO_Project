@@ -525,7 +525,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
   for d in s.query(DocumentDraft).filter_by(owner_id=u.id).order_by(DocumentDraft.updated_at.desc()).all():
-   v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); g=s.query(GeneratedDocument).filter_by(draft_id=d.id).order_by(GeneratedDocument.generation_number.desc()).first(); out.append({'id':d.id,'template_name':t.name,'status':d.status,'updated_at':d.updated_at,'generated':g.id if g else None,'generated_stale':bool(g and g.created_at<d.updated_at)})
+   v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); g=s.query(GeneratedDocument).filter_by(draft_id=d.id).order_by(GeneratedDocument.generation_number.desc()).first(); out.append({'id':d.id,'template_name':t.name,'template_version':v.version_number,'status':d.status,'created_at':d.created_at,'updated_at':d.updated_at,'generated':g.id if g else None,'generated_stale':bool(g and g.created_at<d.updated_at)})
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):

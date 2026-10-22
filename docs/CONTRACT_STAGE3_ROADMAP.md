@@ -103,7 +103,7 @@
 ```text
 R3.1 conditional questions
    ├── R3.2 conditional sections (implemented) ──┐
-   ├── R3.4 computations ──────────┼── R3.6 product migration
+   ├── R3.4 computations (implemented) ─┼── R3.6 product migration
    └── R3.5 variant/applicability ─┤
        R3.3 repeating tables ──────┘
 ```

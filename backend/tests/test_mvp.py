@@ -966,7 +966,7 @@ def test_r33_real_training_contract_empty_schedule_cells_are_bindable():
     for position,(cell,key,label,kind) in enumerate(zip(cells,['date','weekday','time','quantity','price','total','place'],['Дата','День недели','Время','Количество','Цена','Стоимость','Место'],['DATE','TEXT','TEXT','INTEGER','MONEY','MONEY','TEXT']),1):
         field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':label,'field_type':kind,'required':False,'position':position}).json()
         bound=manager.put(base+f"/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':cell['locator'],'start':0,'end':0,'selected_text':''}); assert bound.status_code==200,bound.text
-    assert manager.post(base+'/publish',headers=headers).status_code==200
+    published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
     employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':f'real-{i}','date':f'2026-11-{i:02d}','weekday':'Понедельник','time':'19:00','quantity':1,'price':'5000','total':'5000','place':f'Зал {i}'} for i in range(1,5)]
     assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'schedule':rows}}).status_code==200
     made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers); assert made.status_code==201,made.text
@@ -974,3 +974,28 @@ def test_r33_real_training_contract_empty_schedule_cells_are_bindable():
     assert len(schedule.rows)==18 and [schedule.rows[i].cells[6].text for i in range(2,6)]==[x['place'] for x in rows]
     assert any('Итого за общий период' in row.cells[0].text for row in schedule.rows)
     assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==digest
+
+
+def test_r34_calculated_rows_total_words_and_untrusted_values():
+    document=Document(); document.add_paragraph('Сумма прописью: WORDS')
+    table=document.add_table(rows=3,cols=3); table.style='Table Grid'; table.rows[0].cells[0].text='Количество'; table.rows[0].cells[1].text='Цена'; table.rows[0].cells[2].text='Стоимость'
+    for cell,text in zip(table.rows[1].cells,['QTY','PRICE','ROW_TOTAL']): cell.text=text
+    table.rows[2].cells[0].merge(table.rows[2].cells[1]).text='ИТОГО'; table.rows[2].cells[2].text='TOTAL'
+    payload=io.BytesIO(); document.save(payload); original=payload.getvalue(); manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'R34_CALC')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('calculation.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'comment','label':'Комментарий','field_type':'TEXT','required':False,'position':1}).status_code==201
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']; qty=next(x for x in nodes if x['text']=='QTY'); group=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'services','name':'Услуги','min_items':0,'max_items':10,'position':1,'row_locator':qty['locator']}).json()
+    row_fields=[]
+    for pos,(key,label,kind,text) in enumerate([('quantity','Количество','INTEGER','QTY'),('price','Цена','MONEY','PRICE')],1):
+        f=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':label,'field_type':kind,'required':True,'position':pos}).json(); node=next(x for x in nodes if x['text']==text); assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{f['id']}/binding",headers=headers,json={'locator':node['locator'],'start':0,'end':len(text),'selected_text':text}).status_code==200; row_fields.append(f)
+    row_total=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':'row_total','label':'Стоимость','field_type':'MONEY','required':False,'position':3,'calculated':True,'expression':{'operation':'MULTIPLY','operands':[{'source':'ROW_FIELD','field_key':'quantity'},{'source':'ROW_FIELD','field_key':'price'}]},'precision':2,'rounding':'HALF_UP','output_format':'MONEY'}).json(); node=next(x for x in nodes if x['text']=='ROW_TOTAL'); assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{row_total['id']}/binding",headers=headers,json={'locator':node['locator'],'start':0,'end':9,'selected_text':'ROW_TOTAL'}).status_code==200
+    grand=manager.post(base+'/fields',headers=headers,json={'field_key':'grand_total','label':'Итого','field_type':'MONEY','required':False,'position':2,'calculated':True,'expression':{'operation':'SUM','group_key':'services','field_key':'row_total'},'precision':2,'rounding':'HALF_UP','output_format':'MONEY'}).json()
+    for text,fmt in [('TOTAL','MONEY_WITH_CURRENCY'),('WORDS','MONEY_WORDS_RUB')]:
+        node=([x for x in nodes if x['text']==text] or [x for x in nodes if text in x['text']])[0]; response=manager.post(base+'/bindings',headers=headers,json={'field_id':grand['id'],'locator':node['locator'],'start':node['text'].index(text),'end':node['text'].index(text)+len(text),'selected_text':text,'output_format':fmt,'format_options':{'precision':2}}); assert response.status_code==201,response.text
+    published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); did=draft['id']; rows=[{'_id':'1','quantity':2,'price':'5000'},{'_id':'2','quantity':3,'price':'6000'},{'_id':'3','quantity':1,'price':'1000'}]
+    assert employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows,'grand_total':'1'}}).status_code==422
+    rows.pop(); saved=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows}}); assert saved.status_code==200,saved.text
+    made=employee.post(f'/api/v1/contract-drafts/{did}/generate',headers=employee_headers); assert made.status_code==201,made.text; rendered=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content))
+    assert [rendered.tables[0].rows[i].cells[2].text for i in (1,2)]==['10 000,00','18 000,00']; assert rendered.tables[0].rows[-1].cells[2].text=='28 000,00 руб.'; assert 'Двадцать восемь тысяч рублей 00 копеек' in rendered.paragraphs[0].text
+    assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==hashlib.sha256(original).hexdigest()

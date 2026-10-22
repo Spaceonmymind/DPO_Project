@@ -27,6 +27,11 @@ const blank = (position = 1) => ({
   label: "",
   field_type: "TEXT",
   required: true,
+  calculated: false,
+  expression: null,
+  precision: 2,
+  rounding: "HALF_UP",
+  output_format: "RAW",
   position,
   description: "",
   group: "Основные сведения",
@@ -283,17 +288,111 @@ export function TemplateAdmin({ api }: { api: Api }) {
       setNotice("Условная область удалена.");
     });
   }
-  function draftRepeatingGroup(locator:string){
-    setGroupDraft({group_key:"",name:"",description:"",min_items:0,max_items:10,required:false,position:Math.max(0,...repeatingGroups.map((g:any)=>g.position))+1,row_locator:locator,visible_when:null});
+  function draftRepeatingGroup(locator: string) {
+    setGroupDraft({
+      group_key: "",
+      name: "",
+      description: "",
+      min_items: 0,
+      max_items: 10,
+      required: false,
+      position: Math.max(0, ...repeatingGroups.map((g: any) => g.position)) + 1,
+      row_locator: locator,
+      visible_when: null,
+    });
   }
-  async function saveRepeatingGroup(){
-    await run(async()=>{let editing=groupDraft.id,path=`/document-templates/${selected.id}/versions/${version.id}/repeating-groups${editing?"/"+editing:""}`;let payload={...groupDraft};delete payload.id;delete payload.fields;delete payload.locator;delete payload.status;if(editing)delete payload.row_locator;await api(path,{method:editing?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});await openVersion(version);setNotice("Повторяемая группа сохранена.")})
+  async function saveRepeatingGroup() {
+    await run(async () => {
+      let editing = groupDraft.id,
+        path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups${editing ? "/" + editing : ""}`;
+      let payload = { ...groupDraft };
+      delete payload.id;
+      delete payload.fields;
+      delete payload.locator;
+      delete payload.status;
+      if (editing) delete payload.row_locator;
+      await api(path, {
+        method: editing ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await openVersion(version);
+      setNotice("Повторяемая группа сохранена.");
+    });
   }
-  async function removeRepeatingGroup(id:string){await run(async()=>{await api(`/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${id}`,{method:"DELETE"});await openVersion(version);setNotice("Повторяемая группа удалена.")})}
-  function newGroupField(group:any){setGroupField({group_id:group.id,field_key:"",label:"",field_type:"TEXT",required:true,position:Math.max(0,...group.fields.map((f:any)=>f.position))+1,description:"",placeholder:"",validation:{},options:[]})}
-  async function saveGroupField(e:FormEvent){e.preventDefault();await run(async()=>{let path=`/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupField.group_id}/fields${groupField.id?"/"+groupField.id:""}`,payload={...groupField};delete payload.id;delete payload.group_id;delete payload.locator;await api(path,{method:groupField.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});await openVersion(version);setNotice("Поле строки сохранено.")})}
-  async function removeGroupField(groupId:string,id:string){await run(async()=>{await api(`/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupId}/fields/${id}`,{method:"DELETE"});await openVersion(version)})}
-  async function bindGroupField(){let target=repeatingGroups.flatMap((g:any)=>g.fields.map((f:any)=>({group:g,field:f}))).find((x:any)=>x.field.id===repeatingBinding);if(!target)return;await run(async()=>{await api(`/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${target.group.id}/fields/${target.field.id}/binding`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(selection)});await openVersion(version);setNotice("Фрагмент строки привязан к полю группы.")})}
+  async function removeRepeatingGroup(id: string) {
+    await run(async () => {
+      await api(
+        `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${id}`,
+        { method: "DELETE" },
+      );
+      await openVersion(version);
+      setNotice("Повторяемая группа удалена.");
+    });
+  }
+  function newGroupField(group: any) {
+    setGroupField({
+      group_id: group.id,
+      field_key: "",
+      label: "",
+      field_type: "TEXT",
+      required: true,
+      calculated: false,
+      expression: null,
+      precision: 2,
+      rounding: "HALF_UP",
+      output_format: "RAW",
+      position: Math.max(0, ...group.fields.map((f: any) => f.position)) + 1,
+      description: "",
+      placeholder: "",
+      validation: {},
+      options: [],
+    });
+  }
+  async function saveGroupField(e: FormEvent) {
+    e.preventDefault();
+    await run(async () => {
+      let path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupField.group_id}/fields${groupField.id ? "/" + groupField.id : ""}`,
+        payload = { ...groupField };
+      delete payload.id;
+      delete payload.group_id;
+      delete payload.locator;
+      await api(path, {
+        method: groupField.id ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await openVersion(version);
+      setNotice("Поле строки сохранено.");
+    });
+  }
+  async function removeGroupField(groupId: string, id: string) {
+    await run(async () => {
+      await api(
+        `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupId}/fields/${id}`,
+        { method: "DELETE" },
+      );
+      await openVersion(version);
+    });
+  }
+  async function bindGroupField() {
+    let target = repeatingGroups
+      .flatMap((g: any) => g.fields.map((f: any) => ({ group: g, field: f })))
+      .find((x: any) => x.field.id === repeatingBinding);
+    if (!target) return;
+    await run(async () => {
+      await api(
+        `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${target.group.id}/fields/${target.field.id}/binding`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(selection),
+        },
+      );
+      await openVersion(version);
+      setNotice("Фрагмент строки привязан к полю группы.");
+    });
+  }
   async function publish() {
     await run(async () => {
       let x = await api(
@@ -448,22 +547,113 @@ export function TemplateAdmin({ api }: { api: Api }) {
                         <section>
                           <div className="preview-notice">
                             Выделите текст для привязки или условного фрагмента.
-                            Для структурной области используйте действия у абзаца.
+                            Для структурной области используйте действия у
+                            абзаца.
                           </div>
                           <article
                             className="docx-page"
                             onMouseUp={selectRange}
                           >
                             {preview.nodes.map((node: any) => (
-                              <div key={node.locator} className={`preview-node ${regions.some((r) => regionHasNode(r,node.locator)) ? "conditional-area" : ""} ${repeatingGroups.some((g:any)=>repeatingHasNode(g,node.locator))?"repeating-area":""}`}>
-                                <p data-locator={node.locator} className={node.kind === "table_cell" ? "docx-cell" : ""}>
-                                  {paint(node.text,bindings.filter((b) => b.locator.node === node.locator),schema?.fields || [],regions.filter((r) => r.region_type === "CONDITIONAL_RUN" && r.locator.node === node.locator))}
+                              <div
+                                key={node.locator}
+                                className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""}`}
+                              >
+                                <p
+                                  data-locator={node.locator}
+                                  className={
+                                    node.kind === "table_cell"
+                                      ? "docx-cell"
+                                      : ""
+                                  }
+                                >
+                                  {paint(
+                                    node.text,
+                                    bindings.filter(
+                                      (b) => b.locator.node === node.locator,
+                                    ),
+                                    schema?.fields || [],
+                                    regions.filter(
+                                      (r) =>
+                                        r.region_type === "CONDITIONAL_RUN" &&
+                                        r.locator.node === node.locator,
+                                    ),
+                                  )}
                                 </p>
-                                {version.status === "DRAFT" && <div className="region-actions" aria-label="Выбор условной области">
-                                  <button type="button" onClick={() => draftRegion("CONDITIONAL_PARAGRAPH",node.locator)}>Абзац</button>
-                                  <button type="button" onClick={() => chooseBlock(node.locator)}>{blockStart ? "Конец блока" : "Начало блока"}</button>
-                                  {node.kind === "table_cell" && <><button type="button" onClick={()=>setSelection({locator:node.locator,start:0,end:node.text.length,selected_text:node.text,field_id:""})}>Выбрать ячейку</button><button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE_ROW",node.locator)}>Строка</button><button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE",node.locator)}>Таблица</button><button type="button" onClick={()=>draftRepeatingGroup(node.locator)}>Сделать строку повторяемой</button></>}
-                                </div>}
+                                {version.status === "DRAFT" && (
+                                  <div
+                                    className="region-actions"
+                                    aria-label="Выбор условной области"
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        draftRegion(
+                                          "CONDITIONAL_PARAGRAPH",
+                                          node.locator,
+                                        )
+                                      }
+                                    >
+                                      Абзац
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => chooseBlock(node.locator)}
+                                    >
+                                      {blockStart
+                                        ? "Конец блока"
+                                        : "Начало блока"}
+                                    </button>
+                                    {node.kind === "table_cell" && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setSelection({
+                                              locator: node.locator,
+                                              start: 0,
+                                              end: node.text.length,
+                                              selected_text: node.text,
+                                              field_id: "",
+                                            })
+                                          }
+                                        >
+                                          Выбрать ячейку
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRegion(
+                                              "CONDITIONAL_TABLE_ROW",
+                                              node.locator,
+                                            )
+                                          }
+                                        >
+                                          Строка
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRegion(
+                                              "CONDITIONAL_TABLE",
+                                              node.locator,
+                                            )
+                                          }
+                                        >
+                                          Таблица
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRepeatingGroup(node.locator)
+                                          }
+                                        >
+                                          Сделать строку повторяемой
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </article>
@@ -494,26 +684,300 @@ export function TemplateAdmin({ api }: { api: Api }) {
                                     ))}
                                   </select>
                                 </label>
+                                <label>
+                                  Формат в документе
+                                  <select
+                                    value={selection.output_format || "RAW"}
+                                    onChange={(e) =>
+                                      setSelection({
+                                        ...selection,
+                                        output_format: e.target.value,
+                                        format_options: {
+                                          precision: 2,
+                                          rounding: "HALF_UP",
+                                        },
+                                      })
+                                    }
+                                  >
+                                    <option value="RAW">Как введено</option>
+                                    <option value="NUMBER">Число</option>
+                                    <option value="DECIMAL">
+                                      Десятичное число
+                                    </option>
+                                    <option value="MONEY">
+                                      Денежная сумма
+                                    </option>
+                                    <option value="MONEY_WITH_CURRENCY">
+                                      Сумма с руб.
+                                    </option>
+                                    <option value="MONEY_WORDS_RUB">
+                                      Сумма прописью
+                                    </option>
+                                    <option value="DATE">
+                                      Дата ДД.ММ.ГГГГ
+                                    </option>
+                                    <option value="DATE_WORDS">
+                                      Дата прописью
+                                    </option>
+                                    <option value="PERCENT">Процент</option>
+                                  </select>
+                                </label>
                                 <button
                                   className="primary"
-                                  disabled={busy || !selection.field_id || !selection.selected_text}
+                                  disabled={busy || !selection.field_id}
                                   onClick={bind}
                                 >
                                   Создать привязку
                                 </button>
-                                <button className="secondary" type="button" onClick={() => setRegionDraft({region_key:"",region_type:"CONDITIONAL_RUN",start_locator:selection.locator,start:selection.start,end:selection.end,selected_text:selection.selected_text,include_when:null})}>Сделать условным фрагментом</button>
-                                {repeatingGroups.some((g:any)=>g.fields.length>0)&&<><label>Поле повторяемой строки<select value={repeatingBinding} onChange={e=>setRepeatingBinding(e.target.value)}><option value="">Выберите поле</option>{repeatingGroups.map((g:any)=><optgroup key={g.id} label={g.name}>{g.fields.map((f:any)=><option key={f.id} value={f.id}>{f.label}</option>)}</optgroup>)}</select></label><button className="secondary" type="button" disabled={!repeatingBinding||busy} onClick={bindGroupField}>Связать с полем строки</button></>}
+                                <button
+                                  className="secondary"
+                                  type="button"
+                                  onClick={() =>
+                                    setRegionDraft({
+                                      region_key: "",
+                                      region_type: "CONDITIONAL_RUN",
+                                      start_locator: selection.locator,
+                                      start: selection.start,
+                                      end: selection.end,
+                                      selected_text: selection.selected_text,
+                                      include_when: null,
+                                    })
+                                  }
+                                >
+                                  Сделать условным фрагментом
+                                </button>
+                                {repeatingGroups.some(
+                                  (g: any) => g.fields.length > 0,
+                                ) && (
+                                  <>
+                                    <label>
+                                      Поле повторяемой строки
+                                      <select
+                                        value={repeatingBinding}
+                                        onChange={(e) =>
+                                          setRepeatingBinding(e.target.value)
+                                        }
+                                      >
+                                        <option value="">Выберите поле</option>
+                                        {repeatingGroups.map((g: any) => (
+                                          <optgroup key={g.id} label={g.name}>
+                                            {g.fields.map((f: any) => (
+                                              <option key={f.id} value={f.id}>
+                                                {f.label}
+                                              </option>
+                                            ))}
+                                          </optgroup>
+                                        ))}
+                                      </select>
+                                    </label>
+                                    <button
+                                      className="secondary"
+                                      type="button"
+                                      disabled={!repeatingBinding || busy}
+                                      onClick={bindGroupField}
+                                    >
+                                      Связать с полем строки
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </section>
                           )}
-                          {regionDraft && <section className="region-editor" aria-label="Настройка условной области">
-                            <h3>{regionDraft.id ? "Изменить условную область" : "Новая условная область"}</h3>
-                            <p>{REGION_LABELS[regionDraft.region_type]}</p>
-                            <label>Служебный ключ<input required pattern="[A-Za-z][A-Za-z0-9_.-]*" value={regionDraft.region_key} onChange={(e) => setRegionDraft({...regionDraft,region_key:e.target.value})}/></label>
-                            <ConditionEditor title="Включать область, когда" value={regionDraft.include_when} fields={schema?.fields || []} change={(value:any) => setRegionDraft({...regionDraft,include_when:value})}/>
-                            <div><button type="button" className="primary" disabled={busy || !regionDraft.region_key || !regionDraft.include_when} onClick={saveRegion}>Сохранить область</button><button type="button" className="secondary" onClick={() => setRegionDraft(null)}>Отмена</button></div>
-                          </section>}
-                          {groupDraft&&<section className="region-editor repeating-editor" aria-label="Настройка повторяемой группы"><h3>{groupDraft.id?"Изменить повторяемую группу":"Новая повторяемая группа"}</h3><p>Настройте строки, которые сотрудник сможет добавлять в анкету.</p><label>Название<input required value={groupDraft.name} onChange={e=>setGroupDraft({...groupDraft,name:e.target.value})}/></label><label>Служебный ключ<input required pattern="[A-Za-z][A-Za-z0-9_.-]*" value={groupDraft.group_key} onChange={e=>setGroupDraft({...groupDraft,group_key:e.target.value})}/></label><label>Описание<input value={groupDraft.description} onChange={e=>setGroupDraft({...groupDraft,description:e.target.value})}/></label><div className="repeat-limits"><label>Минимум<input type="number" min="0" max="50" value={groupDraft.min_items} onChange={e=>setGroupDraft({...groupDraft,min_items:Number(e.target.value)})}/></label><label>Максимум<input type="number" min="1" max="50" value={groupDraft.max_items} onChange={e=>setGroupDraft({...groupDraft,max_items:Number(e.target.value)})}/></label></div><label className="check"><input type="checkbox" checked={groupDraft.required} onChange={e=>setGroupDraft({...groupDraft,required:e.target.checked})}/>Обязательная группа</label><ConditionEditor title="Показывать группу, когда" value={groupDraft.visible_when??groupDraft.config?.visible_when} fields={schema?.fields||[]} change={(value:any)=>setGroupDraft({...groupDraft,visible_when:value})}/><div><button type="button" className="primary" disabled={busy||!groupDraft.name||!groupDraft.group_key||groupDraft.max_items<groupDraft.min_items} onClick={saveRepeatingGroup}>Сохранить группу</button><button type="button" className="secondary" onClick={()=>setGroupDraft(null)}>Отмена</button></div></section>}
+                          {regionDraft && (
+                            <section
+                              className="region-editor"
+                              aria-label="Настройка условной области"
+                            >
+                              <h3>
+                                {regionDraft.id
+                                  ? "Изменить условную область"
+                                  : "Новая условная область"}
+                              </h3>
+                              <p>{REGION_LABELS[regionDraft.region_type]}</p>
+                              <label>
+                                Служебный ключ
+                                <input
+                                  required
+                                  pattern="[A-Za-z][A-Za-z0-9_.-]*"
+                                  value={regionDraft.region_key}
+                                  onChange={(e) =>
+                                    setRegionDraft({
+                                      ...regionDraft,
+                                      region_key: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <ConditionEditor
+                                title="Включать область, когда"
+                                value={regionDraft.include_when}
+                                fields={schema?.fields || []}
+                                change={(value: any) =>
+                                  setRegionDraft({
+                                    ...regionDraft,
+                                    include_when: value,
+                                  })
+                                }
+                              />
+                              <div>
+                                <button
+                                  type="button"
+                                  className="primary"
+                                  disabled={
+                                    busy ||
+                                    !regionDraft.region_key ||
+                                    !regionDraft.include_when
+                                  }
+                                  onClick={saveRegion}
+                                >
+                                  Сохранить область
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => setRegionDraft(null)}
+                                >
+                                  Отмена
+                                </button>
+                              </div>
+                            </section>
+                          )}
+                          {groupDraft && (
+                            <section
+                              className="region-editor repeating-editor"
+                              aria-label="Настройка повторяемой группы"
+                            >
+                              <h3>
+                                {groupDraft.id
+                                  ? "Изменить повторяемую группу"
+                                  : "Новая повторяемая группа"}
+                              </h3>
+                              <p>
+                                Настройте строки, которые сотрудник сможет
+                                добавлять в анкету.
+                              </p>
+                              <label>
+                                Название
+                                <input
+                                  required
+                                  value={groupDraft.name}
+                                  onChange={(e) =>
+                                    setGroupDraft({
+                                      ...groupDraft,
+                                      name: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Служебный ключ
+                                <input
+                                  required
+                                  pattern="[A-Za-z][A-Za-z0-9_.-]*"
+                                  value={groupDraft.group_key}
+                                  onChange={(e) =>
+                                    setGroupDraft({
+                                      ...groupDraft,
+                                      group_key: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Описание
+                                <input
+                                  value={groupDraft.description}
+                                  onChange={(e) =>
+                                    setGroupDraft({
+                                      ...groupDraft,
+                                      description: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <div className="repeat-limits">
+                                <label>
+                                  Минимум
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max="50"
+                                    value={groupDraft.min_items}
+                                    onChange={(e) =>
+                                      setGroupDraft({
+                                        ...groupDraft,
+                                        min_items: Number(e.target.value),
+                                      })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Максимум
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="50"
+                                    value={groupDraft.max_items}
+                                    onChange={(e) =>
+                                      setGroupDraft({
+                                        ...groupDraft,
+                                        max_items: Number(e.target.value),
+                                      })
+                                    }
+                                  />
+                                </label>
+                              </div>
+                              <label className="check">
+                                <input
+                                  type="checkbox"
+                                  checked={groupDraft.required}
+                                  onChange={(e) =>
+                                    setGroupDraft({
+                                      ...groupDraft,
+                                      required: e.target.checked,
+                                    })
+                                  }
+                                />
+                                Обязательная группа
+                              </label>
+                              <ConditionEditor
+                                title="Показывать группу, когда"
+                                value={
+                                  groupDraft.visible_when ??
+                                  groupDraft.config?.visible_when
+                                }
+                                fields={schema?.fields || []}
+                                change={(value: any) =>
+                                  setGroupDraft({
+                                    ...groupDraft,
+                                    visible_when: value,
+                                  })
+                                }
+                              />
+                              <div>
+                                <button
+                                  type="button"
+                                  className="primary"
+                                  disabled={
+                                    busy ||
+                                    !groupDraft.name ||
+                                    !groupDraft.group_key ||
+                                    groupDraft.max_items < groupDraft.min_items
+                                  }
+                                  onClick={saveRepeatingGroup}
+                                >
+                                  Сохранить группу
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => setGroupDraft(null)}
+                                >
+                                  Отмена
+                                </button>
+                              </div>
+                            </section>
+                          )}
                         </section>
                         <aside className="questionnaire-builder">
                           <h3>Вопросы анкеты</h3>
@@ -576,6 +1040,85 @@ export function TemplateAdmin({ api }: { api: Api }) {
                                   ))}
                                 </select>
                               </label>
+                              <label className="check">
+                                <input
+                                  type="checkbox"
+                                  checked={!!field.calculated}
+                                  onChange={(e) =>
+                                    setField({
+                                      ...field,
+                                      calculated: e.target.checked,
+                                      required: e.target.checked
+                                        ? false
+                                        : field.required,
+                                      field_type:
+                                        e.target.checked &&
+                                        ![
+                                          "INTEGER",
+                                          "DECIMAL",
+                                          "MONEY",
+                                        ].includes(field.field_type)
+                                          ? "DECIMAL"
+                                          : field.field_type,
+                                      expression: e.target.checked
+                                        ? field.expression ||
+                                          defaultFormula(schema?.fields || [])
+                                        : null,
+                                    })
+                                  }
+                                />
+                                Вычисляемое поле
+                              </label>
+                              {field.calculated && (
+                                <FormulaEditor
+                                  value={field.expression}
+                                  fields={(schema?.fields || []).filter(
+                                    (x: any) => x.id !== editing,
+                                  )}
+                                  groups={repeatingGroups}
+                                  change={(expression: any) =>
+                                    setField({ ...field, expression })
+                                  }
+                                />
+                              )}
+                              {field.calculated && (
+                                <div className="repeat-limits">
+                                  <label>
+                                    Знаков после запятой
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="12"
+                                      value={field.precision}
+                                      onChange={(e) =>
+                                        setField({
+                                          ...field,
+                                          precision: Number(e.target.value),
+                                        })
+                                      }
+                                    />
+                                  </label>
+                                  <label>
+                                    Округление
+                                    <select
+                                      value={field.rounding}
+                                      onChange={(e) =>
+                                        setField({
+                                          ...field,
+                                          rounding: e.target.value,
+                                        })
+                                      }
+                                    >
+                                      <option value="HALF_UP">Обычное</option>
+                                      <option value="HALF_EVEN">
+                                        Бухгалтерское
+                                      </option>
+                                      <option value="DOWN">Вниз</option>
+                                      <option value="UP">Вверх</option>
+                                    </select>
+                                  </label>
+                                </div>
+                              )}
                               <label>
                                 Подсказка
                                 <input
@@ -605,19 +1148,21 @@ export function TemplateAdmin({ api }: { api: Api }) {
                                   />
                                 </label>
                               )}
-                              <label className="check">
-                                <input
-                                  type="checkbox"
-                                  checked={field.required}
-                                  onChange={(e) =>
-                                    setField({
-                                      ...field,
-                                      required: e.target.checked,
-                                    })
-                                  }
-                                />
-                                Всегда обязательный вопрос
-                              </label>
+                              {!field.calculated && (
+                                <label className="check">
+                                  <input
+                                    type="checkbox"
+                                    checked={field.required}
+                                    onChange={(e) =>
+                                      setField({
+                                        ...field,
+                                        required: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  Всегда обязательный вопрос
+                                </label>
+                              )}
                               <ConditionEditor
                                 title="Показывать вопрос, когда"
                                 value={field.visible_when}
@@ -711,12 +1256,285 @@ export function TemplateAdmin({ api }: { api: Api }) {
                           </div>
                           <h3>Условные области</h3>
                           <div className="binding-list region-list">
-                            {regions.length === 0 && <p className="region-empty">Области ещё не настроены.</p>}
-                            {regions.map((r:any) => <article key={r.id}><span><b>{r.region_key}</b><small>{REGION_LABELS[r.region_type]}</small></span>{version.status === "DRAFT" && <span><button aria-label="Изменить условную область" onClick={() => setRegionDraft({...r})}><Pencil size={14}/></button><button aria-label="Удалить условную область" onClick={() => removeRegion(r.id)}><Trash2 size={14}/></button></span>}</article>)}
+                            {regions.length === 0 && (
+                              <p className="region-empty">
+                                Области ещё не настроены.
+                              </p>
+                            )}
+                            {regions.map((r: any) => (
+                              <article key={r.id}>
+                                <span>
+                                  <b>{r.region_key}</b>
+                                  <small>{REGION_LABELS[r.region_type]}</small>
+                                </span>
+                                {version.status === "DRAFT" && (
+                                  <span>
+                                    <button
+                                      aria-label="Изменить условную область"
+                                      onClick={() => setRegionDraft({ ...r })}
+                                    >
+                                      <Pencil size={14} />
+                                    </button>
+                                    <button
+                                      aria-label="Удалить условную область"
+                                      onClick={() => removeRegion(r.id)}
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </span>
+                                )}
+                              </article>
+                            ))}
                           </div>
                           <h3>Повторяемые строки</h3>
-                          <div className="repeat-group-list">{repeatingGroups.length===0&&<p className="region-empty">Повторяемые строки ещё не настроены.</p>}{repeatingGroups.map((g:any)=><article key={g.id}><header><span><b>{g.name}</b><small>От {Math.max(g.min_items,g.required?1:0)} до {g.max_items} записей</small></span>{version.status==="DRAFT"&&<span><button aria-label="Добавить поле строки" onClick={()=>newGroupField(g)}><Plus size={14}/></button><button aria-label="Изменить повторяемую группу" onClick={()=>setGroupDraft({...g,visible_when:g.config?.visible_when})}><Pencil size={14}/></button><button aria-label="Удалить повторяемую группу" onClick={()=>removeRepeatingGroup(g.id)}><Trash2 size={14}/></button></span>}</header>{g.fields.map((f:any)=><div className="repeat-field" key={f.id}><span><b>{f.label}</b><small>{TYPES[f.field_type]} · {f.locator?"Привязано":"Не привязано"}</small></span>{version.status==="DRAFT"&&<span><button aria-label="Изменить поле строки" onClick={()=>setGroupField({...f,group_id:g.id,...f.config})}><Pencil size={13}/></button><button aria-label="Удалить поле строки" onClick={()=>removeGroupField(g.id,f.id)}><Trash2 size={13}/></button></span>}</div>)}</article>)}</div>
-                          {groupField&&version.status==="DRAFT"&&<form className="repeat-field-form" onSubmit={saveGroupField}><h3>{groupField.id?"Изменить поле строки":"Новое поле строки"}</h3><label>Название<input required value={groupField.label} onChange={e=>setGroupField({...groupField,label:e.target.value})}/></label><label>Ключ поля<input required pattern="[A-Za-z][A-Za-z0-9_.-]*" value={groupField.field_key} onChange={e=>setGroupField({...groupField,field_key:e.target.value})}/></label><label>Тип<select value={groupField.field_type} onChange={e=>setGroupField({...groupField,field_type:e.target.value})}>{Object.entries(TYPES).map(([k,v])=><option key={k} value={k}>{v as string}</option>)}</select></label>{groupField.field_type==="SINGLE_SELECT"&&<label>Варианты через запятую<input value={(groupField.options||[]).join(", ")} onChange={e=>setGroupField({...groupField,options:e.target.value.split(",").map(x=>x.trim()).filter(Boolean)})}/></label>}<label className="check"><input type="checkbox" checked={groupField.required} onChange={e=>setGroupField({...groupField,required:e.target.checked})}/>Обязательное поле</label><div><button className="primary" disabled={busy}>Сохранить поле</button><button type="button" className="secondary" onClick={()=>setGroupField(null)}>Отмена</button></div></form>}
+                          <div className="repeat-group-list">
+                            {repeatingGroups.length === 0 && (
+                              <p className="region-empty">
+                                Повторяемые строки ещё не настроены.
+                              </p>
+                            )}
+                            {repeatingGroups.map((g: any) => (
+                              <article key={g.id}>
+                                <header>
+                                  <span>
+                                    <b>{g.name}</b>
+                                    <small>
+                                      От{" "}
+                                      {Math.max(
+                                        g.min_items,
+                                        g.required ? 1 : 0,
+                                      )}{" "}
+                                      до {g.max_items} записей
+                                    </small>
+                                  </span>
+                                  {version.status === "DRAFT" && (
+                                    <span>
+                                      <button
+                                        aria-label="Добавить поле строки"
+                                        onClick={() => newGroupField(g)}
+                                      >
+                                        <Plus size={14} />
+                                      </button>
+                                      <button
+                                        aria-label="Изменить повторяемую группу"
+                                        onClick={() =>
+                                          setGroupDraft({
+                                            ...g,
+                                            visible_when:
+                                              g.config?.visible_when,
+                                          })
+                                        }
+                                      >
+                                        <Pencil size={14} />
+                                      </button>
+                                      <button
+                                        aria-label="Удалить повторяемую группу"
+                                        onClick={() =>
+                                          removeRepeatingGroup(g.id)
+                                        }
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    </span>
+                                  )}
+                                </header>
+                                {g.fields.map((f: any) => (
+                                  <div className="repeat-field" key={f.id}>
+                                    <span>
+                                      <b>{f.label}</b>
+                                      <small>
+                                        {TYPES[f.field_type]} ·{" "}
+                                        {f.locator
+                                          ? "Привязано"
+                                          : "Не привязано"}
+                                      </small>
+                                    </span>
+                                    {version.status === "DRAFT" && (
+                                      <span>
+                                        <button
+                                          aria-label="Изменить поле строки"
+                                          onClick={() =>
+                                            setGroupField({
+                                              ...f,
+                                              group_id: g.id,
+                                              ...f.config,
+                                            })
+                                          }
+                                        >
+                                          <Pencil size={13} />
+                                        </button>
+                                        <button
+                                          aria-label="Удалить поле строки"
+                                          onClick={() =>
+                                            removeGroupField(g.id, f.id)
+                                          }
+                                        >
+                                          <Trash2 size={13} />
+                                        </button>
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </article>
+                            ))}
+                          </div>
+                          {groupField && version.status === "DRAFT" && (
+                            <form
+                              className="repeat-field-form"
+                              onSubmit={saveGroupField}
+                            >
+                              <h3>
+                                {groupField.id
+                                  ? "Изменить поле строки"
+                                  : "Новое поле строки"}
+                              </h3>
+                              <label>
+                                Название
+                                <input
+                                  required
+                                  value={groupField.label}
+                                  onChange={(e) =>
+                                    setGroupField({
+                                      ...groupField,
+                                      label: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Ключ поля
+                                <input
+                                  required
+                                  pattern="[A-Za-z][A-Za-z0-9_.-]*"
+                                  value={groupField.field_key}
+                                  onChange={(e) =>
+                                    setGroupField({
+                                      ...groupField,
+                                      field_key: e.target.value,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Тип
+                                <select
+                                  value={groupField.field_type}
+                                  onChange={(e) =>
+                                    setGroupField({
+                                      ...groupField,
+                                      field_type: e.target.value,
+                                    })
+                                  }
+                                >
+                                  {Object.entries(TYPES).map(([k, v]) => (
+                                    <option key={k} value={k}>
+                                      {v as string}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="check">
+                                <input
+                                  type="checkbox"
+                                  checked={!!groupField.calculated}
+                                  onChange={(e) =>
+                                    setGroupField({
+                                      ...groupField,
+                                      calculated: e.target.checked,
+                                      required: e.target.checked
+                                        ? false
+                                        : groupField.required,
+                                      field_type:
+                                        e.target.checked &&
+                                        ![
+                                          "INTEGER",
+                                          "DECIMAL",
+                                          "MONEY",
+                                        ].includes(groupField.field_type)
+                                          ? "DECIMAL"
+                                          : groupField.field_type,
+                                      expression: e.target.checked
+                                        ? groupField.expression ||
+                                          defaultRowFormula(
+                                            repeatingGroups.find(
+                                              (g: any) =>
+                                                g.id === groupField.group_id,
+                                            )?.fields || [],
+                                          )
+                                        : null,
+                                    })
+                                  }
+                                />
+                                Вычисляемое поле строки
+                              </label>
+                              {groupField.calculated && (
+                                <FormulaEditor
+                                  value={groupField.expression}
+                                  fields={
+                                    repeatingGroups
+                                      .find(
+                                        (g: any) =>
+                                          g.id === groupField.group_id,
+                                      )
+                                      ?.fields.filter(
+                                        (x: any) => x.id !== groupField.id,
+                                      ) || []
+                                  }
+                                  groups={[]}
+                                  row
+                                  change={(expression: any) =>
+                                    setGroupField({ ...groupField, expression })
+                                  }
+                                />
+                              )}
+                              {groupField.field_type === "SINGLE_SELECT" && (
+                                <label>
+                                  Варианты через запятую
+                                  <input
+                                    value={(groupField.options || []).join(
+                                      ", ",
+                                    )}
+                                    onChange={(e) =>
+                                      setGroupField({
+                                        ...groupField,
+                                        options: e.target.value
+                                          .split(",")
+                                          .map((x) => x.trim())
+                                          .filter(Boolean),
+                                      })
+                                    }
+                                  />
+                                </label>
+                              )}
+                              {!groupField.calculated && (
+                                <label className="check">
+                                  <input
+                                    type="checkbox"
+                                    checked={groupField.required}
+                                    onChange={(e) =>
+                                      setGroupField({
+                                        ...groupField,
+                                        required: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  Обязательное поле
+                                </label>
+                              )}
+                              <div>
+                                <button className="primary" disabled={busy}>
+                                  Сохранить поле
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => setGroupField(null)}
+                                >
+                                  Отмена
+                                </button>
+                              </div>
+                            </form>
+                          )}
                           {version.status === "DRAFT" && (
                             <button
                               className="publish"
@@ -761,9 +1579,34 @@ const OPS: any = {
   GREATER_OR_EQUAL: "больше или равно",
   LESS_OR_EQUAL: "меньше или равно",
 };
-const REGION_LABELS:any={CONDITIONAL_RUN:"Фрагмент текста",CONDITIONAL_PARAGRAPH:"Абзац",CONDITIONAL_PARAGRAPH_GROUP:"Блок соседних абзацев",CONDITIONAL_TABLE_ROW:"Строка таблицы",CONDITIONAL_TABLE:"Таблица"};
-function regionHasNode(region:any,node:string){let loc=region.locator;if(region.region_type==="CONDITIONAL_RUN"||region.region_type==="CONDITIONAL_PARAGRAPH")return loc.node===node;if(region.region_type==="CONDITIONAL_PARAGRAPH_GROUP")return loc.nodes.includes(node);let prefix=`${loc.part}#/tbl[${loc.table}]`;return node.startsWith(region.region_type==="CONDITIONAL_TABLE_ROW"?`${prefix}/tr[${loc.row}]`:prefix)}
-function repeatingHasNode(group:any,node:string){let loc=group.locator||{},prefix=`${loc.part}#/tbl[${loc.table}]/tr[${loc.row}]`;return node.startsWith(prefix)}
+const REGION_LABELS: any = {
+  CONDITIONAL_RUN: "Фрагмент текста",
+  CONDITIONAL_PARAGRAPH: "Абзац",
+  CONDITIONAL_PARAGRAPH_GROUP: "Блок соседних абзацев",
+  CONDITIONAL_TABLE_ROW: "Строка таблицы",
+  CONDITIONAL_TABLE: "Таблица",
+};
+function regionHasNode(region: any, node: string) {
+  let loc = region.locator;
+  if (
+    region.region_type === "CONDITIONAL_RUN" ||
+    region.region_type === "CONDITIONAL_PARAGRAPH"
+  )
+    return loc.node === node;
+  if (region.region_type === "CONDITIONAL_PARAGRAPH_GROUP")
+    return loc.nodes.includes(node);
+  let prefix = `${loc.part}#/tbl[${loc.table}]`;
+  return node.startsWith(
+    region.region_type === "CONDITIONAL_TABLE_ROW"
+      ? `${prefix}/tr[${loc.row}]`
+      : prefix,
+  );
+}
+function repeatingHasNode(group: any, node: string) {
+  let loc = group.locator || {},
+    prefix = `${loc.part}#/tbl[${loc.table}]/tr[${loc.row}]`;
+  return node.startsWith(prefix);
+}
 const rowFrom = (x: any) => {
   let neg = x?.operator === "NOT",
     n = neg ? x.condition : x;
@@ -998,6 +1841,223 @@ function ConditionRow({ row, fields, change, remove }: any) {
     </div>
   );
 }
+const CALC_OPS: any = {
+  ADD: "Сложение",
+  SUBTRACT: "Вычитание",
+  MULTIPLY: "Умножение",
+  DIVIDE: "Деление",
+  ROUND: "Округление",
+  IF: "Значение по условию",
+  PERCENT_OF: "Процент от суммы",
+  ADD_PERCENT: "Начислить процент",
+  EXTRACT_PERCENT: "Выделить процент из суммы",
+  REMOVE_PERCENT: "Сумма без процента",
+  SUM: "Сумма по строкам",
+  COUNT: "Количество строк",
+  MIN: "Минимум по строкам",
+  MAX: "Максимум по строкам",
+};
+const numeric = (fields: any[]) =>
+  fields.filter((x: any) =>
+    ["INTEGER", "DECIMAL", "MONEY"].includes(x.field_type),
+  );
+const source = (field: any, row = false) => ({
+  source: field?.config?.calculated
+    ? row
+      ? "ROW_CALCULATED"
+      : "CALCULATED"
+    : row
+      ? "ROW_FIELD"
+      : "FIELD",
+  field_key: field?.field_key || "",
+});
+function defaultFormula(fields: any[]) {
+  let f = numeric(fields)[0];
+  return {
+    operation: "ADD",
+    operands: [source(f), { source: "CONSTANT", value: "0" }],
+  };
+}
+function defaultRowFormula(fields: any[]) {
+  let f = numeric(fields)[0];
+  return {
+    operation: "MULTIPLY",
+    operands: [source(f, true), { source: "CONSTANT", value: "1" }],
+  };
+}
+function FormulaEditor({ value, fields, groups, row = false, change }: any) {
+  let operation = value?.operation || "ADD",
+    aggregate = ["SUM", "COUNT", "MIN", "MAX"].includes(operation),
+    available = numeric(fields);
+  function setOperation(op: string) {
+    if (["SUM", "COUNT", "MIN", "MAX"].includes(op)) {
+      let g = groups[0],
+        f = numeric(g?.fields || [])[0];
+      change({
+        operation: op,
+        group_key: g?.group_key || "",
+        ...(op === "COUNT" ? {} : { field_key: f?.field_key || "" }),
+      });
+    } else if (op === "IF")
+      change({operation:"IF",condition:null,then:source(available[0],row),else:{source:"CONSTANT",value:"0"}});
+    else
+      change({
+        operation: op,
+        operands: (op === "ROUND" ? [
+          source(available[0], row),
+        ] : [
+          source(available[0], row),
+          { source: "CONSTANT", value: "1" },
+        ]),
+        ...(op === "ROUND" ? {precision:2,rounding:"HALF_UP"} : {}),
+      });
+  }
+  return (
+    <fieldset className="condition-editor formula-editor">
+      <legend>Формула</legend>
+      <label>
+        Операция
+        <select
+          value={operation}
+          onChange={(e) => setOperation(e.target.value)}
+        >
+          {Object.entries(CALC_OPS)
+            .filter(
+              ([k]) => !row || !["SUM", "COUNT", "MIN", "MAX"].includes(k),
+            )
+            .map(([k, v]) => (
+              <option key={k} value={k}>
+                {v as string}
+              </option>
+            ))}
+        </select>
+      </label>
+      {operation === "IF" ? (
+        <>
+          <ConditionEditor title="Условие выбора" value={value.condition} fields={fields} change={(condition:any)=>change({...value,condition})}/>
+          <div className="condition-row"><FormulaOperand value={value.then} fields={available} row={row} change={(then:any)=>change({...value,then})}/><FormulaOperand value={value.else} fields={available} row={row} change={(otherwise:any)=>change({...value,else:otherwise})}/></div>
+        </>
+      ) : aggregate ? (
+        <>
+          <label>
+            Повторяемая группа
+            <select
+              value={value.group_key || ""}
+              onChange={(e) => {
+                let g = groups.find((x: any) => x.group_key === e.target.value),
+                  f = numeric(g?.fields || [])[0];
+                change({
+                  ...value,
+                  group_key: e.target.value,
+                  field_key: f?.field_key || "",
+                });
+              }}
+            >
+              {groups.map((g: any) => (
+                <option key={g.id} value={g.group_key}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {operation !== "COUNT" && (
+            <label>
+              Числовое поле
+              <select
+                value={value.field_key || ""}
+                onChange={(e) =>
+                  change({ ...value, field_key: e.target.value })
+                }
+              >
+                {numeric(
+                  groups.find((g: any) => g.group_key === value.group_key)
+                    ?.fields || [],
+                ).map((f: any) => (
+                  <option key={f.id} value={f.field_key}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </>
+      ) : (
+        <div className="condition-row">
+          {Array.from({length:operation === "ROUND" ? 1 : 2},(_,index) => (
+            <FormulaOperand
+              key={index}
+              value={value.operands?.[index]}
+              fields={available}
+              row={row}
+              change={(next: any) => {
+                let operands = [...(value.operands || [])];
+                operands[index] = next;
+                change({ ...value, operands });
+              }}
+            />
+          ))}
+          {operation === "ROUND"&&<label>Знаков после запятой<input type="number" min="0" max="12" value={value.precision??2} onChange={e=>change({...value,precision:Number(e.target.value)})}/></label>}
+        </div>
+      )}
+      <output className="formula-preview">
+        Тестовый результат: <b>{formulaPreview(value)}</b>
+      </output>
+    </fieldset>
+  );
+}
+function FormulaOperand({ value, fields, row, change }: any) {
+  let constant = value?.source === "CONSTANT";
+  return (
+    <label>
+      {constant ? "Число" : "Поле"}
+      <select
+        value={constant ? "__constant" : value?.field_key || ""}
+        onChange={(e) =>
+          change(
+            e.target.value === "__constant"
+              ? { source: "CONSTANT", value: "0" }
+              : source(
+                  fields.find((f: any) => f.field_key === e.target.value),
+                  row,
+                ),
+          )
+        }
+      >
+        {fields.map((f: any) => (
+          <option key={f.id} value={f.field_key}>
+            {f.label}
+          </option>
+        ))}
+        <option value="__constant">Числовая константа</option>
+      </select>
+      {constant && (
+        <input
+          type="number"
+          step="any"
+          value={value.value ?? "0"}
+          onChange={(e) => change({ ...value, value: e.target.value })}
+        />
+      )}
+    </label>
+  );
+}
+function formulaPreview(e: any) {
+  let read = (x: any): number =>
+      x?.source === "CONSTANT" ? Number(x.value || 0) : 100,
+    a = (e?.operands || []).map(read);
+  if (e?.operation === "ADD") return (a[0] || 0) + (a[1] || 0);
+  if (e?.operation === "SUBTRACT") return (a[0] || 0) - (a[1] || 0);
+  if (e?.operation === "MULTIPLY") return (a[0] || 0) * (a[1] || 0);
+  if (e?.operation === "DIVIDE") return a[1] ? a[0] / a[1] : "деление на ноль";
+  if (e?.operation === "PERCENT_OF") return ((a[0] || 0) * (a[1] || 0)) / 100;
+  if (e?.operation === "ADD_PERCENT")
+    return (a[0] || 0) * (1 + (a[1] || 0) / 100);
+  if (e?.operation === "EXTRACT_PERCENT")
+    return ((a[0] || 0) * (a[1] || 0)) / (100 + (a[1] || 0));
+  if (e?.operation === "REMOVE_PERCENT")
+    return ((a[0] || 0) * 100) / (100 + (a[1] || 0));
+  return "будет рассчитан по строкам";
+}
 function Empty({ upload = false }: { upload?: boolean }) {
   return (
     <section className="platform-empty">
@@ -1011,9 +2071,45 @@ function Empty({ upload = false }: { upload?: boolean }) {
     </section>
   );
 }
-function paint(text:string,items:any[],fields:any[],conditional:any[]=[]){
- const ranges=[...items.map(b=>({start:b.locator.text_start,end:b.locator.text_end,kind:"binding",title:fields.find(x=>x.id===b.field_id)?.label||"Привязка"})),...conditional.map(r=>({start:r.locator.text_start,end:r.locator.text_end,kind:"conditional",title:`Условная область: ${r.region_key}`}))];
- if(!ranges.length)return text;
- const points=[...new Set([0,text.length,...ranges.flatMap(r=>[r.start,r.end])])].sort((a,b)=>a-b);
- return points.slice(0,-1).map((start,index)=>{let end=points[index+1],active=ranges.filter(r=>r.start<=start&&r.end>=end),value=text.slice(start,end);if(!active.length)return value;return <mark key={`${start}-${end}`} className={active.some(r=>r.kind==="conditional")?"conditional-run":""} title={active.map(r=>r.title).join(" · ")}>{value}</mark>});
+function paint(
+  text: string,
+  items: any[],
+  fields: any[],
+  conditional: any[] = [],
+) {
+  const ranges = [
+    ...items.map((b) => ({
+      start: b.locator.text_start,
+      end: b.locator.text_end,
+      kind: "binding",
+      title: fields.find((x) => x.id === b.field_id)?.label || "Привязка",
+    })),
+    ...conditional.map((r) => ({
+      start: r.locator.text_start,
+      end: r.locator.text_end,
+      kind: "conditional",
+      title: `Условная область: ${r.region_key}`,
+    })),
+  ];
+  if (!ranges.length) return text;
+  const points = [
+    ...new Set([0, text.length, ...ranges.flatMap((r) => [r.start, r.end])]),
+  ].sort((a, b) => a - b);
+  return points.slice(0, -1).map((start, index) => {
+    let end = points[index + 1],
+      active = ranges.filter((r) => r.start <= start && r.end >= end),
+      value = text.slice(start, end);
+    if (!active.length) return value;
+    return (
+      <mark
+        key={`${start}-${end}`}
+        className={
+          active.some((r) => r.kind === "conditional") ? "conditional-run" : ""
+        }
+        title={active.map((r) => r.title).join(" · ")}
+      >
+        {value}
+      </mark>
+    );
+  });
 }

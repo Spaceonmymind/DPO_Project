@@ -53,11 +53,21 @@ test('condition editor is visual, localized and supports boolean groups',()=>{
 });
 
 test('employee questionnaire reacts to conditions without dropping answers',()=>{
-  assert.match(catalog,/fieldState\(f,answers\)\.visible/);
-  assert.match(catalog,/setAnswers\(\{\.\.\.answers/);
+  assert.match(catalog,/fieldState\(f,\s*answers\)\.visible/);
+  assert.match(catalog,/setAnswers\(\{\s*\.\.\.answers/);
   assert.match(conditions,/EQUALS/);
   assert.match(conditions,/GREATER_OR_EQUAL/);
   assert.match(conditions,/op==='NOT'/);
+});
+
+test('calculation editor is visual and employee totals recalculate dynamically',()=>{
+  assert.match(component,/FormulaEditor/);
+  assert.match(component,/Вычисляемое поле/);
+  assert.match(component,/Сумма по строкам/);
+  assert.match(component,/Сумма прописью/);
+  assert.doesNotMatch(component,/введите JSON/i);
+  assert.match(catalog,/calculateAnswers/);
+  assert.match(catalog,/Рассчитывается автоматически/);
 });
 
 test('conditional DOCX areas use visual structural selection and the shared condition editor',()=>{

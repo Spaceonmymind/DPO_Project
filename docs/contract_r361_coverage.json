@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "baseline": "f871f16ecd212c2c0871fe4c71b1a8e4eb4f2442",
+  "state": "BLOCKED",
+  "import": {
+    "product_code": "TRAINING_CONTRACT",
+    "product_status": "DRAFT",
+    "product_versions_created": 1,
+    "scalar_facts_configured": 37,
+    "collection_facts_blocked": 3,
+    "variants_created": 0,
+    "published": false,
+    "second_run_created_fields": 0
+  },
+  "coverage": {
+    "rf_total": 25,
+    "rf_configured": 0,
+    "rf_generated_and_verified": 0,
+    "occurrences_total": 74,
+    "occurrences_structurally_linked": 0,
+    "occurrences_generated_and_verified": 0,
+    "matrix_scenarios_total": 120,
+    "matrix_scenarios_executed": 0
+  },
+  "source_integrity": {
+    "sha256_unchanged": true,
+    "facts": 40,
+    "decision_rules": 19,
+    "tables_per_docx": 18
+  },
+  "status_vocabulary": ["CONFIGURED", "GENERATED_AND_VERIFIED", "BLOCKED", "NOT_APPLICABLE"],
+  "publication_allowed": false
+}

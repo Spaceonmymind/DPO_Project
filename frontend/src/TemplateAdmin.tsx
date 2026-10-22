@@ -14,6 +14,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { evaluateExpression } from "./calculations";
+import { ProductAdmin } from "./ProductAdmin";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
   TEXT: "Короткий текст",
@@ -56,6 +57,10 @@ const blank = (position = 1) => ({
   required_when: null,
 });
 export function TemplateAdmin({ api }: { api: Api }) {
+  const [section, setSection] = useState<"templates" | "products">("templates");
+  return <><nav className="platform-section-tabs" aria-label="Раздел конструктора"><button className={section === "templates" ? "active" : ""} onClick={() => setSection("templates")}>Шаблоны DOCX</button><button className={section === "products" ? "active" : ""} onClick={() => setSection("products")}>Договорные продукты</button></nav>{section === "products" ? <ProductAdmin api={api} ConditionEditor={ConditionEditor} /> : <TemplateBuilder api={api} />}</>;
+}
+function TemplateBuilder({ api }: { api: Api }) {
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
     [versions, setVersions] = useState<any[]>([]),
@@ -1675,7 +1680,7 @@ const rowsFrom = (value: any) =>
         ? value.conditions
         : [value]
       ).map(rowFrom);
-function ConditionEditor({ title, value, fields, change }: any) {
+export function ConditionEditor({ title, value, fields, change }: any) {
   const rows = rowsFrom(value),
     join = value?.operator === "OR" ? "OR" : "AND";
   function emit(next: any[], group = join) {

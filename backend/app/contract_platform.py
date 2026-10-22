@@ -14,7 +14,7 @@ from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
-from app.db import ConditionalDocumentRegion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
 WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT'}
@@ -512,6 +512,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  @r.get('/api/v1/contract-catalog')
  def catalog(q:str='',u=Depends(current_dependency),s:DBS=Depends(db)):
   query=s.query(DocumentTemplate).filter_by(status='ACTIVE').filter(DocumentTemplate.current_version_id.is_not(None))
+  product_versions=s.query(ContractProductVersion.id).filter_by(status='PUBLISHED')
+  product_template_versions=s.query(ContractProductVariant.template_version_id).filter(ContractProductVariant.product_version_id.in_(product_versions))
+  query=query.filter(~DocumentTemplate.current_version_id.in_(product_template_versions))
   if q: query=query.filter(DocumentTemplate.name.ilike(f'%{q}%'))
   return [template_out(x,s) for x in query.order_by(DocumentTemplate.name).all()]
  @r.post('/api/v1/contract-drafts',status_code=201)

@@ -72,6 +72,8 @@
 
 ## R3.5 — template variant selection/applicability
 
+**Статус:** универсальный product/version/variant runtime, визуальная конфигурация, resolver, mapping, product drafts и единая анкета реализованы. Полный импорт всех строк корпоративной матрицы и юридическая приёмка остаются R3.6.
+
 **Backend:** `ContractProduct`, `ContractProductVersion`, `ProductVariant`, `ApplicabilityRuleSet/Rule`, `ApplicabilityDecision`; ordered rules with stable reason codes; outcomes `NEEDS_INPUT/BLOCKED/SELECTED`; pinning chosen version; ambiguity and no-match fail closed.
 
 **Frontend:** один catalog card «Договор на проведение тренировок»; сначала общие вопросы, затем вариантные; понятное blocking/clarifying state и decision reason; вариант не выбирается пользователем в обход правил.

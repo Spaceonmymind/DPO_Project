@@ -1011,3 +1011,92 @@ def test_r34_calculated_rows_total_words_and_untrusted_values():
     made=employee.post(f'/api/v1/contract-drafts/{did}/generate',headers=employee_headers); assert made.status_code==201,made.text; rendered=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content))
     assert [rendered.tables[0].rows[i].cells[2].text for i in (1,2)]==['10 000,00','18 000,00']; assert rendered.tables[0].rows[-1].cells[2].text=='28 000,00 руб.'; assert 'Двадцать восемь тысяч рублей 00 копеек' in rendered.paragraphs[0].text
     assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==hashlib.sha256(original).hexdigest()
+
+
+def test_r35_product_resolver_and_unified_document_flow():
+    manager=TestClient(app); headers=auth(manager)
+    def published(code,marker):
+        raw=contract_docx_bytes(); template=create_platform_template(manager,headers,code)
+        version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':(marker+'.docx',raw,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+        field=configure_platform_field(manager,headers,template,version)
+        response=manager.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/publish",headers=headers)
+        assert response.status_code==200,response.text
+        return template,version,field,raw
+    person,pv,pfield,praw=published('R35_PERSON','person'); entrepreneur,iv,ifield,iraw=published('R35_IP','ip')
+    created=manager.post('/api/v1/contract-products',headers=headers,json={'code':'TRAINING_PRODUCT','name':'Договор на проведение тренировок','description':'Единый договорный продукт'}); assert created.status_code==201,created.text
+    product=created.json(); version=product['version']; base=f"/api/v1/contract-products/{product['id']}/versions/{version['id']}"
+    fields=[]
+    for pos,payload in enumerate([
+        {'field_key':'contractor_status','label':'Статус исполнителя','field_type':'SINGLE_SELECT','required':True,'options':['Физическое лицо','Индивидуальный предприниматель']},
+        {'field_key':'contractor_name','label':'ФИО исполнителя','field_type':'TEXT','required':True},
+        {'field_key':'labor_signs','label':'Есть признаки трудовых отношений','field_type':'BOOLEAN','required':True},
+        {'field_key':'foreign_citizen','label':'Иностранное гражданство','field_type':'BOOLEAN','required':True},
+    ],1):
+        response=manager.post(base+'/fields',headers=headers,json={**payload,'position':pos}); assert response.status_code==201,response.text; fields.append(response.json())
+    status,name,labor,foreign=fields
+    variants=[]
+    for pos,(code,title,tv,value,target) in enumerate([('PERSON','Физическое лицо',pv,'Физическое лицо',pfield),('IP','Индивидуальный предприниматель',iv,'Индивидуальный предприниматель',ifield)],1):
+        response=manager.post(base+'/variants',headers=headers,json={'code':code,'name':title,'template_version_id':tv['id'],'position':pos,'condition':{'operator':'EQUALS','field_key':'contractor_status','value':value}}); assert response.status_code==201,response.text; variant=response.json();variants.append(variant)
+        mapped=manager.put(base+f"/variants/{variant['id']}/mappings/{name['id']}",headers=headers,json={'target_field_id':target['id']}); assert mapped.status_code==200,mapped.text
+    rules={'blocking_rules':[{'code':'LABOR_RELATIONSHIP','message':'Обнаружены признаки трудовых отношений','condition':{'operator':'EQUALS','field_key':'labor_signs','value':True}}],'manual_review_rules':[{'code':'FOREIGN_CITIZEN','message':'Требуется проверка документов иностранного гражданина','condition':{'operator':'EQUALS','field_key':'foreign_citizen','value':True}}],'test_scenarios':[
+        {'name':'ФЛ','answers':{'contractor_status':'Физическое лицо','labor_signs':False,'foreign_citizen':False},'expected_state':'SELECTED'},
+        {'name':'ИП','answers':{'contractor_status':'Индивидуальный предприниматель','labor_signs':False,'foreign_citizen':False},'expected_state':'SELECTED'},
+        {'name':'Трудовые отношения','answers':{'contractor_status':'Физическое лицо','labor_signs':True,'foreign_citizen':False},'expected_state':'NOT_APPLICABLE'},
+        {'name':'Иностранец','answers':{'contractor_status':'Физическое лицо','labor_signs':False,'foreign_citizen':True},'expected_state':'MANUAL_REVIEW_REQUIRED'},
+    ]}
+    assert manager.patch(base+'/rules',headers=headers,json=rules).status_code==200
+    def resolve(answers): return manager.post(base+'/resolve',headers=headers,json={'answers':answers}).json()
+    assert resolve({})['state']=='NEED_MORE_INFORMATION'
+    assert resolve({'contractor_status':'Физическое лицо','labor_signs':True,'foreign_citizen':False})['state']=='NOT_APPLICABLE'
+    assert resolve({'contractor_status':'Физическое лицо','labor_signs':False,'foreign_citizen':True})['state']=='MANUAL_REVIEW_REQUIRED'
+    assert resolve({'contractor_status':'Физическое лицо','labor_signs':False,'foreign_citizen':False})['variant_id']==variants[0]['id']
+    assert resolve({'contractor_status':'Индивидуальный предприниматель','labor_signs':False,'foreign_citizen':False})['variant_id']==variants[1]['id']
+    published_product=manager.post(base+'/publish',headers=headers); assert published_product.status_code==200,published_product.text
+    assert manager.patch(base+'/rules',headers=headers,json=rules).status_code==409
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); catalog=employee.get('/api/v1/contract-product-catalog',headers=employee_headers).json(); assert [x['name'] for x in catalog].count('Договор на проведение тренировок')==1
+    legacy_catalog=employee.get('/api/v1/contract-catalog',headers=employee_headers).json(); assert person['id'] not in {x['id'] for x in legacy_catalog} and entrepreneur['id'] not in {x['id'] for x in legacy_catalog}
+    draft=employee.post('/api/v1/contract-product-drafts',headers=employee_headers,json={'product_id':product['id']}).json(); did=draft['id']; assert draft['decision']['state']=='NEED_MORE_INFORMATION'
+    common={'contractor_status':'Физическое лицо','contractor_name':'Иван Иванов','labor_signs':False,'foreign_citizen':False}
+    saved=employee.patch(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers,json={'common_answers':common,'selected_variant_id':variants[1]['id'],'variant_answers':{}}); assert saved.status_code==200,saved.text; assert saved.json()['selected_variant']['id']==variants[0]['id']
+    generated=employee.post(f'/api/v1/contract-product-drafts/{did}/generate',headers=employee_headers,json={}); assert generated.status_code==201,generated.text; assert generated.json()['variant_name']=='Физическое лицо'; rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content)); assert 'Иван Иванов' in rendered.paragraphs[0].text
+    common['contractor_status']='Индивидуальный предприниматель'; switched=employee.patch(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers,json={'common_answers':common,'variant_answers':{}}); assert switched.status_code==200 and switched.json()['selected_variant']['id']==variants[1]['id']; assert switched.json()['common_answers']['contractor_name']=='Иван Иванов'
+    generated_ip=employee.post(f'/api/v1/contract-product-drafts/{did}/generate',headers=employee_headers,json={}); assert generated_ip.status_code==201,generated_ip.text; assert generated_ip.json()['variant_name']=='Индивидуальный предприниматель' and generated_ip.json()['generation_number']==2
+    restored=employee.get(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers); assert restored.status_code==200 and restored.json()['selected_variant']['id']==variants[1]['id']
+    assert len(restored.json()['generated_documents'])==2
+    next_version=manager.post(f"/api/v1/contract-products/{product['id']}/versions",headers=headers); assert next_version.status_code==201 and next_version.json()['version_number']==2
+    assert employee.get(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers).json()['product_version']==1
+    outsider=TestClient(app); outsider_headers=auth(outsider); assert outsider.get(f'/api/v1/contract-product-drafts/{did}',headers=outsider_headers).status_code==404
+    assert employee.post(f"/api/v1/contract-products/{product['id']}/versions/{next_version.json()['id']}/publish",headers=employee_headers).status_code==403
+    assert hashlib.sha256(manager.get(f"/api/v1/document-templates/{person['id']}/versions/{pv['id']}/source",headers=headers).content).hexdigest()==hashlib.sha256(praw).hexdigest()
+    assert hashlib.sha256(manager.get(f"/api/v1/document-templates/{entrepreneur['id']}/versions/{iv['id']}/source",headers=headers).content).hexdigest()==hashlib.sha256(iraw).hexdigest()
+
+
+def test_r35_resolver_reports_ambiguity_and_configuration_error():
+    from types import SimpleNamespace
+    from app.contract_products import ContractVariantResolver
+    field=SimpleNamespace(field_key='kind',field_type='SINGLE_SELECT',required=True,config={'options':['A','B']})
+    version=SimpleNamespace(rules={})
+    variants=[SimpleNamespace(id='1',name='Первый',template_version_id='t1',status='ACTIVE',selection_condition={'operator':'IN','field_key':'kind','value':['A','B']}),SimpleNamespace(id='2',name='Второй',template_version_id='t2',status='ACTIVE',selection_condition={'operator':'EQUALS','field_key':'kind','value':'A'})]
+    assert ContractVariantResolver.resolve(version,[field],variants,{'kind':'A'})['state']=='AMBIGUOUS'
+    variants[0].selection_condition={'operator':'UNKNOWN','field_key':'kind','value':'A'}
+    assert ContractVariantResolver.resolve(version,[field],variants,{'kind':'A'})['state']=='CONFIGURATION_ERROR'
+
+
+def test_r35_training_matrix_blocking_facts_are_deterministic():
+    from types import SimpleNamespace
+    from app.contract_products import ContractVariantResolver
+    def f(key,kind='BOOLEAN',options=None): return SimpleNamespace(field_key=key,field_type=kind,required=True,config={'options':options or []})
+    fields=[f('status','SINGLE_SELECT',['PHYSICAL_NO_IP_NO_NPD','IP_NO_NPD','NPD_PHYSICAL','IP_NPD']),f('citizenship','SINGLE_SELECT',['RU','NON_RU']),f('adult'),f('personal'),f('third_parties'),f('labor_signs')]
+    eq=lambda key,value:{'operator':'EQUALS','field_key':key,'value':value}
+    version=SimpleNamespace(rules={'blocking_rules':[
+        {'code':'D005','message':'НПД не поддерживается','condition':{'operator':'IN','field_key':'status','value':['NPD_PHYSICAL','IP_NPD']}},
+        {'code':'D006','message':'Иностранный исполнитель','condition':eq('citizenship','NON_RU')},
+        {'code':'D007','message':'Несовершеннолетний исполнитель','condition':eq('adult',False)},
+        {'code':'D008','message':'Нет личного оказания','condition':{'operator':'OR','conditions':[eq('personal',False),eq('third_parties',True)]}},
+        {'code':'D009','message':'Признаки трудовой модели','condition':eq('labor_signs',True)},
+    ]})
+    variants=[SimpleNamespace(id='person',name='Физлицо',template_version_id='p',status='ACTIVE',selection_condition=eq('status','PHYSICAL_NO_IP_NO_NPD')),SimpleNamespace(id='ip',name='ИП',template_version_id='i',status='ACTIVE',selection_condition=eq('status','IP_NO_NPD'))]
+    base={'status':'PHYSICAL_NO_IP_NO_NPD','citizenship':'RU','adult':True,'personal':True,'third_parties':False,'labor_signs':False}
+    assert ContractVariantResolver.resolve(version,fields,variants,base)['variant_id']=='person'
+    for patch,code in [({'status':'IP_NPD'},'D005'),({'citizenship':'NON_RU'},'D006'),({'adult':False},'D007'),({'third_parties':True},'D008'),({'labor_signs':True},'D009')]:
+        result=ContractVariantResolver.resolve(version,fields,variants,{**base,**patch}); assert result['state']=='NOT_APPLICABLE' and result['reason_code']==code

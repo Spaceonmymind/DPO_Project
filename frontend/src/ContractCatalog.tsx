@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { evaluateCondition, fieldState } from "./conditions";
 import { calculateAnswers } from "./calculations";
+import { ProductQuestionnaire } from "./ProductQuestionnaire";
 type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
@@ -20,6 +21,9 @@ const itemId = () =>
 
 export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (path: string) => void; manager?: boolean }) {
   const [catalog, setCatalog] = useState<any[]>([]),
+    [products, setProducts] = useState<any[]>([]),
+    [productDrafts, setProductDrafts] = useState<any[]>([]),
+    [productDraft, setProductDraft] = useState<any>(),
     [drafts, setDrafts] = useState<any[]>([]),
     [draft, setDraft] = useState<any>(),
     [answers, setAnswers] = useState<any>({}),
@@ -34,12 +38,16 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   const autosaveReady = useRef(false);
   const savedSnapshot = useRef("{}");
   async function load() {
-    let [c, d] = await Promise.all([
+    let [c, d, p, pd] = await Promise.all([
       api("/contract-catalog"),
       api("/contract-drafts"),
+      api("/contract-product-catalog"),
+      api("/contract-product-drafts"),
     ]);
     setCatalog(c);
     setDrafts(d);
+    setProducts(p);
+    setProductDrafts(pd);
   }
   useEffect(() => {
     load()
@@ -104,6 +112,17 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         }),
       ),
     );
+  }
+  async function beginProduct(product_id: string) {
+    await run(async () =>
+      setProductDraft(await api("/contract-product-drafts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product_id }),
+      })),
+    );
+  }
+  async function restoreProduct(id: string) {
+    await run(async () => setProductDraft(await api("/contract-product-drafts/" + id)));
   }
   async function restore(id: string) {
     await run(async () => open(await api("/contract-drafts/" + id)));
@@ -226,12 +245,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   }
   const filtered = useMemo(
     () =>
-      catalog.filter((x) =>
+      [...products.map((x) => ({ ...x, product: true })), ...catalog].filter((x) =>
         (x.name + " " + x.category + " " + x.description)
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
-    [catalog, query],
+    [catalog, products, query],
   );
   const calculated: any = draft
     ? calculateAnswers(draft.schema, answers)
@@ -244,6 +263,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     return value !== undefined && value !== null && value !== "";
   }).length;
   const progress = activeFields.length ? Math.round((completedFields / activeFields.length) * 100) : 100;
+  if (productDraft)
+    return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
   if (draft)
     return (
       <div className="page contract-questionnaire">
@@ -385,7 +406,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <p>
               {x.description || "Утверждённый корпоративный шаблон договора."}
             </p>
-            <button className="primary" onClick={() => begin(x.id)}>
+            <button className="primary" onClick={() => x.product ? beginProduct(x.id) : begin(x.id)}>
               Заполнить договор
             </button>
           </article>
@@ -415,6 +436,17 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                       : "Черновик сохранён"}
                 </small>
               </span>
+              <span>Продолжить</span>
+            </button>
+          ))}
+        </section>
+      )}
+      {productDrafts.length > 0 && (
+        <section className="saved-drafts">
+          <h2>Черновики договорных продуктов</h2>
+          {productDrafts.map((x: any) => (
+            <button key={x.id} onClick={() => restoreProduct(x.id)}>
+              <span><b>{x.product_name}</b><small>Единая анкета · {x.decision?.state === "SELECTED" ? "вариант определён" : "продолжите заполнение"}</small></span>
               <span>Продолжить</span>
             </button>
           ))}

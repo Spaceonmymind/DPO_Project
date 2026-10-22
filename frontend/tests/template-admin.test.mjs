@@ -7,6 +7,8 @@ const catalog=readFileSync(new URL('../src/ContractCatalog.tsx',import.meta.url)
 const conditions=readFileSync(new URL('../src/conditions.ts',import.meta.url),'utf8');
 const calculations=readFileSync(new URL('../src/calculations.ts',import.meta.url),'utf8');
 const app=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');
+const productAdmin=readFileSync(new URL('../src/ProductAdmin.tsx',import.meta.url),'utf8');
+const productFlow=readFileSync(new URL('../src/ProductQuestionnaire.tsx',import.meta.url),'utf8');
 
 test('template manager exposes catalog creation and version upload',()=>{
   assert.match(component,/Новый шаблон/);
@@ -104,4 +106,22 @@ test('employee repeating group supports stable records, ordering and autosave',(
   assert.match(catalog,/\/autosave/);
   assert.match(catalog,/evaluateCondition/);
   assert.match(catalog,/schedule|repeating_groups/);
+});
+
+test('contract products expose visual rules, mappings and scenario preview',()=>{
+  assert.match(productAdmin,/Договорные продукты/);
+  assert.match(productAdmin,/Когда выбирать этот вариант/);
+  assert.match(productAdmin,/Сопоставление общих данных/);
+  assert.match(productAdmin,/Проверить сценарий/);
+  assert.match(productAdmin,/manual_review_rules/);
+  assert.doesNotMatch(productAdmin,/eval\s*\(/);
+  assert.doesNotMatch(productAdmin,/Тестовые ответы JSON|введите JSON/i);
+});
+
+test('employee uses one product questionnaire without choosing a technical DOCX',()=>{
+  assert.match(catalog,/contract-product-catalog/);
+  assert.match(productFlow,/Система сама выберет утверждённый вариант DOCX/);
+  assert.match(productFlow,/contract-product-drafts/);
+  assert.match(productFlow,/MANUAL_REVIEW_REQUIRED/);
+  assert.doesNotMatch(productFlow,/template_version_id.*select/);
 });

@@ -1,6 +1,6 @@
 """Deterministic, non-AI contract-template platform."""
 from __future__ import annotations
-import hashlib,re,zipfile
+import copy,hashlib,re,zipfile
 from abc import ABC,abstractmethod
 from datetime import date
 from decimal import Decimal,InvalidOperation
@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
 from app.conditions import ConditionConfigurationError,ConditionEngine
-from app.db import ConditionalDocumentRegion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
 WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT'}
@@ -96,17 +96,23 @@ class DocxXmlAdapter(DocumentEditorAdapter):
         meta={'table':tno,'row':rno,'cell':cno,'grid_span':int(grid.get(f'{{{WORD_NS}}}val','1')) if grid is not None else 1,'vertical_merge':merge.get(f'{{{WORD_NS}}}val','continue') if merge is not None else None}
         for cpno,p in enumerate(cell.findall('./w:p',NS),1):
          runs=self._runs(p); text=''.join(runs)
-         if text.strip(): nodes.append(self._node(part,f'{part}#/tbl[{tno}]/tr[{rno}]/tc[{cno}]/p[{cpno}]','table_cell',text,runs,meta))
-  fp=hashlib.sha256('\n'.join(x['locator']+'\0'+x['text'] for x in nodes).encode()).hexdigest()
+         # Empty table cells are selectable repeat-field targets. They are excluded
+         # from the legacy fingerprint so existing uploaded versions remain valid.
+         nodes.append(self._node(part,f'{part}#/tbl[{tno}]/tr[{rno}]/tc[{cno}]/p[{cpno}]','table_cell',text,runs,meta))
+  fp=hashlib.sha256('\n'.join(x['locator']+'\0'+x['text'] for x in nodes if x['text'].strip()).encode()).hexdigest()
   return {'adapter':'DOCX_XML_READ_ONLY','locator_version':1,'structure_fingerprint':fp,'nodes':nodes,'limitations':['Разметка страницы отображается приблизительно.','Выделение поддерживается только внутри одного абзаца или ячейки.']}
  def select_range(self,path,locator,start,end,text):
   preview=self.preview(path); node=next((x for x in preview['nodes'] if x['locator']==locator),None)
   if not node: raise ValueError('Структурный фрагмент не найден в исходном DOCX.')
-  if start<0 or end<=start or end>len(node['text']) or node['text'][start:end]!=text: raise ValueError('Выделение не соответствует исходному DOCX.')
+  empty_cell=node['kind']=='table_cell' and node['text']=='' and start==end==0 and text==''
+  if not empty_cell and (start<0 or end<=start or end>len(node['text']) or node['text'][start:end]!=text): raise ValueError('Выделение не соответствует исходному DOCX.')
   return {'preview':preview,'node':node,'start':start,'end':end}
  def get_structural_locator(self,path,sel):
   preview,node,start,end=sel['preview'],sel['node'],sel['start'],sel['end']; touched=[x for x in node['runs'] if x['end']>start and x['start']<end]
-  return {'adapter':preview['adapter'],'locator_version':1,'structure_fingerprint':preview['structure_fingerprint'],'part':node['part'],'node':node['locator'],'text_start':start,'text_end':end,'start_run':touched[0]['run'],'start_run_offset':start-touched[0]['start'],'end_run':touched[-1]['run'],'end_run_offset':end-touched[-1]['start']}
+  locator={'adapter':preview['adapter'],'locator_version':1,'structure_fingerprint':preview['structure_fingerprint'],'part':node['part'],'node':node['locator'],'text_start':start,'text_end':end}
+  if touched: locator.update({'start_run':touched[0]['run'],'start_run_offset':start-touched[0]['start'],'end_run':touched[-1]['run'],'end_run_offset':end-touched[-1]['start']})
+  else: locator['empty_cell']=True
+  return locator
 adapter=DocxXmlAdapter()
 
 def template_out(x,s): return {'id':x.id,'code':x.code,'name':x.name,'category':x.category,'description':x.description,'status':x.status,'owner_id':x.owner_id,'current_version_id':x.current_version_id,'version_count':s.query(TemplateVersion).filter_by(template_id=x.id).count()}
@@ -114,6 +120,8 @@ def version_out(x): return {'id':x.id,'template_id':x.template_id,'version_numbe
 def field_out(x): return {'id':x.id,'schema_id':x.schema_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config}
 def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.binding_key,'occurrence_index':x.occurrence_index,'selected_text':x.selected_text,'locator':x.locator,'status':x.status}
 def region_out(x): return {'id':x.id,'region_key':x.region_key,'region_type':x.region_type,'locator':x.locator,'include_when':x.include_when,'original_text':x.original_text,'status':x.status}
+def repeating_field_out(x): return {'id':x.id,'group_id':x.group_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator}
+def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x.name,'description':x.description,'min_items':x.min_items,'max_items':x.max_items,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator,'status':x.status,'fields':[repeating_field_out(f) for f in s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all()]}
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
@@ -123,6 +131,13 @@ class RegionPayload(BaseModel):
  region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); region_type:str; start_locator:str; end_locator:str|None=None; start:int|None=Field(default=None,ge=0); end:int|None=Field(default=None,gt=0); selected_text:str|None=Field(default=None,max_length=10000); include_when:dict[str,Any]
 class RegionUpdatePayload(BaseModel):
  region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]
+class RepeatingGroupPayload(BaseModel):
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; visible_when:dict[str,Any]|None=None
+class RepeatingGroupUpdatePayload(BaseModel):
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None
+class RepeatingFieldPayload(BaseModel):
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100)
+class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
 class AnswersPayload(BaseModel): answers:dict[str,Any]
 
 def validate_field_payload(p):
@@ -135,6 +150,16 @@ def validate_field_payload(p):
   except re.error: raise HTTPException(422,detail='Некорректное регулярное выражение')
  if p.field_type=='SINGLE_SELECT' and (not p.options or any(not str(x).strip() for x in p.options)): raise HTTPException(422,detail='Добавьте варианты выбора')
 def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'visible_when':p.visible_when,'required_when':p.required_when}
+def repeating_field_config(p): return {'description':p.description,'placeholder':p.placeholder,'validation':p.validation,'options':p.options}
+def validate_repeating_field_payload(p):
+ if p.field_type not in FIELD_TYPES: raise HTTPException(422,detail='Неподдерживаемый тип поля строки')
+ if set(p.validation)-{'min_length','max_length','min','max','regex'}: raise HTTPException(422,detail='Параметры проверки содержат неподдерживаемые правила')
+ if p.field_type=='SINGLE_SELECT' and (not p.options or any(not str(x).strip() for x in p.options)): raise HTTPException(422,detail='Добавьте варианты выбора')
+ if 'regex' in p.validation:
+  pattern=str(p.validation['regex'])
+  if len(pattern)>200 or '(?' in pattern or re.search(r'\\[1-9]',pattern): raise HTTPException(422,detail='Регулярное выражение слишком сложное')
+  try: re.compile(pattern)
+  except re.error: raise HTTPException(422,detail='Некорректное регулярное выражение')
 def validate_condition_schema(fields):
  try: ConditionEngine.validate_schema(fields)
  except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Некорректные условия анкеты: {exc}')
@@ -166,7 +191,7 @@ def schema_for(version_id,s,create=False,u=None):
  x=s.query(QuestionnaireSchema).filter_by(template_version_id=version_id).order_by(QuestionnaireSchema.schema_version.desc()).first()
  if not x and create: x=QuestionnaireSchema(template_version_id=version_id,created_by_id=u.id); s.add(x); s.flush()
  return x
-def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()]}
+def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()],'repeating_groups':[repeating_group_out(g,s) for g in s.query(RepeatingGroup).filter_by(template_version_id=x.template_version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()]}
 def validate_active_answers(fields,answers):
  errors={}
  for field in fields:
@@ -180,6 +205,31 @@ def condition_answers(fields,answers):
  """Hidden answers stay persisted, but are absent for legal-block decisions."""
  visible={x.field_key for x in ConditionEngine.active_fields(fields,answers)}
  return {key:value for key,value in answers.items() if key in visible}
+def group_is_active(group,questionnaire_fields,answers):
+ condition=(group.config or {}).get('visible_when')
+ return ConditionEngine.evaluate(condition,condition_answers(questionnaire_fields,answers))
+def validate_repeating_answers(groups,s,questionnaire_fields,answers,complete=True):
+ errors={}
+ for group in groups:
+  items=answers.get(group.group_key,[]); active=group_is_active(group,questionnaire_fields,answers)
+  if not isinstance(items,list): errors[group.group_key]=f'«{group.name}»: данные должны быть списком записей'; continue
+  if len(items)>group.max_items: errors[group.group_key]=f'«{group.name}»: можно добавить не больше {group.max_items} записей'; continue
+  minimum=max(group.min_items,1 if group.required else 0)
+  if complete and active and len(items)<minimum: errors[group.group_key]=f'«{group.name}»: добавьте минимум {minimum} записей'; continue
+  fields=s.query(RepeatingGroupField).filter_by(group_id=group.id).order_by(RepeatingGroupField.position).all(); known={x.field_key:x for x in fields}; ids=set()
+  for index,item in enumerate(items,1):
+   if not isinstance(item,dict): errors[group.group_key]=f'«{group.name}», запись № {index}: повреждённый формат'; break
+   item_id=item.get('_id')
+   if not isinstance(item_id,str) or not item_id or len(item_id)>100 or item_id in ids: errors[group.group_key]=f'«{group.name}», запись № {index}: не удалось определить запись'; break
+   ids.add(item_id)
+   if set(item)-set(known)-{'_id'}: errors[group.group_key]=f'«{group.name}», запись № {index}: найдены неизвестные поля'; break
+   if not active: continue
+   for field in fields:
+    value=item.get(field.field_key)
+    if complete and field.required and value in (None,''): errors[group.group_key]=f'«{group.name}», запись № {index}: заполните поле «{field.label}»'; break
+    if value not in (None,'') and (message:=validate_answer(field,value)): errors[group.group_key]=f'«{group.name}», запись № {index}, поле «{field.label}»: {message.lower()}'; break
+   if group.group_key in errors: break
+ return errors
 def validate_bindings(v,s):
  preview=adapter.preview(safe_source(v))
  if preview['structure_fingerprint']!=v.structure_fingerprint: raise HTTPException(409,detail='DOCX изменился после создания версии')
@@ -289,6 +339,59 @@ def _regions_overlap(a,b):
     if a.region_type==b.region_type=='CONDITIONAL_RUN': return la['text_start']<lb['text_end'] and la['text_end']>lb['text_start']
     return True
  return False
+def _resolve_repeating_row(path,row_locator,structure_fingerprint):
+ preview=adapter.preview(path); node=next((x for x in preview['nodes'] if x['locator']==row_locator),None)
+ parsed=_table_parts(row_locator)
+ if not node or not parsed: raise ValueError('Выберите ячейку строки таблицы')
+ part,table_no,row_no,_,_=parsed; root=_part_root(path,part); body=_body(root)
+ try: row=body.findall('./w:tbl',NS)[table_no-1].findall('./w:tr',NS)[row_no-1]
+ except IndexError: raise ValueError('Строка-образец не найдена')
+ if row.find('.//w:vMerge',NS) is not None: raise ValueError('Строки с вертикально объединёнными ячейками пока нельзя повторять')
+ bad=_unsafe(row)
+ if bad: raise ValueError(f'Строка содержит неподдерживаемую структуру Word ({bad})')
+ cells=row.findall('./w:tc',NS)
+ if not cells: raise ValueError('Строка-образец не содержит ячеек')
+ return {'locator_version':3,'structure_fingerprint':structure_fingerprint,'part':part,'table':table_no,'row':row_no,'row_node':f'{part}#/tbl[{table_no}]/tr[{row_no}]','row_hash':_element_hash(row),'cell_count':len(cells),'has_grid_span':row.find('.//w:gridSpan',NS) is not None,'prototype_text':' | '.join(_paragraph_text(x) for x in cells)}
+def _group_row(root,loc): return _body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1]
+def _field_in_group_row(locator,group):
+ parsed=_table_parts(locator)
+ return bool(parsed and parsed[0]==group.locator['part'] and parsed[1]==group.locator['table'] and parsed[2]==group.locator['row'])
+def validate_repeating_groups(v,s,bindings=None,regions=None):
+ schema=schema_for(v.id,s); questionnaire=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+ groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').order_by(RepeatingGroup.position).all(); occupied=set()
+ for group in groups:
+  if group.min_items<0 or group.max_items<max(group.min_items,1) or group.max_items>50: raise HTTPException(422,detail=f'Группа «{group.name}»: проверьте минимальное и максимальное количество')
+  condition=(group.config or {}).get('visible_when')
+  if condition is not None:
+   try: ConditionEngine.validate_condition(condition,questionnaire)
+   except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Группа «{group.name}»: {exc}')
+  loc=group.locator or {}
+  if loc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» устарела')
+  try: root=_part_root(safe_source(v),loc['part']); row=_group_row(root,loc)
+  except (KeyError,IndexError): raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» не найдена')
+  if _element_hash(row)!=loc.get('row_hash'): raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» устарела')
+  key=(loc['part'],loc['table'],loc['row'])
+  if key in occupied: raise HTTPException(422,detail='Несколько повторяемых групп используют одну строку-образец')
+  occupied.add(key)
+  fields=s.query(RepeatingGroupField).filter_by(group_id=group.id).order_by(RepeatingGroupField.position).all()
+  if not fields: raise HTTPException(422,detail=f'Добавьте поля в группу «{group.name}»')
+  for field in fields:
+   if not field.locator: raise HTTPException(422,detail=f'Свяжите поле «{field.label}» с текстом в строке-образце')
+   floc=field.locator
+   if not _field_in_group_row(floc.get('node',''),group) or floc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
+   try: p=paragraph_for(root,floc['node']); text=_paragraph_text(p)
+   except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Привязка поля «{field.label}» не найдена')
+   if text[floc['text_start']:floc['text_end']]!=floc.get('selected_text'): raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
+  ranges={}
+  for field in fields:
+   locf=field.locator; ranges.setdefault(locf['node'],[]).append((locf['text_start'],locf['text_end']))
+  if any(any(a<d and b>c for i,(a,b) in enumerate(items) for c,d in items[i+1:]) for items in ranges.values()): raise HTTPException(422,detail=f'Привязки полей группы «{group.name}» пересекаются')
+  for binding in bindings or []:
+   if _field_in_group_row(binding.locator.get('node',''),group): raise HTTPException(422,detail=f'Обычная привязка пересекает строку-образец группы «{group.name}»')
+  for region in regions or []:
+   fake=type('RowRegion',(),{'region_type':'CONDITIONAL_TABLE_ROW','locator':loc})()
+   if _regions_overlap(fake,region): raise HTTPException(422,detail=f'Условная область пересекает строку-образец группы «{group.name}»')
+ return groups
 def paragraph_for(root,locator):
  path=locator.split('#/',1)[1]; body=root.find('w:body',NS) if root.tag.endswith('document') else root
  m=re.fullmatch(r'p\[(\d+)\]',path)
@@ -300,6 +403,13 @@ def replace_range(p,start,end,value):
  if p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None: raise ValueError('Привязка внутри поля Word не поддерживается')
  spans=[]; pos=0
  for node in p.findall('.//w:t',NS): text=node.text or ''; spans.append((node,pos,pos+len(text),text)); pos+=len(text)
+ if start==end==0 and pos==0:
+  run=p.find('./w:r',NS)
+  if run is None: run=ET.SubElement(p,f'{{{WORD_NS}}}r')
+  text_node=run.find('./w:t',NS)
+  if text_node is None: text_node=ET.SubElement(run,f'{{{WORD_NS}}}t')
+  text_node.text=str(value)
+  return
  touched=[x for x in spans if x[2]>start and x[1]<end]
  if end>pos or not touched: raise ValueError('Диапазон привязки выходит за границы текста')
  first,last=touched[0],touched[-1]
@@ -310,24 +420,44 @@ def _parent_of(root,node):
  for parent in root.iter():
   if node in list(parent): return parent
  return None
-def render_docx(v,bindings,values,target,regions=None,included_region_ids=None):
+def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,repeating_groups=None,repeating_values=None,repeating_fields=None):
  regions=regions or []; included_region_ids=set(included_region_ids or [])
+ repeating_groups=repeating_groups or []; repeating_values=repeating_values or {}; repeating_fields=repeating_fields or {}
  excluded=[x for x in regions if x.id not in included_region_ids]
  bindings=[b for b in bindings if not any(_binding_inside_region(b,r) for r in excluded)]
  grouped={}
  for b in bindings: grouped.setdefault(b.locator['part'],{'bindings':[],'regions':[]})['bindings'].append(b)
  for r in excluded: grouped.setdefault(r.locator['part'],{'bindings':[],'regions':[]})['regions'].append(r)
+ for g in repeating_groups: grouped.setdefault(g.locator['part'],{'bindings':[],'regions':[],'groups':[]}).setdefault('groups',[]).append(g)
  with zipfile.ZipFile(safe_source(v),'r') as src,zipfile.ZipFile(target,'w') as dst:
   for info in src.infolist():
    raw=src.read(info.filename)
    if info.filename in grouped:
-    root=ET.fromstring(raw); by_node={}
+    root=ET.fromstring(raw); by_node={}; jobs=[]
+    for group in grouped[info.filename].get('groups',[]): jobs.append((group,_group_row(root,group.locator)))
     for b in grouped[info.filename]['bindings']: by_node.setdefault(b.locator['node'],[]).append((b.locator['text_start'],b.locator['text_end'],values[b.binding_key]))
     for region in grouped[info.filename]['regions']:
      if region.region_type=='CONDITIONAL_RUN': by_node.setdefault(region.locator['node'],[]).append((region.locator['text_start'],region.locator['text_end'],''))
     for locator,items in by_node.items():
      p=paragraph_for(root,locator)
      for start,end,value in sorted(items,key=lambda x:x[0],reverse=True): replace_range(p,start,end,value)
+    for group,row in jobs:
+     table=_parent_of(root,row)
+     if table is None: raise ValueError(f'Строка-образец группы «{group.name}» недоступна')
+     insert_at=list(table).index(row); items=repeating_values.get(group.group_key,[]); fields=repeating_fields.get(group.id,[])
+     for offset,item in enumerate(items):
+      clone=copy.deepcopy(row); actions={}
+      for field in fields:
+       loc=field.locator; parsed=_table_parts(loc['node'])
+       if not parsed: raise ValueError(f'Привязка поля «{field.label}» повреждена')
+       _,_,_,cell_no,paragraph_no=parsed
+       try: paragraph=clone.findall('./w:tc',NS)[cell_no-1].findall('./w:p',NS)[paragraph_no-1]
+       except IndexError: raise ValueError(f'Привязка поля «{field.label}» устарела')
+       actions.setdefault(paragraph,[]).append((loc['text_start'],loc['text_end'],render_value(field,item.get(field.field_key,''))))
+      for paragraph,ranges in actions.items():
+       for start,end,value in sorted(ranges,key=lambda x:x[0],reverse=True): replace_range(paragraph,start,end,value)
+      table.insert(insert_at+offset,clone)
+     table.remove(row)
     removals=[]
     for region in grouped[info.filename]['regions']:
      loc=region.locator
@@ -368,18 +498,30 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'status':d.status,'answers':d.answers,'template':template_out(t,s),'schema':schema_out(schema,s)}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); known={x.field_key:x for x in fields}
+  d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})
   validate_condition_schema(fields)
   if set(payload.answers)-set(known): raise HTTPException(422,detail='Анкета содержит неизвестные поля')
-  answers={**(d.answers or {}),**payload.answers}; errors=validate_active_answers(fields,answers)
+  answers={**(d.answers or {}),**payload.answers}; errors=validate_active_answers(fields,answers); errors.update(validate_repeating_answers(groups,s,fields,answers,True))
   if errors: raise HTTPException(422,detail={'message':'Исправьте ответы','fields':errors})
+  d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
+ @r.patch('/api/v1/contract-drafts/{id}/autosave')
+ def autosave(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key for x in fields}|{x.group_key for x in groups}
+  if set(payload.answers)-known: raise HTTPException(422,detail='Анкета содержит неизвестные поля')
+  answers={**(d.answers or {}),**payload.answers}; errors=validate_repeating_answers(groups,s,fields,answers,False)
+  if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
+  for field in fields:
+   value=answers.get(field.field_key)
+   if value not in (None,'') and (message:=validate_answer(field,value)): errors[field.field_key]=message
+  if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
   d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.post('/api/v1/contract-drafts/{id}/generate',status_code=201)
  def generate(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {}; errors=validate_active_answers(fields,answers)
+  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(); errors.update(validate_repeating_answers(groups,s,fields,answers,True))
   if errors: raise HTTPException(422,detail={'message':'Заполните обязательные поля','fields':errors})
-  bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; values={key:render_value(field,answers.get(key,'')) for key,field in active.items()}; legal_answers=condition_answers(fields,answers); included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal_answers)}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
-  try: render_docx(v,bindings,values,target,regions,included)
+  bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); groups=validate_repeating_groups(v,s,bindings,regions); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; values={key:render_value(field,answers.get(key,'')) for key,field in active.items()}; legal_answers=condition_answers(fields,answers); included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal_answers)}; repeated={x.group_key:(answers.get(x.group_key,[]) if group_is_active(x,fields,answers) else []) for x in groups}; group_fields={x.id:s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all() for x in groups}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
+  try: render_docx(v,bindings,values,target,regions,included,groups,repeated,group_fields)
   except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Не удалось безопасно сформировать DOCX: {exc}')
   raw=target.read_bytes(); g=GeneratedDocument(draft_id=d.id,template_version_id=v.id,generation_number=number,path=str(target),sha256=hashlib.sha256(raw).hexdigest(),mime_type=DOCX_MIME,size=len(raw),created_by_id=u.id); s.add(g); d.status='GENERATED'; s.commit(); return {'id':g.id,'generation_number':number,'filename':f'Договор_{number}.docx','download_url':f'/api/v1/generated-documents/{g.id}/download'}
  @r.get('/api/v1/generated-documents/{id}/download')
@@ -515,20 +657,101 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(ConditionalDocumentRegion,rid)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Условная область не найдена')
   s.delete(x); s.commit()
+ @r.get(prefix+'/{tid}/versions/{vid}/repeating-groups')
+ def repeating_groups(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  return [repeating_group_out(x,s) for x in s.query(RepeatingGroup).filter_by(template_version_id=v.id).order_by(RepeatingGroup.position).all()]
+ @r.post(prefix+'/{tid}/versions/{vid}/repeating-groups',status_code=201)
+ def create_repeating_group(tid:str,vid:str,p:RepeatingGroupPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v)
+  if p.max_items<p.min_items or (p.required and p.max_items<1): raise HTTPException(422,detail='Максимальное количество должно быть не меньше минимального')
+  if s.query(RepeatingGroup).filter_by(template_version_id=v.id,group_key=p.group_key).first(): raise HTTPException(409,detail='Группа с таким ключом уже существует')
+  if s.query(RepeatingGroup).filter_by(template_version_id=v.id,position=p.position).first(): raise HTTPException(409,detail='Позиция группы уже занята')
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
+  try:
+   if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
+   locator=_resolve_repeating_row(safe_source(v),p.row_locator,v.structure_fingerprint)
+  except (ConditionConfigurationError,ValueError) as exc: raise HTTPException(422,detail=str(exc))
+  x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
+ @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}')
+ def update_repeating_group(tid:str,vid:str,gid:str,p:RepeatingGroupUpdatePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)
+  if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Повторяемая группа не найдена')
+  if p.max_items<p.min_items: raise HTTPException(422,detail='Максимальное количество должно быть не меньше минимального')
+  duplicate=s.query(RepeatingGroup).filter(RepeatingGroup.template_version_id==v.id,RepeatingGroup.group_key==p.group_key,RepeatingGroup.id!=x.id).first(); occupied=s.query(RepeatingGroup).filter(RepeatingGroup.template_version_id==v.id,RepeatingGroup.position==p.position,RepeatingGroup.id!=x.id).first()
+  if duplicate: raise HTTPException(409,detail='Группа с таким ключом уже существует')
+  if occupied: raise HTTPException(409,detail='Позиция группы уже занята')
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
+  try:
+   if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
+  except ConditionConfigurationError as exc: raise HTTPException(422,detail=str(exc))
+  x.group_key=p.group_key; x.name=p.name.strip(); x.description=p.description.strip(); x.min_items=p.min_items; x.max_items=p.max_items; x.required=p.required; x.position=p.position; x.config={'visible_when':p.visible_when}; s.commit(); return repeating_group_out(x,s)
+ @r.delete(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}',status_code=204)
+ def delete_repeating_group(tid:str,vid:str,gid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)
+  if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Повторяемая группа не найдена')
+  s.query(RepeatingGroupField).filter_by(group_id=x.id).delete(); s.delete(x); s.commit()
+ @r.post(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}/fields',status_code=201)
+ def create_repeating_field(tid:str,vid:str,gid:str,p:RepeatingFieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); group=s.get(RepeatingGroup,gid); validate_repeating_field_payload(p)
+  if not group or group.template_version_id!=v.id: raise HTTPException(404,detail='Повторяемая группа не найдена')
+  if s.query(RepeatingGroupField).filter_by(group_id=gid,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
+  if s.query(RepeatingGroupField).filter_by(group_id=gid,position=p.position).first(): raise HTTPException(409,detail='Позиция поля уже занята')
+  x=RepeatingGroupField(group_id=gid,field_key=p.field_key,label=p.label.strip(),field_type=p.field_type,required=p.required,position=p.position,config=repeating_field_config(p)); s.add(x); s.commit(); return repeating_field_out(x)
+ @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}/fields/{fid}')
+ def update_repeating_field(tid:str,vid:str,gid:str,fid:str,p:RepeatingFieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); group=s.get(RepeatingGroup,gid); x=s.get(RepeatingGroupField,fid); validate_repeating_field_payload(p)
+  if not group or group.template_version_id!=v.id or not x or x.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
+  duplicate=s.query(RepeatingGroupField).filter(RepeatingGroupField.group_id==gid,RepeatingGroupField.field_key==p.field_key,RepeatingGroupField.id!=fid).first(); occupied=s.query(RepeatingGroupField).filter(RepeatingGroupField.group_id==gid,RepeatingGroupField.position==p.position,RepeatingGroupField.id!=fid).first()
+  if duplicate: raise HTTPException(409,detail='Поле с таким ключом уже существует')
+  if occupied: raise HTTPException(409,detail='Позиция поля уже занята')
+  x.field_key=p.field_key; x.label=p.label.strip(); x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=repeating_field_config(p); s.commit(); return repeating_field_out(x)
+ @r.delete(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}/fields/{fid}',status_code=204)
+ def delete_repeating_field(tid:str,vid:str,gid:str,fid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); group=s.get(RepeatingGroup,gid); x=s.get(RepeatingGroupField,fid)
+  if not group or group.template_version_id!=v.id or not x or x.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
+  s.delete(x); s.commit()
+ @r.put(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}/fields/{fid}/binding')
+ def bind_repeating_field(tid:str,vid:str,gid:str,fid:str,p:RepeatingBindingPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); group=s.get(RepeatingGroup,gid); field=s.get(RepeatingGroupField,fid)
+  if not group or group.template_version_id!=v.id or not field or field.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
+  try: loc=adapter.get_structural_locator(safe_source(v),adapter.select_range(safe_source(v),p.locator,p.start,p.end,p.selected_text))
+  except ValueError as exc: raise HTTPException(422,detail=str(exc))
+  if not _field_in_group_row(loc['node'],group): raise HTTPException(422,detail='Выделение должно находиться в строке-образце этой группы')
+  loc['selected_text']=p.selected_text
+  for other in s.query(RepeatingGroupField).filter(RepeatingGroupField.group_id==gid,RepeatingGroupField.id!=fid):
+   old=other.locator or {}
+   if old.get('node')==loc['node'] and loc['text_start']<old.get('text_end',0) and loc['text_end']>old.get('text_start',0): raise HTTPException(409,detail='Выделение пересекается с другой привязкой строки')
+  field.locator=loc; s.commit(); return repeating_field_out(field)
  @r.post(prefix+'/{tid}/versions/{vid}/publish')
  def publish(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); require_publisher(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s)
   if not schema: raise HTTPException(422,detail='Создайте анкету')
-  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings)
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); groups=validate_repeating_groups(v,s,bindings,regions)
   if not fields: raise HTTPException(422,detail='Добавьте хотя бы одно поле анкеты')
   validate_condition_schema(fields)
   bound={x.field_id for x in bindings}
   if any((x.required or (x.config or {}).get('required_when') is not None) and x.id not in bound for x in fields): raise HTTPException(422,detail='Все обязательные поля должны иметь привязку в DOCX')
   if any(not x.field_id for x in bindings): raise HTTPException(422,detail='Найдены привязки без поля анкеты')
   probe={x.field_key:('Да' if x.field_type=='BOOLEAN' else '2026-01-01' if x.field_type=='DATE' else '1') for x in fields}; temp=Path(v.source_path).parent/'publish-check.docx'
+  group_fields={x.id:s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all() for x in groups}
+  def samples(count):
+   def sample_value(field):
+    if field.field_type=='DATE': return '2026-01-01'
+    if field.field_type=='BOOLEAN': return True
+    if field.field_type in {'INTEGER','DECIMAL','MONEY'}: return 1
+    if field.field_type=='SINGLE_SELECT': return (field.config or {}).get('options',['Тест'])[0]
+    return 'Тест'
+   return {g.group_key:[{'_id':f'preflight-{i}',**{f.field_key:sample_value(f) for f in group_fields[g.id]}} for i in range(count)] for g in groups}
   try:
-   render_docx(v,bindings,probe,temp,regions,{x.id for x in regions}); temp.unlink(missing_ok=True)
-   render_docx(v,bindings,probe,temp,regions,set()); temp.unlink(missing_ok=True)
+   render_docx(v,bindings,probe,temp,regions,{x.id for x in regions},groups,samples(1),group_fields); temp.unlink(missing_ok=True)
+   zero_or_min={g.group_key:([] if g.min_items==0 and not g.required else samples(max(g.min_items,1))[g.group_key]) for g in groups}
+   render_docx(v,bindings,probe,temp,regions,set(),groups,zero_or_min,group_fields); temp.unlink(missing_ok=True)
+   render_docx(v,bindings,probe,temp,regions,{x.id for x in regions},groups,samples(3),group_fields); temp.unlink(missing_ok=True)
+   if groups:
+    maximum={g.group_key:samples(g.max_items)[g.group_key] for g in groups}
+    render_docx(v,bindings,probe,temp,regions,{x.id for x in regions},groups,maximum,group_fields); temp.unlink(missing_ok=True)
   except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Проверка генерации не пройдена: {exc}')
   for old in s.query(TemplateVersion).filter(TemplateVersion.template_id==t.id,TemplateVersion.status=='PUBLISHED'): old.status='SUPERSEDED'
   v.status='PUBLISHED'; v.published_by_id=u.id; v.published_at=now(); schema.status='PUBLISHED'; t.status='ACTIVE'; t.current_version_id=v.id; s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='VERSION_PUBLISHED')); s.commit(); return version_out(v)

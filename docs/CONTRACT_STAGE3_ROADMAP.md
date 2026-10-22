@@ -42,7 +42,9 @@
 
 ## R3.3 — repeating tables
 
-**Backend:** typed collection/object fields; locator v2 `TABLE_ROW_TEMPLATE` и `TABLE_COLUMN`; clone/delete row with relationship-safe OOXML; merged-cell/grid validation; declarative cell bindings; row and aggregate computations as references, not code.
+**Статус:** реализовано в R3.3 (migration `011_repeating_groups`).
+
+**Backend:** typed collection/object fields; locator v3 строки-образца и диапазонов/пустых ячеек; clone/delete row с сохранением OOXML; проверка `gridSpan`/блокировка `vMerge`; декларативные cell bindings. Вычисления строк и агрегатов отложены до R3.4.
 
 **Frontend:** редактор массива строк графика; add/remove/reorder; table mapping UI; preview of row prototype and optional place column.
 
@@ -50,7 +52,7 @@
 
 **Тесты:** 0/1/max rows; both table 1 and table 6; 1–12 months; merged cells; optional column; extra-option row; long values/page breaks; duplicate dates; package reopen.
 
-**Готовность:** оба графика детерминированно строятся из утверждённой domain model; число строк не ограничено шаблонными placeholders; Word открывает файл без repair prompt.
+**Готовность:** универсальный механизм детерминированно клонирует выбранную строку; проверен на пустой строке графика реального договора физлица. Конфигурация каждого места использования независима; повторное использование одной группы в нескольких местах и агрегаты пока не поддержаны.
 
 **Зависимости/риск:** R3.1, частично R3.2. Наивысший OOXML-риск этапа.
 

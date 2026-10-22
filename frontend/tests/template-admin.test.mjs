@@ -71,3 +71,22 @@ test('conditional DOCX areas use visual structural selection and the shared cond
   assert.match(component,/Включать область, когда/);
   assert.doesNotMatch(component,/OOXML-путь|JSON вручную/);
 });
+
+test('specialist can configure a repeating DOCX row without technical locators',()=>{
+  assert.match(component,/Сделать строку повторяемой/);
+  assert.match(component,/repeating-groups/);
+  assert.match(component,/Повторяемые строки/);
+  assert.match(component,/Связать с полем строки/);
+  assert.match(component,/Показывать группу, когда/);
+  assert.doesNotMatch(component,/OOXML path|XPath/);
+});
+
+test('employee repeating group supports stable records, ordering and autosave',()=>{
+  assert.match(catalog,/randomUUID/);
+  assert.match(catalog,/Добавить запись/);
+  assert.match(catalog,/Удалить запись/);
+  assert.match(catalog,/Переместить запись выше/);
+  assert.match(catalog,/\/autosave/);
+  assert.match(catalog,/evaluateCondition/);
+  assert.match(catalog,/schedule|repeating_groups/);
+});

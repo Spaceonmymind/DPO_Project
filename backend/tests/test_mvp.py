@@ -3,9 +3,12 @@ import os
 import tempfile
 import hashlib
 import shutil
+import zipfile
 from urllib.parse import quote
 from pathlib import Path
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 os.environ['DATABASE_URL'] = 'sqlite:///' + tempfile.mktemp(suffix='.db')
 os.environ['STORAGE_LOCAL_PATH'] = tempfile.mkdtemp()
@@ -69,6 +72,38 @@ def configure_platform_field(client,headers,template,version,field_key='customer
         response=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/bindings",headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':index,'end':index+len('АО «НСПК»'),'selected_text':'АО «НСПК»'})
         assert response.status_code==201,response.text
     return field
+
+
+def repeating_contract_docx_bytes(vertical_merge=False) -> bytes:
+    document=Document(); document.add_paragraph('Заказчик: CUSTOMER')
+    table=document.add_table(rows=3,cols=2); table.style='Table Grid'
+    table.rows[0].cells[0].text='Дата'; table.rows[0].cells[1].text='Место'
+    date_cell=table.rows[1].cells[0]; date_cell.text=''; p=date_cell.paragraphs[0]; p.add_run('DA'); p.add_run('TE'); date_cell.add_paragraph('Дополнительная строка')
+    table.rows[1].cells[1].text='PLACE'
+    table.rows[2].cells[0].merge(table.rows[2].cells[1]).text='ИТОГО'
+    if vertical_merge:
+        properties=table.rows[1].cells[0]._tc.get_or_add_tcPr(); marker=OxmlElement('w:vMerge'); marker.set(qn('w:val'),'restart'); properties.append(marker)
+    payload=io.BytesIO(); document.save(payload); return payload.getvalue()
+
+
+def configure_repeating_platform(client,headers,code,vertical_merge=False,min_items=0,max_items=10,visible_when=None):
+    template=create_platform_template(client,headers,code)
+    raw=repeating_contract_docx_bytes(vertical_merge)
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('repeat.docx',raw,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    preview=client.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/preview",headers=headers).json()
+    node=lambda text: next(x for x in preview['nodes'] if text in x['text'])
+    customer=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/fields",headers=headers,json={'field_key':'customer_name','label':'Заказчик','field_type':'TEXT','required':True,'position':1}).json(); customer_node=node('CUSTOMER'); customer_start=customer_node['text'].index('CUSTOMER')
+    linked=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/bindings",headers=headers,json={'field_id':customer['id'],'locator':customer_node['locator'],'start':customer_start,'end':customer_start+8,'selected_text':'CUSTOMER'}); assert linked.status_code==201,linked.text
+    date_node=node('DATE')
+    response=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/repeating-groups",headers=headers,json={'group_key':'schedule','name':'График тренировок','description':'Добавьте тренировки','min_items':min_items,'max_items':max_items,'required':False,'position':1,'row_locator':date_node['locator'],'visible_when':visible_when})
+    if vertical_merge: return template,version,raw,response,None
+    assert response.status_code==201,response.text
+    group=response.json(); fields=[]
+    for position,(key,label,kind,needle) in enumerate((('date','Дата','DATE','DATE'),('place','Место','TEXT','PLACE')),1):
+        field=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':label,'field_type':kind,'required':True,'position':position}).json(); target=node(needle); start=target['text'].index(needle)
+        bound=client.put(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':target['locator'],'start':start,'end':start+len(needle),'selected_text':needle})
+        assert bound.status_code==200,bound.text; fields.append(bound.json())
+    return template,version,raw,response,group
 
 
 def test_clarification_asks_only_one_atomic_field():
@@ -846,3 +881,96 @@ def test_r32_supports_all_region_types_and_rejects_overlap_and_stale_locator():
     database=SessionLocal(); from app.db import ConditionalDocumentRegion
     stale=database.query(ConditionalDocumentRegion).filter_by(region_key='table',template_version_id=version['id']).one(); stale.locator={**stale.locator,'structure_fingerprint':'0'*64}; database.commit(); database.close()
     rejected=client.post(base+'/publish',headers=headers); assert rejected.status_code==422 and 'устарел' in rejected.text
+
+
+def test_r33_full_repeating_table_flow_preserves_order_static_rows_and_source():
+    manager=TestClient(app); manager_headers=auth(manager); template,version,source,_,_=configure_repeating_platform(manager,manager_headers,'R33_FULL')
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"; assert manager.post(base+'/publish',headers=manager_headers).status_code==200
+    assert hashlib.sha256(manager.get(base+'/source',headers=manager_headers).content).hexdigest()==hashlib.sha256(source).hexdigest()
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); did=draft['id']
+    rows=[{'_id':f'row-{i}','date':f'2026-11-{i:02d}','place':f'Зал {i}'} for i in range(1,6)]; rows[2]['place']='Изменённый зал'; rows.pop(1); rows=[rows[2],rows[0],rows[1],rows[3]]
+    saved=employee.patch(f'/api/v1/contract-drafts/{did}/autosave',headers=employee_headers,json={'answers':{'customer_name':'АО Заказчик','schedule':rows}}); assert saved.status_code==200,saved.text
+    restored=employee.get(f'/api/v1/contract-drafts/{did}',headers=employee_headers).json(); assert restored['answers']['schedule']==rows
+    assert employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':restored['answers']}).status_code==200
+    generated=employee.post(f'/api/v1/contract-drafts/{did}/generate',headers=employee_headers); assert generated.status_code==201,generated.text
+    rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content)); table=rendered.tables[0]
+    assert len(table.rows)==6 and table.rows[0].cells[0].text=='Дата' and table.rows[-1].cells[0].text=='ИТОГО'
+    assert [row.cells[1].text for row in table.rows[1:-1]]==[x['place'] for x in rows]
+    assert all('Дополнительная строка' in row.cells[0].text and len(row.cells[0].paragraphs)==2 for row in table.rows[1:-1])
+
+
+def test_r33_zero_one_three_and_ten_rows_and_limits():
+    manager=TestClient(app); headers=auth(manager); template,version,_,_,_=configure_repeating_platform(manager,headers,'R33_COUNTS',min_items=0,max_items=10); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"; assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    for count in (0,1,3,10):
+        draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':f'{count}-{i}','date':'2026-12-01','place':f'Зал {i}'} for i in range(count)]; answers={'customer_name':'Заказчик','schedule':rows}
+        assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':answers}).status_code==200
+        made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers); assert made.status_code==201,made.text
+        result=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content)); assert len(result.tables[0].rows)==count+2
+    overflow=[{'_id':f'x-{i}','date':'2026-12-01','place':'Зал'} for i in range(11)]; assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'schedule':overflow}}).status_code==422
+
+
+def test_r33_minimum_and_required_nested_values_are_enforced_server_side():
+    manager=TestClient(app); headers=auth(manager); template,version,_,_,_=configure_repeating_platform(manager,headers,'R33_REQUIRED',min_items=2,max_items=4); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"; assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); did=draft['id']
+    one=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'customer_name':'Заказчик','schedule':[{'_id':'one','date':'2026-12-01','place':'Зал'}]}}); assert one.status_code==422 and 'минимум 2' in one.text
+    missing=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'customer_name':'Заказчик','schedule':[{'_id':'one','date':'2026-12-01','place':''},{'_id':'two','date':'2026-12-02','place':'Зал'}]}}); assert missing.status_code==422 and 'заполните поле' in missing.text.lower() and 'Место' in missing.text
+
+
+def test_r33_horizontal_gridspan_and_row_formatting_survive_cloning():
+    document=Document(); document.add_paragraph('Служебное поле')
+    table=document.add_table(rows=3,cols=2); table.style='Table Grid'; table.rows[0].cells[0].text='Заголовок'; table.rows[0].cells[1].text='Колонка'; merged=table.rows[1].cells[0].merge(table.rows[1].cells[1]); merged.text='VALUE'; merged.paragraphs[0].alignment=1; table.rows[2].cells[0].merge(table.rows[2].cells[1]).text='ИТОГО'
+    raw=io.BytesIO(); document.save(raw); manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'R33_GRIDSPAN'); version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('gridspan.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'note','label':'Примечание','field_type':'TEXT','required':False,'position':1}).status_code==201
+    node=next(x for x in manager.get(base+'/preview',headers=headers).json()['nodes'] if x['text']=='VALUE'); group=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'lines','name':'Строки','min_items':0,'max_items':3,'position':1,'row_locator':node['locator']}).json(); field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':'value','label':'Значение','field_type':'TEXT','required':True,'position':1}).json(); assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).status_code==200; assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':str(i),'value':f'Строка {i}'} for i in range(3)]; assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'lines':rows}}).status_code==200; made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers).json(); rendered=Document(io.BytesIO(employee.get(made['download_url'],headers=employee_headers).content)); result=rendered.tables[0]
+    assert len(result.rows)==5 and all(row._tr.find('.//'+qn('w:gridSpan')).get(qn('w:val'))=='2' for row in result.rows[1:4]); assert all(row.cells[0].paragraphs[0].alignment==1 for row in result.rows[1:4]); assert result.rows[-1].cells[0].text=='ИТОГО'
+
+
+def test_r33_rejects_vertical_merge_stale_locator_conflict_and_foreign_draft():
+    manager=TestClient(app); headers=auth(manager); _,_,_,response,_=configure_repeating_platform(manager,headers,'R33_VMERGE',vertical_merge=True); assert response.status_code==422 and 'вертикально' in response.text
+    template,version,_,_,group=configure_repeating_platform(manager,headers,'R33_SAFETY'); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    database=SessionLocal(); from app.db import RepeatingGroup
+    stored=database.query(RepeatingGroup).filter_by(id=group['id']).one(); original=stored.locator; stored.locator={**original,'row_hash':'0'*64}; database.commit(); database.close(); stale=manager.post(base+'/publish',headers=headers); assert stale.status_code==422 and 'устарела' in stale.text
+    database=SessionLocal(); stored=database.query(RepeatingGroup).filter_by(id=group['id']).one(); stored.locator=original; database.commit(); database.close()
+    preview=manager.get(base+'/preview',headers=headers).json(); date_node=next(x for x in preview['nodes'] if 'DATE' in x['text']); conflict=manager.post(base+'/bindings',headers=headers,json={'binding_key':'conflict','locator':date_node['locator'],'start':0,'end':4,'selected_text':'DATE'}); assert conflict.status_code==201
+    assert manager.post(base+'/publish',headers=headers).status_code==422
+    manager.delete(base+f"/bindings/{conflict.json()['id']}",headers=headers)
+    conditional=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'same_row','region_type':'CONDITIONAL_TABLE_ROW','start_locator':date_node['locator'],'include_when':{'operator':'IS_NOT_EMPTY','field_key':'customer_name'}}); assert conditional.status_code==201,conditional.text
+    assert manager.post(base+'/publish',headers=headers).status_code==422
+    manager.delete(base+f"/conditional-regions/{conditional.json()['id']}",headers=headers); assert manager.post(base+'/publish',headers=headers).status_code==200
+    owner=TestClient(app); owner_headers=auth(owner,'petrova'); draft=owner.post('/api/v1/contract-drafts',headers=owner_headers,json={'template_id':template['id']}).json(); foreign=TestClient(app); foreign_headers=auth(foreign)
+    assert foreign.patch(f"/api/v1/contract-drafts/{draft['id']}/autosave",headers=foreign_headers,json={'answers':{}}).status_code==404
+
+
+def test_r33_inactive_group_keeps_answers_but_does_not_render_or_require_rows():
+    manager=TestClient(app); headers=auth(manager); template,version,_,_,group=configure_repeating_platform(manager,headers,'R33_CONDITION',visible_when={'operator':'EQUALS','field_key':'customer_name','value':'Показывать'})
+    # The referenced text field is condition-compatible; publishing also proves shared ConditionEngine validation.
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"; assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); hidden=[{'_id':'kept','date':'','place':''}]
+    saved=employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'customer_name':'Скрыть','schedule':hidden}}); assert saved.status_code==200,saved.text
+    made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers); assert made.status_code==201,made.text
+    result=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content)); assert len(result.tables[0].rows)==2
+    restored=employee.get(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers).json()
+    assert restored['answers']['schedule']==hidden
+
+
+def test_r33_real_training_contract_empty_schedule_cells_are_bindable():
+    source=next((template_directory/'training').glob('*физлицо.docx')).read_bytes(); digest=hashlib.sha256(source).hexdigest()
+    manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'R33_REAL_TRAINING')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('training.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'comment','label':'Комментарий','field_type':'TEXT','required':False,'position':1}).status_code==201
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']; cells=[x for x in nodes if x['kind']=='table_cell' and x['metadata']['table']==2 and x['metadata']['row']==3 and x['metadata']['cell']<=7 and x['locator'].endswith('/p[1]')]
+    assert len(cells)==7 and all(x['text']=='' for x in cells)
+    created=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'schedule','name':'График тренировок','min_items':0,'max_items':10,'required':False,'position':1,'row_locator':cells[0]['locator']}); assert created.status_code==201,created.text; group=created.json()
+    for position,(cell,key,label,kind) in enumerate(zip(cells,['date','weekday','time','quantity','price','total','place'],['Дата','День недели','Время','Количество','Цена','Стоимость','Место'],['DATE','TEXT','TEXT','INTEGER','MONEY','MONEY','TEXT']),1):
+        field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':label,'field_type':kind,'required':False,'position':position}).json()
+        bound=manager.put(base+f"/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':cell['locator'],'start':0,'end':0,'selected_text':''}); assert bound.status_code==200,bound.text
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':f'real-{i}','date':f'2026-11-{i:02d}','weekday':'Понедельник','time':'19:00','quantity':1,'price':'5000','total':'5000','place':f'Зал {i}'} for i in range(1,5)]
+    assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'schedule':rows}}).status_code==200
+    made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers); assert made.status_code==201,made.text
+    rendered=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content)); schedule=rendered.tables[1]
+    assert len(schedule.rows)==18 and [schedule.rows[i].cells[6].text for i in range(2,6)]==[x['place'] for x in rows]
+    assert any('Итого за общий период' in row.cells[0].text for row in schedule.rows)
+    assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==digest

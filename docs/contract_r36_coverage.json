@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "baseline": "9944fff568fb77ae1a62e2fbe30b21b2b68825c5",
+  "acceptance_state": "BLOCKED",
+  "source": {
+    "facts": 40,
+    "decision_rules": 19,
+    "canonical_fields": 25,
+    "occurrences": 74,
+    "prompt_tests": 120,
+    "tables_per_docx": 18
+  },
+  "verified_runtime_coverage": {
+    "canonical_fields": 0,
+    "occurrences": 0,
+    "prompt_tests": 0,
+    "generated_variants": 0
+  },
+  "publication_allowed": false,
+  "blocking_defects": [
+    "pilot_product_missing",
+    "real_variants_not_published",
+    "real_bindings_missing",
+    "control_documents_missing",
+    "matrix_fixtures_not_executable"
+  ]
+}

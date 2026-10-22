@@ -17,8 +17,8 @@ from app.calculations import CalculationEngine,CalculationError,ValueFormatter
 from app.db import ConditionalDocumentRegion,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
-WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT'}
-REGION_TYPES={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}
+WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT','LIST','COMPOSITE'}
+REGION_TYPES={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE','CONDITIONAL_TABLE_COLUMN'}
 
 def db():
  s=SessionLocal()
@@ -126,7 +126,7 @@ def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
@@ -151,12 +151,45 @@ def validate_field_payload(p):
   try: re.compile(pattern)
   except re.error: raise HTTPException(422,detail='Некорректное регулярное выражение')
  if p.field_type=='SINGLE_SELECT' and (not p.options or any(not str(x).strip() for x in p.options)): raise HTTPException(422,detail='Добавьте варианты выбора')
- if p.calculated and (p.field_type not in {'INTEGER','DECIMAL','MONEY'} or not p.expression): raise HTTPException(422,detail='Вычисляемому полю нужна числовая формула')
+ if p.calculated and p.field_type not in {'INTEGER','DECIMAL','MONEY','TEXT'}: raise HTTPException(422,detail='Этот тип поля нельзя вычислять')
+ if p.calculated and p.field_type=='TEXT' and not p.text_expression: raise HTTPException(422,detail='Текстовому вычисляемому полю нужно выражение')
+ if p.calculated and p.field_type!='TEXT' and not p.expression: raise HTTPException(422,detail='Вычисляемому полю нужна числовая формула')
+ if p.field_type=='LIST':
+  if set(p.item_config)-{'min_items','max_items','min_length','max_length','regex'}:raise HTTPException(422,detail='Некорректные настройки списка')
+  if not 0<=int(p.item_config.get('min_items',0))<=int(p.item_config.get('max_items',20))<=100:raise HTTPException(422,detail='Пределы списка некорректны')
+ if p.field_type=='COMPOSITE':
+  _validate_components(p.components)
  try: ValueFormatter.validate(p.output_format)
  except CalculationError as exc: raise HTTPException(422,detail=str(exc))
 def calculation_config(p): return {'calculated':p.calculated,'expression':p.expression,'precision':p.precision,'rounding':p.rounding,'output_format':p.output_format}
-def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'visible_when':p.visible_when,'required_when':p.required_when,**calculation_config(p)}
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
 def repeating_field_config(p): return {'description':p.description,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,**calculation_config(p)}
+def _validate_components(components,depth=1):
+ if depth>4:raise HTTPException(422,detail='Вложенность составного поля не может превышать 4 уровня')
+ keys=[x.get('key') for x in components]
+ if not keys or len(keys)!=len(set(keys)) or any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*',str(x)) for x in keys):raise HTTPException(422,detail='Компоненты должны иметь уникальные корректные ключи')
+ allowed={'key','label','type','required','validation','components','separator'}
+ if any(set(x)-allowed for x in components):raise HTTPException(422,detail='Компонент содержит неподдерживаемые настройки')
+ for item in components:
+  if item.get('type','TEXT') not in {'TEXT','DATE','INTEGER','DECIMAL','BOOLEAN','COMPOSITE'}:raise HTTPException(422,detail='Неподдерживаемый тип компонента')
+  if item.get('type')=='COMPOSITE':_validate_components(item.get('components') or [],depth+1)
+def _validate_composite(components,value):
+ if not isinstance(value,dict):return 'Ожидалось составное значение'
+ by_key={x['key']:x for x in components}
+ if set(value)-set(by_key):return 'Составное значение содержит неизвестные компоненты'
+ for key,item in by_key.items():
+  current=value.get(key)
+  if item.get('required') and current in (None,''):return f'Заполните «{item.get("label",key)}»'
+  if current not in (None,'') and item.get('type')=='COMPOSITE':
+   if error:=_validate_composite(item.get('components') or [],current):return f'«{item.get("label",key)}»: {error.lower()}'
+ return None
+def _render_composite(components,value,separator=', '):
+ out=[]
+ for item in components:
+  current=value.get(item['key']) if isinstance(value,dict) else None
+  if current in (None,''):continue
+  out.append(_render_composite(item.get('components') or [],current,item.get('separator',', ')) if item.get('type')=='COMPOSITE' else ('Да' if current is True else 'Нет' if current is False else str(current)))
+ return separator.join(out)
 def validate_repeating_field_payload(p):
  if p.field_type not in FIELD_TYPES: raise HTTPException(422,detail='Неподдерживаемый тип поля строки')
  if set(p.validation)-{'min_length','max_length','min','max','regex'}: raise HTTPException(422,detail='Параметры проверки содержат неподдерживаемые правила')
@@ -187,6 +220,14 @@ def validate_answer(field,value):
   elif kind=='DATE': date.fromisoformat(str(value))
   elif kind=='BOOLEAN' and not isinstance(value,bool): return 'Выберите да или нет'
   elif kind=='SINGLE_SELECT' and value not in cfg.get('options',[]): return 'Выберите значение из списка'
+  elif kind=='LIST':
+   if not isinstance(value,list) or any(not isinstance(x,str) for x in value):return 'Ожидался список строк'
+   item=cfg.get('item_config') or {};minimum=int(item.get('min_items',0));maximum=int(item.get('max_items',20))
+   if len(value)<minimum or len(value)>maximum:return f'Количество элементов должно быть от {minimum} до {maximum}'
+   if any(not x.strip() or len(x)>int(item.get('max_length',500)) for x in value):return 'Проверьте элементы списка'
+   if item.get('regex') and any(not re.fullmatch(str(item['regex']),x) for x in value):return 'Элемент списка не соответствует формату'
+  elif kind=='COMPOSITE':
+   if error:=_validate_composite(cfg.get('components',[]),value):return error
   if kind in {'INTEGER','DECIMAL','MONEY'}:
    if rules.get('min') is not None and number<Decimal(str(rules['min'])): return f'Значение не меньше {rules["min"]}'
    if rules.get('max') is not None and number>Decimal(str(rules['max'])): return f'Значение не больше {rules["max"]}'
@@ -195,6 +236,9 @@ def validate_answer(field,value):
 def render_value(field,value):
  if value in (None,''): return ''
  if field.field_type=='BOOLEAN': return 'Да' if value else 'Нет'
+ if field.field_type=='LIST': return (field.config or {}).get('separator','; ').join(str(x) for x in value)
+ if field.field_type=='COMPOSITE':
+  cfg=field.config or {};return _render_composite(cfg.get('components',[]),value,cfg.get('separator',', '))
  return str(value)
 def schema_for(version_id,s,create=False,u=None):
  x=s.query(QuestionnaireSchema).filter_by(template_version_id=version_id).order_by(QuestionnaireSchema.schema_version.desc()).first()
@@ -289,6 +333,36 @@ def _top_paragraph(locator):
  match=re.fullmatch(r'(.+)#/p\[(\d+)\]',locator)
  return (match.group(1),int(match.group(2))) if match else None
 def _paragraph_text(node): return ''.join(x.text or '' for x in node.findall('.//w:t',NS))
+def _span(cell):
+ node=cell.find('./w:tcPr/w:gridSpan',NS);return int(node.get(f'{{{WORD_NS}}}val','1')) if node is not None else 1
+def _column_layout(table,column):
+ grid=table.find('./w:tblGrid',NS);columns=grid.findall('./w:gridCol',NS) if grid is not None else []
+ if not columns or column<1 or column>len(columns):raise ValueError('В таблице отсутствует корректный tblGrid')
+ for row in table.findall('./w:tr',NS):
+  cursor=1;hit=None
+  for cell in row.findall('./w:tc',NS):
+   span=_span(cell)
+   if cursor<=column<cursor+span:hit=(cell,cursor,span);break
+   cursor+=span
+  if hit is None:raise ValueError('Строка не согласована с tblGrid')
+  if hit[0].find('./w:tcPr/w:vMerge',NS) is not None:raise ValueError('Колонка пересекает вертикально объединённые ячейки')
+ return columns
+def _remove_table_column(table,column):
+ columns=_column_layout(table,column);removed=columns[column-1];width=int(removed.get(f'{{{WORD_NS}}}w','0') or 0);neighbor=columns[column-2] if column>1 else (columns[1] if len(columns)>1 else None)
+ if neighbor is not None and width:neighbor.set(f'{{{WORD_NS}}}w',str(int(neighbor.get(f'{{{WORD_NS}}}w','0') or 0)+width))
+ table.find('./w:tblGrid',NS).remove(removed)
+ for row in table.findall('./w:tr',NS):
+  cursor=1
+  for cell in row.findall('./w:tc',NS):
+   span=_span(cell)
+   if cursor<=column<cursor+span:
+    if span==1:row.remove(cell)
+    else:
+     node=cell.find('./w:tcPr/w:gridSpan',NS)
+     if span==2:cell.find('./w:tcPr',NS).remove(node)
+     else:node.set(f'{{{WORD_NS}}}val',str(span-1))
+    break
+   cursor+=span
 def _resolve_region(path,p:RegionPayload,structure_fingerprint):
  if p.region_type not in REGION_TYPES: raise ValueError('Неподдерживаемый тип условной области')
  preview=adapter.preview(path); nodes={x['locator']:x for x in preview['nodes']}; source=nodes.get(p.start_locator)
@@ -307,11 +381,28 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
   paragraphs=body.findall('./w:p',NS)
   if b>len(paragraphs): raise ValueError('Границы блока устарели')
   targets=paragraphs[a-1:b]; locators=[f'{part}#/p[{i}]' for i in range(a,b+1)]; locator.update({'nodes':locators,'start_node':locators[0],'end_node':locators[-1],'element_hashes':[_element_hash(x) for x in targets]})
- elif p.region_type in {'CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}:
+ elif p.region_type in {'CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE','CONDITIONAL_TABLE_COLUMN'}:
   parsed=_table_parts(p.start_locator)
   if not parsed: raise ValueError('Выберите ячейку нужной таблицы')
   _,table_no,row_no,_,_=parsed; table=body.findall('./w:tbl',NS)[table_no-1]
-  if p.region_type=='CONDITIONAL_TABLE_ROW':
+  if p.region_type=='CONDITIONAL_TABLE_COLUMN':
+   _,_,_,cell_no,_=parsed;selected_row=table.findall('./w:tr',NS)[row_no-1];cursor=1;column=None
+   for index,cell in enumerate(selected_row.findall('./w:tc',NS),1):
+    span=_span(cell)
+    if index==cell_no:
+     if span!=1:raise ValueError('Выберите ячейку, не объединённую по горизонтали')
+     column=cursor;break
+    cursor+=span
+   if column is None:raise ValueError('Колонка не найдена')
+   _column_layout(table,column);cell_nodes=[]
+   for logical_row,row in enumerate(table.findall('./w:tr',NS),1):
+    cursor=1
+    for physical_cell,cell in enumerate(row.findall('./w:tc',NS),1):
+     span=_span(cell)
+     if cursor<=column<cursor+span:cell_nodes.append(f'{part}#/tbl[{table_no}]/tr[{logical_row}]/tc[{physical_cell}]');break
+     cursor+=span
+   targets=[table];locator.update({'table':table_no,'column':column,'nodes':[f'{part}#/tbl[{table_no}]/column[{column}]'],'cell_nodes':cell_nodes,'element_hash':_element_hash(table)})
+  elif p.region_type=='CONDITIONAL_TABLE_ROW':
    row=table.findall('./w:tr',NS)[row_no-1]
    if row.find('.//w:vMerge',NS) is not None: raise ValueError('Нельзя условно удалить строку с вертикально объединёнными ячейками')
    targets=[row]; locator.update({'table':table_no,'row':row_no,'nodes':[f'{part}#/tbl[{table_no}]/tr[{row_no}]'],'element_hash':_element_hash(row)})
@@ -325,6 +416,8 @@ def _binding_inside_region(binding,region):
  node=binding.locator['node']; loc=region.locator; kind=region.region_type
  if kind=='CONDITIONAL_RUN': return node==loc['node'] and binding.locator['text_start']>=loc['text_start'] and binding.locator['text_end']<=loc['text_end']
  if kind in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: return node in loc.get('nodes',[])
+ if kind=='CONDITIONAL_TABLE_COLUMN':
+  return any(node.startswith(prefix+'/') for prefix in loc.get('cell_nodes',[]))
  prefix=f"{loc['part']}#/tbl[{loc['table']}]"
  return node.startswith(prefix+(f"/tr[{loc['row']}]" if kind=='CONDITIONAL_TABLE_ROW' else ''))
 def validate_regions(v,s,bindings=None):
@@ -364,6 +457,7 @@ def _regions_overlap(a,b):
   if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: return {loc['node']}
   if region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': return set(loc['nodes'])
   prefix=f"{loc['part']}#/tbl[{loc['table']}]"
+  if region.region_type=='CONDITIONAL_TABLE_COLUMN': return {prefix+f"/column[{loc['column']}]"}
   return {prefix+(f"/tr[{loc['row']}]" if region.region_type=='CONDITIONAL_TABLE_ROW' else '')}
  pa,pb=paragraphs(a),paragraphs(b)
  for x in pa:
@@ -498,6 +592,7 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
      if region.region_type=='CONDITIONAL_RUN': continue
      elif region.region_type in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: removals.extend(paragraph_for(root,x) for x in loc['nodes'])
      elif region.region_type=='CONDITIONAL_TABLE_ROW': removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1])
+     elif region.region_type=='CONDITIONAL_TABLE_COLUMN': _remove_table_column(_body(root).findall('./w:tbl',NS)[loc['table']-1],loc['column'])
      else: removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1])
     for node in removals:
      parent=_parent_of(root,node)

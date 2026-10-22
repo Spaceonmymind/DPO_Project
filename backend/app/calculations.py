@@ -12,6 +12,38 @@ NUMERIC_TYPES={'INTEGER','DECIMAL','MONEY'}
 
 class CalculationError(ValueError): pass
 
+class TextExpressionEngine:
+ MAX_DEPTH=8; MAX_NODES=100; MAX_OUTPUT=20000
+ @classmethod
+ def validate(cls,e,fields,depth=0,count=None):
+  count=count or [0];count[0]+=1
+  if count[0]>cls.MAX_NODES or depth>cls.MAX_DEPTH:raise CalculationError('Текстовое выражение слишком сложное')
+  if not isinstance(e,dict):raise CalculationError('Текстовое выражение не задано')
+  if set(e)=={'literal'}:
+   if not isinstance(e['literal'],str) or len(e['literal'])>5000:raise CalculationError('Недопустимый постоянный текст')
+   return
+  if 'field_key' in e:
+   if set(e)-{'field_key','format'} or not any(x.field_key==e['field_key'] for x in fields):raise CalculationError('Поле-источник текстового выражения не найдено')
+   ValueFormatter.validate(e.get('format','RAW'));return
+  if e.get('operation')=='CONCAT':
+   if set(e)!={'operation','parts'} or not isinstance(e['parts'],list) or not 1<=len(e['parts'])<=50:raise CalculationError('CONCAT требует от 1 до 50 частей')
+   for x in e['parts']:cls.validate(x,fields,depth+1,count)
+   return
+  if e.get('operation')=='IF':
+   if set(e)!={'operation','condition','then','else'}:raise CalculationError('Некорректная структура текстового IF')
+   try:ConditionEngine.validate_condition(e['condition'],fields)
+   except ConditionConfigurationError as exc:raise CalculationError(f'Некорректное условие текстового IF: {exc}')
+   cls.validate(e['then'],fields,depth+1,count);cls.validate(e['else'],fields,depth+1,count);return
+  raise CalculationError('Поддерживаются только literal, field, CONCAT и IF')
+ @classmethod
+ def evaluate(cls,e,values):
+  if 'literal' in e:return e['literal']
+  if 'field_key' in e:return ValueFormatter.format(values.get(e['field_key'],''),e.get('format','RAW'))
+  if e['operation']=='IF':return cls.evaluate(e['then'] if ConditionEngine.evaluate(e['condition'],values) else e['else'],values)
+  result=''.join(cls.evaluate(x,values) for x in e['parts'])
+  if len(result)>cls.MAX_OUTPUT:raise CalculationError('Текстовый результат превышает 20000 символов')
+  return result
+
 def decimal_value(value:Any,empty_zero=True)->Decimal:
  if value in (None,''):
   if empty_zero:return Decimal(0)
@@ -26,7 +58,9 @@ class CalculationEngine:
  def validate(cls,regular_fields,row_groups):
   regular={x.field_key:x for x in regular_fields}; groups={g.group_key:g for g in row_groups}; row_fields={g.group_key:{x.field_key:x for x in g.fields} for g in row_groups}
   calculated={k:v for k,v in regular.items() if (v.config or {}).get('calculated')}; deps={k:set() for k in calculated}
-  for key,field in calculated.items(): cls._validate_expr((field.config or {}).get('expression'),regular,groups,row_fields,None,deps[key],0,[0])
+  for key,field in calculated.items():
+   if field.field_type=='TEXT':TextExpressionEngine.validate((field.config or {}).get('text_expression'),list(regular.values()))
+   else:cls._validate_expr((field.config or {}).get('expression'),regular,groups,row_fields,None,deps[key],0,[0])
   cls._acyclic(deps,'вычисляемых полей анкеты')
   for group in row_groups:
    computed={k:v for k,v in row_fields[group.group_key].items() if (v.config or {}).get('calculated')}; graph={k:set() for k in computed}
@@ -106,8 +140,10 @@ class CalculationEngine:
      if not (field.config or {}).get('calculated'): row.setdefault(key,None)
     cls._resolve_fields(pending,row,values,group_values,row)
    group_values[group.group_key]=rows
-  pending={x.field_key:x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys}
+  pending={x.field_key:x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys and x.field_type!='TEXT'}
   cls._resolve_fields(pending,values,values,group_values,None)
+  for field in [x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys and x.field_type=='TEXT']:
+   values[field.field_key]=TextExpressionEngine.evaluate((field.config or {})['text_expression'],values)
   return values,group_values
  @classmethod
  def _resolve_fields(cls,pending,target,values,groups,row):

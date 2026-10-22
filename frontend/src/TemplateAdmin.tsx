@@ -25,6 +25,8 @@ const TYPES: any = {
   DATE: "Дата",
   BOOLEAN: "Да / нет",
   SINGLE_SELECT: "Выбор из списка",
+  LIST: "Повторяемый список",
+  COMPOSITE: "Составное значение",
 };
 const OUTPUT_FORMATS: any = {
   RAW: "Как введено",
@@ -55,6 +57,10 @@ const blank = (position = 1) => ({
   options: [],
   visible_when: null,
   required_when: null,
+  text_expression: null,
+  item_config: { min_items: 0, max_items: 20, max_length: 500 },
+  components: [],
+  separator: "; ",
 });
 export function TemplateAdmin({ api }: { api: Api }) {
   const [section, setSection] = useState<"templates" | "products">("templates");
@@ -687,6 +693,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         >
                                           Таблица
                                         </button>
+                                        <button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE_COLUMN", node.locator)}>Колонка</button>
                                         <button
                                           type="button"
                                           onClick={() =>
@@ -1100,6 +1107,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                       field_type:
                                         e.target.checked &&
                                         ![
+                                          "TEXT",
                                           "INTEGER",
                                           "DECIMAL",
                                           "MONEY",
@@ -1115,7 +1123,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 />
                                 Вычисляемое поле
                               </label>
-                              {field.calculated && (
+                              {field.calculated && field.field_type !== "TEXT" && (
                                 <FormulaEditor
                                   value={field.expression}
                                   fields={(schema?.fields || []).filter(
@@ -1126,6 +1134,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     setField({ ...field, expression })
                                   }
                                 />
+                              )}
+                              {field.calculated && field.field_type === "TEXT" && (
+                                <TextExpressionEditor value={field.text_expression} fields={(schema?.fields || []).filter((x:any)=>x.id!==editing)} change={(text_expression:any)=>setField({...field,text_expression})} />
                               )}
                               {field.calculated && (
                                 <div className="repeat-limits">
@@ -1194,6 +1205,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   />
                                 </label>
                               )}
+                              {field.field_type === "LIST" && <div className="repeat-limits"><label>Минимум элементов<input type="number" min="0" max="100" value={field.item_config?.min_items ?? 0} onChange={e=>setField({...field,item_config:{...field.item_config,min_items:Number(e.target.value)}})}/></label><label>Максимум элементов<input type="number" min="1" max="100" value={field.item_config?.max_items ?? 20} onChange={e=>setField({...field,item_config:{...field.item_config,max_items:Number(e.target.value)}})}/></label><label>Разделитель в DOCX<input value={field.separator} onChange={e=>setField({...field,separator:e.target.value})}/></label></div>}
+                              {field.field_type === "COMPOSITE" && <CompositeEditor components={field.components || []} change={(components:any)=>setField({...field,components})}/>}
                               {!field.calculated && (
                                 <label className="check">
                                   <input
@@ -1641,7 +1654,12 @@ const REGION_LABELS: any = {
   CONDITIONAL_PARAGRAPH_GROUP: "Блок соседних абзацев",
   CONDITIONAL_TABLE_ROW: "Строка таблицы",
   CONDITIONAL_TABLE: "Таблица",
+  CONDITIONAL_TABLE_COLUMN: "Колонка таблицы",
 };
+
+function CompositeEditor({components,change}:any){return <section className="repeat-field-form"><h3>Компоненты</h3>{components.map((x:any,i:number)=><div key={i}><input aria-label="Ключ компонента" placeholder="passport.series" value={x.key} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,key:e.target.value}:v))}/><input aria-label="Название компонента" placeholder="Серия паспорта" value={x.label} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,label:e.target.value}:v))}/><select value={x.type||"TEXT"} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,type:e.target.value,components:e.target.value==="COMPOSITE"?(v.components||[]):undefined}:v))}><option value="TEXT">Текст</option><option value="DATE">Дата</option><option value="INTEGER">Число</option><option value="COMPOSITE">Группа компонентов</option></select><label className="check"><input type="checkbox" checked={!!x.required} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,required:e.target.checked}:v))}/>Обязательный</label>{x.type==="COMPOSITE"&&<CompositeEditor components={x.components||[]} change={(nested:any)=>change(components.map((v:any,n:number)=>n===i?{...v,components:nested}:v))}/>}<button type="button" onClick={()=>change(components.filter((_:any,n:number)=>n!==i))}>Удалить</button></div>)}<button type="button" onClick={()=>change([...components,{key:"",label:"",type:"TEXT",required:false,validation:{}}])}>Добавить компонент</button></section>}
+
+function TextExpressionEditor({value,fields,change}:any){let expression=value||{operation:"CONCAT",parts:[{literal:""}]},conditional=expression.operation==="IF";return <section className="repeat-field-form"><h3>Текстовое значение</h3><label>Режим<select value={conditional?"IF":"CONCAT"} onChange={e=>change(e.target.value==="IF"?{operation:"IF",condition:null,then:{literal:""},else:{literal:""}}:{operation:"CONCAT",parts:[{literal:""}]})}><option value="CONCAT">Собрать из частей</option><option value="IF">Выбрать по условию</option></select></label>{conditional?<><ConditionEditor title="Условие выбора" value={expression.condition} fields={fields} change={(condition:any)=>change({...expression,condition})}/><label>Текст, если да<textarea value={expression.then?.literal||""} onChange={e=>change({...expression,then:{literal:e.target.value}})}/></label><label>Текст, если нет<textarea value={expression.else?.literal||""} onChange={e=>change({...expression,else:{literal:e.target.value}})}/></label></>:<>{(expression.parts||[]).map((part:any,i:number)=><div key={i}><select value={"literal" in part?"literal":"field"} onChange={e=>{let parts=[...expression.parts];parts[i]=e.target.value==="literal"?{literal:""}:{field_key:fields[0]?.field_key||"",format:"RAW"};change({...expression,parts})}}><option value="literal">Утверждённый текст</option><option value="field">Значение вопроса</option></select>{"literal" in part?<input value={part.literal} onChange={e=>{let parts=[...expression.parts];parts[i]={literal:e.target.value};change({...expression,parts})}}/>:<select value={part.field_key} onChange={e=>{let parts=[...expression.parts];parts[i]={...part,field_key:e.target.value};change({...expression,parts})}}>{fields.map((f:any)=><option key={f.id} value={f.field_key}>{f.label}</option>)}</select>}<button type="button" onClick={()=>change({...expression,parts:expression.parts.filter((_:any,n:number)=>n!==i)})}>Удалить</button></div>)}<button type="button" onClick={()=>change({...expression,parts:[...(expression.parts||[]),{literal:""}]})}>Добавить часть</button></>}</section>}
 function regionHasNode(region: any, node: string) {
   let loc = region.locator;
   if (

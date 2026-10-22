@@ -569,6 +569,8 @@ function Question({ field, value, error, change, required }: any) {
         <small>{error ? "Проверьте исходные значения" : "Рассчитывается автоматически"}</small>
       </output>
     );
+  if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
+  if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
   return (
     <label className={error ? "invalid" : ""}>
       <span>
@@ -616,3 +618,4 @@ function Question({ field, value, error, change, required }: any) {
     </label>
   );
 }
+function CompositeInputs({components,value,change}:any){return <>{components.map((x:any)=>x.type==="COMPOSITE"?<fieldset key={x.key}><legend>{x.label}</legend><CompositeInputs components={x.components||[]} value={value[x.key]||{}} change={(nested:any)=>change({...value,[x.key]:nested})}/></fieldset>:<label key={x.key}><span>{x.label}{x.required&&<i>Обязательно</i>}</span><input type={x.type==="DATE"?"date":x.type==="INTEGER"?"number":"text"} value={value[x.key]??""} onChange={e=>change({...value,[x.key]:e.target.value})}/></label>)}</>}

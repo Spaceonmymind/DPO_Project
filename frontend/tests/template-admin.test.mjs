@@ -125,3 +125,12 @@ test('employee uses one product questionnaire without choosing a technical DOCX'
   assert.match(productFlow,/MANUAL_REVIEW_REQUIRED/);
   assert.doesNotMatch(productFlow,/template_version_id.*select/);
 });
+
+test('R3.6.2 mechanisms are configured without JSON',()=>{
+  assert.match(component,/Повторяемый список/);
+  assert.match(component,/Составное значение/);
+  assert.match(component,/TextExpressionEditor/);
+  assert.match(component,/CONDITIONAL_TABLE_COLUMN/);
+  assert.match(catalog,/field\.field_type==="LIST"/);
+  assert.match(catalog,/field\.field_type==="COMPOSITE"/);
+});

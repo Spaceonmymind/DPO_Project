@@ -25,7 +25,7 @@ def test_percent_and_vat_models(operation,expected):
 
 def test_rounding_negative_empty_and_zero_division():
     assert CalculationEngine.quantize(Decimal('-1.235'),2,'HALF_UP') == Decimal('-1.24')
-    assert CalculationEngine.evaluate(op('ADD',{'source':'FIELD','field_key':'empty'},const(2)),{}, {}) == 2
+    assert CalculationEngine.evaluate(op('ADD',{'source':'FIELD','field_key':'empty'},const(2)),{'empty':None}, {}) == 2
     with pytest.raises(CalculationError,match='Деление на ноль'): CalculationEngine.evaluate(op('DIVIDE',const(1),const(0)),{}, {})
 
 def test_row_calculations_aggregates_changes_and_empty_group():
@@ -51,6 +51,12 @@ def test_dependencies_invalid_reference_and_cycle():
     bad=field('bad',True,{'source':'FIELD','field_key':'missing'})
     with pytest.raises(CalculationError,match='не найдено'): CalculationEngine.validate([bad],[])
 
+def test_active_calculation_rejects_inactive_source_instead_of_using_hidden_answer():
+    amount=field('amount')
+    total=field('total',True,op('ADD',{'source':'FIELD','field_key':'amount'},const(1)))
+    with pytest.raises(CalculationError,match='неактивно'):
+        CalculationEngine.calculate([amount,total],[],{'amount':'999'},{'total'},set())
+
 def test_if_reuses_condition_engine():
     expression={'operation':'IF','condition':{'operator':'GREATER_THAN','field_key':'amount','value':100},'then':const(20),'else':const(10)}
     assert CalculationEngine.evaluate(expression,{'amount':101},{})==20
@@ -63,3 +69,8 @@ def test_formatting_money_words_dates_and_multiple_formats():
     assert ValueFormatter.format('21.01','MONEY_WORDS_RUB')=='Двадцать один рубль 01 копейка'
     assert ValueFormatter.format('2026-11-05','DATE')=='05.11.2026'
     assert ValueFormatter.format('2026-11-05','DATE_WORDS')=='5 ноября 2026 года'
+    with pytest.raises(CalculationError,match='Точность'): ValueFormatter.format('1','MONEY',{'precision':99})
+
+def test_round_expression_configuration_is_bounded():
+    invalid={'operation':'ROUND','operands':[const(1)],'precision':13,'rounding':'HALF_UP'}
+    with pytest.raises(CalculationError,match='точность'): CalculationEngine.validate([field('rounded',True,invalid)],[])

@@ -4,6 +4,7 @@ import tempfile
 import hashlib
 import shutil
 import zipfile
+import pytest
 from urllib.parse import quote
 from pathlib import Path
 from docx import Document
@@ -958,23 +959,27 @@ def test_r33_inactive_group_keeps_answers_but_does_not_render_or_require_rows():
     assert restored['answers']['schedule']==hidden
 
 
-def test_r33_real_training_contract_empty_schedule_cells_are_bindable():
-    source=next((template_directory/'training').glob('*физлицо.docx')).read_bytes(); digest=hashlib.sha256(source).hexdigest()
-    manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'R33_REAL_TRAINING')
+@pytest.mark.parametrize('fixture_name',['Шаблон_тренировки_физлицо.docx','Шаблон_тренировки_ИП.docx'])
+def test_r34_real_training_contracts_calculate_schedule_cost_without_mutating_source(fixture_name):
+    source=(template_directory/'training'/fixture_name).read_bytes(); digest=hashlib.sha256(source).hexdigest()
+    manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'R34_REAL_'+('IP' if 'ИП' in fixture_name else 'PERSON'))
     version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('training.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
     assert manager.post(base+'/fields',headers=headers,json={'field_key':'comment','label':'Комментарий','field_type':'TEXT','required':False,'position':1}).status_code==201
     nodes=manager.get(base+'/preview',headers=headers).json()['nodes']; cells=[x for x in nodes if x['kind']=='table_cell' and x['metadata']['table']==2 and x['metadata']['row']==3 and x['metadata']['cell']<=7 and x['locator'].endswith('/p[1]')]
     assert len(cells)==7 and all(x['text']=='' for x in cells)
     created=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'schedule','name':'График тренировок','min_items':0,'max_items':10,'required':False,'position':1,'row_locator':cells[0]['locator']}); assert created.status_code==201,created.text; group=created.json()
     for position,(cell,key,label,kind) in enumerate(zip(cells,['date','weekday','time','quantity','price','total','place'],['Дата','День недели','Время','Количество','Цена','Стоимость','Место'],['DATE','TEXT','TEXT','INTEGER','MONEY','MONEY','TEXT']),1):
-        field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':label,'field_type':kind,'required':False,'position':position}).json()
+        payload={'field_key':key,'label':label,'field_type':kind,'required':False,'position':position}
+        if key=='total': payload.update({'calculated':True,'expression':{'operation':'MULTIPLY','operands':[{'source':'ROW_FIELD','field_key':'quantity'},{'source':'ROW_FIELD','field_key':'price'}]},'precision':2,'rounding':'HALF_UP','output_format':'MONEY'})
+        field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json=payload).json()
         bound=manager.put(base+f"/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':cell['locator'],'start':0,'end':0,'selected_text':''}); assert bound.status_code==200,bound.text
     published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
-    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':f'real-{i}','date':f'2026-11-{i:02d}','weekday':'Понедельник','time':'19:00','quantity':1,'price':'5000','total':'5000','place':f'Зал {i}'} for i in range(1,5)]
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); rows=[{'_id':f'real-{i}','date':f'2026-11-{i:02d}','weekday':'Понедельник','time':'19:00','quantity':i,'price':'5000','place':f'Зал {i}'} for i in range(1,5)]
     assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'schedule':rows}}).status_code==200
     made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers); assert made.status_code==201,made.text
     rendered=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content)); schedule=rendered.tables[1]
     assert len(schedule.rows)==18 and [schedule.rows[i].cells[6].text for i in range(2,6)]==[x['place'] for x in rows]
+    assert [schedule.rows[i].cells[5].text for i in range(2,6)]==['5 000,00','10 000,00','15 000,00','20 000,00']
     assert any('Итого за общий период' in row.cells[0].text for row in schedule.rows)
     assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==digest
 
@@ -995,10 +1000,14 @@ def test_r34_calculated_rows_total_words_and_untrusted_values():
     grand=manager.post(base+'/fields',headers=headers,json={'field_key':'grand_total','label':'Итого','field_type':'MONEY','required':False,'position':2,'calculated':True,'expression':{'operation':'SUM','group_key':'services','field_key':'row_total'},'precision':2,'rounding':'HALF_UP','output_format':'MONEY'}).json()
     for text,fmt in [('TOTAL','MONEY_WITH_CURRENCY'),('WORDS','MONEY_WORDS_RUB')]:
         node=([x for x in nodes if x['text']==text] or [x for x in nodes if text in x['text']])[0]; response=manager.post(base+'/bindings',headers=headers,json={'field_id':grand['id'],'locator':node['locator'],'start':node['text'].index(text),'end':node['text'].index(text)+len(text),'selected_text':text,'output_format':fmt,'format_options':{'precision':2}}); assert response.status_code==201,response.text
+    assert manager.patch(base+f"/bindings/{response.json()['id']}/format",headers=headers,json={'output_format':'MONEY_WORDS_RUB','format_options':{'precision':99}}).status_code==422
     published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
-    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); did=draft['id']; rows=[{'_id':'1','quantity':2,'price':'5000'},{'_id':'2','quantity':3,'price':'6000'},{'_id':'3','quantity':1,'price':'1000'}]
+    employee=TestClient(app); employee_headers=auth(employee,'petrova'); draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); did=draft['id']; rows=[{'_id':'1','quantity':2,'price':'5000'},{'_id':'2','quantity':3,'price':'5000'},{'_id':'3','quantity':1,'price':'1000'}]
     assert employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows,'grand_total':'1'}}).status_code==422
+    initial=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows}}); assert initial.status_code==200,initial.text
+    rows[1]['price']='6000'; changed=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows}}); assert changed.status_code==200,changed.text
     rows.pop(); saved=employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':{'services':rows}}); assert saved.status_code==200,saved.text
+    restored=employee.get(f'/api/v1/contract-drafts/{did}',headers=employee_headers); assert restored.status_code==200 and restored.json()['answers']['services']==rows
     made=employee.post(f'/api/v1/contract-drafts/{did}/generate',headers=employee_headers); assert made.status_code==201,made.text; rendered=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content))
     assert [rendered.tables[0].rows[i].cells[2].text for i in (1,2)]==['10 000,00','18 000,00']; assert rendered.tables[0].rows[-1].cells[2].text=='28 000,00 руб.'; assert 'Двадцать восемь тысяч рублей 00 копеек' in rendered.paragraphs[0].text
     assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==hashlib.sha256(original).hexdigest()

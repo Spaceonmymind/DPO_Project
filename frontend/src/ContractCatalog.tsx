@@ -233,9 +233,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       ),
     [catalog, query],
   );
-  const calculated = draft
+  const calculated: any = draft
     ? calculateAnswers(draft.schema, answers)
-    : { values: {}, groups: {} };
+    : { values: {}, groups: {}, errors: {} };
   const activeFields = draft
     ? draft.schema.fields.filter((f: any) => fieldState(f, answers).visible && !f.config?.calculated)
     : [];
@@ -291,7 +291,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                       ? calculated.values[f.field_key]
                       : answers[f.field_key]
                   }
-                  error={errors[f.field_key]}
+                  error={errors[f.field_key] || calculated.errors?.[f.field_key]}
                   change={(value: any) => {
                     setAnswers({ ...answers, [f.field_key]: value });
                     setErrors({ ...errors, [f.field_key]: undefined });
@@ -308,6 +308,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                 group={g}
                 items={answers[g.group_key] || []}
                 calculatedItems={calculated.groups[g.group_key] || []}
+                calculationErrors={calculated.errors || {}}
                 error={errors[g.group_key]}
                 add={() => addItem(g)}
                 remove={(i: number) =>
@@ -426,6 +427,7 @@ function RepeatingGroupForm({
   group,
   items,
   calculatedItems,
+  calculationErrors,
   error,
   add,
   remove,
@@ -481,6 +483,7 @@ function RepeatingGroupForm({
                     ? calculatedItems[index]?.[f.field_key]
                     : item[f.field_key]
                 }
+                error={calculationErrors[`${group.group_key}.${f.field_key}`]}
                 change={(v: any) => change(index, f.field_key, v)}
               />
             ))}
@@ -528,10 +531,10 @@ function Question({ field, value, error, change, required }: any) {
     };
   if (field.config?.calculated)
     return (
-      <output className="calculated-value" aria-live="polite">
+      <output className={`calculated-value ${error ? "invalid" : ""}`} aria-live="polite">
         <span>{field.label}</span>
-        <b>{value ?? 0}</b>
-        <small>Рассчитывается автоматически</small>
+        <b>{error || (value ?? 0)}</b>
+        <small>{error ? "Проверьте исходные значения" : "Рассчитывается автоматически"}</small>
       </output>
     );
   return (

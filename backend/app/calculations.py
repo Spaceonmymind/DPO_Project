@@ -76,6 +76,10 @@ class CalculationEngine:
   operands=e.get('operands',[])
   required=1 if op=='ROUND' else 2
   if not isinstance(operands,list) or len(operands)<required: raise CalculationError(f'Операции {op} не хватает аргументов')
+  if op=='ROUND':
+   precision=e.get('precision',2); rounding=e.get('rounding','HALF_UP')
+   if not isinstance(precision,int) or precision<0 or precision>12: raise CalculationError('Операция ROUND: точность должна быть от 0 до 12')
+   if rounding not in ROUNDING: raise CalculationError('Операция ROUND: неизвестный режим округления')
   if op in {'SUBTRACT','DIVIDE','PERCENT_OF','ADD_PERCENT','EXTRACT_PERCENT','REMOVE_PERCENT'} and len(operands)!=2: raise CalculationError(f'Операция {op} требует два аргумента')
   for item in operands:cls._validate_expr(item,regular,groups,row_fields,row_group,deps,depth+1,count)
  @staticmethod
@@ -90,11 +94,17 @@ class CalculationEngine:
   for node in graph:visit(node)
  @classmethod
  def calculate(cls,regular_fields,row_groups,answers,active_keys,active_groups):
-  values={k:v for k,v in answers.items() if k in active_keys}; group_values={}
+  regular={x.field_key:x for x in regular_fields}
+  # Active optional inputs are zero when empty. Hidden inputs are deliberately
+  # absent, so an active calculation cannot silently reuse a persisted value.
+  values={k:answers.get(k) for k in active_keys if k in regular and not (regular[k].config or {}).get('calculated')}; group_values={}
   for group in row_groups:
    rows=[dict(x) for x in answers.get(group.group_key,[])] if group.group_key in active_groups else []
    fields={x.field_key:x for x in group.fields}; pending={k:v for k,v in fields.items() if (v.config or {}).get('calculated')}
-   for row in rows: cls._resolve_fields(pending,row,values,group_values,row)
+   for row in rows:
+    for key,field in fields.items():
+     if not (field.config or {}).get('calculated'): row.setdefault(key,None)
+    cls._resolve_fields(pending,row,values,group_values,row)
    group_values[group.group_key]=rows
   pending={x.field_key:x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys}
   cls._resolve_fields(pending,values,values,group_values,None)
@@ -118,7 +128,9 @@ class CalculationEngine:
    if source=='ROW_CALCULATED':
     if key not in (row or {}):raise KeyError(key)
     return decimal_value(row[key])
-   if source=='FIELD':return decimal_value(values.get(key))
+   if source=='FIELD':
+    if key not in values: raise CalculationError(f'Поле-источник «{key}» неактивно')
+    return decimal_value(values.get(key))
    if key not in values:raise KeyError(key)
    return decimal_value(values[key])
   op=e['operation']
@@ -161,9 +173,16 @@ class ValueFormatter:
  @staticmethod
  def validate(name):
   if name not in FORMATS:raise CalculationError(f'Формат «{name}» не поддерживается')
+ @staticmethod
+ def validate_options(options):
+  options=options or {}
+  if set(options)-{'precision','rounding'}:raise CalculationError('Формат содержит неподдерживаемые параметры')
+  precision=options.get('precision',2);rounding=options.get('rounding','HALF_UP')
+  if not isinstance(precision,int) or precision<0 or precision>12:raise CalculationError('Точность формата должна быть от 0 до 12')
+  if rounding not in ROUNDING:raise CalculationError('Неизвестный режим округления формата')
  @classmethod
  def format(cls,value,name='RAW',options=None):
-  cls.validate(name);options=options or {}
+  cls.validate(name);options=options or {};cls.validate_options(options)
   if value in (None,''):return ''
   if name=='RAW':return str(value)
   if name in {'DATE','DATE_WORDS'}:

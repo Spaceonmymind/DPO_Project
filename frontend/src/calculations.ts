@@ -10,6 +10,8 @@ export function evaluateExpression(
   row?: any,
 ): number {
   if (e?.source === "CONSTANT") return number(e.value);
+  if ((e?.source === "FIELD" || e?.source === "CALCULATED") && !(e.field_key in values))
+    throw new Error(`Источник «${e.field_key}» недоступен`);
   if (e?.source === "FIELD" || e?.source === "CALCULATED")
     return number(values[e.field_key]);
   if (e?.source === "ROW_FIELD" || e?.source === "ROW_CALCULATED")
@@ -48,36 +50,35 @@ export function evaluateExpression(
     : 0;
 }
 export function calculateAnswers(schema: any, answers: any) {
-  let values = { ...answers },
-    groups: any = {};
+  let active = (schema?.fields || []).filter((f: any) => fieldState(f, answers).visible),
+    activeKeys = new Set(active.map((f: any) => f.field_key)),
+    values: any = Object.fromEntries(Object.entries(answers).filter(([key]) => activeKeys.has(key))),
+    groups: any = {},
+    errors: any = {};
   for (let group of schema?.repeating_groups || []) {
-    if (!evaluateCondition(group.config?.visible_when, answers)) {
+    if (!evaluateCondition(group.config?.visible_when, values)) {
       groups[group.group_key] = [];
       continue;
     }
     let rows = (answers[group.group_key] || []).map((x: any) => ({ ...x }));
     for (let row of rows) {
       let fields = group.fields.filter((f: any) => f.config?.calculated);
-      for (let pass = 0; pass <= fields.length; pass++)
-        for (let field of fields)
-          row[field.field_key] = evaluateExpression(
-            field.config.expression,
-            values,
-            groups,
-            row,
-          );
+      let pending = [...fields];
+      for (let pass = 0; pass <= fields.length && pending.length; pass++)
+        pending = pending.filter((field: any) => {
+          try { row[field.field_key] = evaluateExpression(field.config.expression, values, groups, row); return false; }
+          catch { return true; }
+        });
+      for (let field of pending) errors[`${group.group_key}.${field.field_key}`] = "Расчёт недоступен";
     }
     groups[group.group_key] = rows;
   }
-  let fields = (schema?.fields || []).filter(
-    (f: any) => f.config?.calculated && fieldState(f, answers).visible,
-  );
-  for (let pass = 0; pass <= fields.length; pass++)
-    for (let field of fields)
-      values[field.field_key] = evaluateExpression(
-        field.config.expression,
-        values,
-        groups,
-      );
-  return { values, groups };
+  let fields = active.filter((f: any) => f.config?.calculated), pending = [...fields];
+  for (let pass = 0; pass <= fields.length && pending.length; pass++)
+    pending = pending.filter((field: any) => {
+      try { values[field.field_key] = evaluateExpression(field.config.expression, values, groups); return false; }
+      catch { return true; }
+    });
+  for (let field of pending) errors[field.field_key] = "Расчёт недоступен: проверьте активные исходные поля";
+  return { values, groups, errors };
 }

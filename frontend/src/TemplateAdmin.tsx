@@ -13,6 +13,7 @@ import {
   Search,
   ArrowLeft,
 } from "lucide-react";
+import { evaluateExpression } from "./calculations";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
   TEXT: "Короткий текст",
@@ -23,6 +24,17 @@ const TYPES: any = {
   DATE: "Дата",
   BOOLEAN: "Да / нет",
   SINGLE_SELECT: "Выбор из списка",
+};
+const OUTPUT_FORMATS: any = {
+  RAW: "Как введено",
+  NUMBER: "Число",
+  DECIMAL: "Десятичное число",
+  MONEY: "Денежная сумма",
+  MONEY_WITH_CURRENCY: "Сумма с руб.",
+  MONEY_WORDS_RUB: "Сумма прописью",
+  DATE: "Дата ДД.ММ.ГГГГ",
+  DATE_WORDS: "Дата прописью",
+  PERCENT: "Процент",
 };
 const blank = (position = 1) => ({
   field_key: "",
@@ -214,6 +226,17 @@ export function TemplateAdmin({ api }: { api: Api }) {
         { method: "DELETE" },
       );
       await openVersion(version);
+    });
+  }
+  async function changeBindingFormat(binding: any, output_format: string) {
+    await run(async () => {
+      await api(`/document-templates/${selected.id}/versions/${version.id}/bindings/${binding.id}/format`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_format, format_options: binding.format_config?.options || { precision: 2, rounding: "HALF_UP" } }),
+      });
+      await openVersion(version);
+      setNotice("Формат привязки сохранён.");
     });
   }
   async function bind() {
@@ -1260,6 +1283,16 @@ export function TemplateAdmin({ api }: { api: Api }) {
                                     Вхождение {b.occurrence_index}: «
                                     {b.selected_text}»
                                   </small>
+                                  <label className="binding-format">
+                                    Формат вывода
+                                    <select
+                                      disabled={version.status !== "DRAFT" || busy}
+                                      value={b.format_config?.format || "RAW"}
+                                      onChange={(event) => changeBindingFormat(b, event.target.value)}
+                                    >
+                                      {Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}
+                                    </select>
+                                  </label>
                                 </span>
                                 {version.status === "DRAFT" && (
                                   <button
@@ -2017,11 +2050,42 @@ function FormulaEditor({ value, fields, groups, row = false, change }: any) {
           {operation === "ROUND"&&<label>Знаков после запятой<input type="number" min="0" max="12" value={value.precision??2} onChange={e=>change({...value,precision:Number(e.target.value)})}/></label>}
         </div>
       )}
-      <output className="formula-preview">
-        Тестовый результат: <b>{formulaPreview(value)}</b>
-      </output>
+      <FormulaTester expression={value} fields={available} groups={groups} row={row} />
     </fieldset>
   );
+}
+function FormulaTester({ expression, fields, groups, row }: any) {
+  const [samples, setSamples] = useState<Record<string, string>>({}),
+    [aggregateRows, setAggregateRows] = useState("100, 200");
+  const refs = new Set<string>();
+  function collect(node: any) {
+    if (!node || typeof node !== "object") return;
+    if (node.field_key && ["FIELD", "CALCULATED", "ROW_FIELD", "ROW_CALCULATED"].includes(node.source)) refs.add(node.field_key);
+    (node.operands || []).forEach(collect);
+    collect(node.then); collect(node.else);
+    if (node.condition?.field_key) refs.add(node.condition.field_key);
+  }
+  collect(expression);
+  const referenced = fields.filter((field: any) => refs.has(field.field_key));
+  let result: string | number = "—";
+  try {
+    const values: any = {}, rowValues: any = {};
+    for (const field of referenced) {
+      const value = Number(String(samples[field.field_key] ?? "100").replace(",", "."));
+      values[field.field_key] = value;
+      rowValues[field.field_key] = value;
+    }
+    const groupValues: any = {};
+    if (["SUM", "COUNT", "MIN", "MAX"].includes(expression?.operation)) {
+      groupValues[expression.group_key] = aggregateRows.split(",").map((item) => ({ [expression.field_key]: Number(item.trim().replace(",", ".")) }));
+    }
+    result = evaluateExpression(expression, values, groupValues, row ? rowValues : undefined);
+  } catch (error: any) { result = error.message || "Формула не готова"; }
+  return <details className="formula-tester"><summary>Проверить на своих значениях</summary><div>
+    {referenced.map((field: any) => <label key={field.id}>{field.label}<input type="number" step="any" value={samples[field.field_key] ?? "100"} onChange={(event) => setSamples({ ...samples, [field.field_key]: event.target.value })}/></label>)}
+    {["SUM", "COUNT", "MIN", "MAX"].includes(expression?.operation) && <label>Значения строк через запятую<input value={aggregateRows} onChange={(event) => setAggregateRows(event.target.value)}/></label>}
+    <output>Результат проверки: <b>{String(result)}</b></output>
+  </div></details>;
 }
 function FormulaOperand({ value, fields, row, change }: any) {
   let constant = value?.source === "CONSTANT";
@@ -2058,23 +2122,6 @@ function FormulaOperand({ value, fields, row, change }: any) {
       )}
     </label>
   );
-}
-function formulaPreview(e: any) {
-  let read = (x: any): number =>
-      x?.source === "CONSTANT" ? Number(x.value || 0) : 100,
-    a = (e?.operands || []).map(read);
-  if (e?.operation === "ADD") return (a[0] || 0) + (a[1] || 0);
-  if (e?.operation === "SUBTRACT") return (a[0] || 0) - (a[1] || 0);
-  if (e?.operation === "MULTIPLY") return (a[0] || 0) * (a[1] || 0);
-  if (e?.operation === "DIVIDE") return a[1] ? a[0] / a[1] : "деление на ноль";
-  if (e?.operation === "PERCENT_OF") return ((a[0] || 0) * (a[1] || 0)) / 100;
-  if (e?.operation === "ADD_PERCENT")
-    return (a[0] || 0) * (1 + (a[1] || 0) / 100);
-  if (e?.operation === "EXTRACT_PERCENT")
-    return ((a[0] || 0) * (a[1] || 0)) / (100 + (a[1] || 0));
-  if (e?.operation === "REMOVE_PERCENT")
-    return ((a[0] || 0) * 100) / (100 + (a[1] || 0));
-  return "будет рассчитан по строкам";
 }
 function Empty({ upload = false }: { upload?: boolean }) {
   return (

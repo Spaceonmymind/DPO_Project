@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 const component=readFileSync(new URL('../src/TemplateAdmin.tsx',import.meta.url),'utf8');
 const catalog=readFileSync(new URL('../src/ContractCatalog.tsx',import.meta.url),'utf8');
 const conditions=readFileSync(new URL('../src/conditions.ts',import.meta.url),'utf8');
+const calculations=readFileSync(new URL('../src/calculations.ts',import.meta.url),'utf8');
 const app=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');
 
 test('template manager exposes catalog creation and version upload',()=>{
@@ -68,6 +69,10 @@ test('calculation editor is visual and employee totals recalculate dynamically',
   assert.doesNotMatch(component,/введите JSON/i);
   assert.match(catalog,/calculateAnswers/);
   assert.match(catalog,/Рассчитывается автоматически/);
+  assert.match(component,/Проверить на своих значениях/);
+  assert.match(component,/Формат вывода/);
+  assert.match(component,/bindings\/\$\{binding\.id\}\/format/);
+  assert.match(calculations,/Расчёт недоступен/);
 });
 
 test('conditional DOCX areas use visual structural selection and the shared condition editor',()=>{

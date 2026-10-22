@@ -651,7 +651,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if p.field_id and (not field or not schema or field.schema_id!=schema.id): raise HTTPException(404,detail='Поле анкеты не найдено')
   key=field.field_key if field else p.binding_key
   if not key: raise HTTPException(422,detail='Выберите поле анкеты')
-  try: ValueFormatter.validate(p.output_format); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+  try: ValueFormatter.validate(p.output_format); ValueFormatter.validate_options(p.format_options); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
@@ -661,7 +661,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def update_binding_format(tid:str,vid:str,bid:str,p:BindingFormatPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(DocumentBinding,bid)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Привязка не найдена')
-  try: ValueFormatter.validate(p.output_format)
+  try: ValueFormatter.validate(p.output_format); ValueFormatter.validate_options(p.format_options)
   except CalculationError as exc: raise HTTPException(422,detail=str(exc))
   x.format_config={'format':p.output_format,'options':p.format_options}; s.commit(); return binding_out(x)
  @r.delete(prefix+'/{tid}/versions/{vid}/bindings/{bid}',status_code=204)

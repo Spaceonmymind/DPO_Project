@@ -4,10 +4,10 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 
-from app.contract_platform import RegionPayload, _resolve_region, safe_source
+from app.contract_platform import RegionPayload, _resolve_region, _resolve_repeating_row, adapter, safe_source, validate_repeating_groups
 from app.db import (
-    ConditionalDocumentRegion, DocumentTemplate, QuestionnaireSchema,
-    TemplateAuditEvent, TemplateVersion, User,
+    ConditionalDocumentRegion, DocumentTemplate, QuestionnaireSchema, RepeatingGroup,
+    RepeatingGroupField, TemplateAuditEvent, TemplateVersion, User,
 )
 
 
@@ -126,3 +126,48 @@ def configure_training_regions(session, actor: User) -> dict:
             result["versions"] += 1
     session.commit()
     return result
+
+
+SCHEDULE_FIELDS = (
+    ("month", "Месяц", "TEXT", True, 2, 1, False),
+    ("date", "Дата", "DATE", True, 3, 1, False),
+    ("weekday", "День недели", "TEXT", True, 3, 2, False),
+    ("time", "Время", "TEXT", True, 3, 3, False),
+    ("quantity", "Количество тренировок", "INTEGER", True, 3, 4, False),
+    ("price", "Стоимость одной тренировки", "MONEY", True, 3, 5, False),
+    ("total", "Стоимость строки", "MONEY", False, 3, 6, True),
+    ("place", "Место проведения", "TEXT", False, 3, 7, False),
+)
+
+
+def configure_training_schedules(session, actor: User) -> dict:
+    """Configure one logical schedule rendered into both approved tables."""
+    result={"groups_created":0,"groups_existing":0,"fields_created":0,"candidates_materialized":0}
+    for version in session.query(TemplateVersion).filter_by(status="DRAFT").all():
+        metadata=copy.deepcopy(version.preview_metadata or {});candidates=metadata.get("binding_candidates") or []
+        if not any(x.get("rf_id")=="RF021" for x in candidates):continue
+        group=session.query(RepeatingGroup).filter_by(template_version_id=version.id,group_key="schedule.entries").first()
+        if group is None:
+            primary=_resolve_repeating_row(safe_source(version),"word/document.xml#/tbl[2]/tr[2]/tc[1]/p[1]",version.structure_fingerprint,"word/document.xml#/tbl[2]/tr[3]/tc[1]/p[1]",2,6)
+            secondary=_resolve_repeating_row(safe_source(version),"word/document.xml#/tbl[7]/tr[2]/tc[1]/p[1]",version.structure_fingerprint,"word/document.xml#/tbl[7]/tr[3]/tc[1]/p[1]",2,3)
+            primary["targets"]=[copy.deepcopy(primary),secondary]
+            group=RepeatingGroup(template_version_id=version.id,group_key="schedule.entries",name="График тренировок",description="Добавьте тренировки в требуемом порядке",min_items=1,max_items=10,required=True,position=1,config={"visible_when":None},locator=primary,created_by_id=actor.id)
+            session.add(group);session.flush();result["groups_created"]+=1
+        else:result["groups_existing"]+=1
+        preview={x["locator"]:x for x in adapter.preview(safe_source(version))["nodes"]}
+        for position,(key,label,kind,required,row,cell,calculated) in enumerate(SCHEDULE_FIELDS,1):
+            field=session.query(RepeatingGroupField).filter_by(group_id=group.id,field_key=key).first()
+            if field is None:
+                config={"description":"","placeholder":"","validation":{},"options":[],"calculated":calculated,"expression":{"operation":"MULTIPLY","operands":[{"source":"ROW_FIELD","field_key":"quantity"},{"source":"ROW_FIELD","field_key":"price"}]} if calculated else None,"precision":2,"rounding":"HALF_UP","output_format":"MONEY" if kind=="MONEY" else "DATE" if kind=="DATE" else "RAW"}
+                field=RepeatingGroupField(group_id=group.id,field_key=key,label=label,field_type=kind,required=required,position=position,config=config);session.add(field);session.flush();result["fields_created"]+=1
+            if not field.locator:
+                node_locator=f"word/document.xml#/tbl[2]/tr[{row}]/tc[{cell}]/p[1]";node=preview[node_locator];selected=node["text"]
+                loc=adapter.get_structural_locator(safe_source(version),adapter.select_range(safe_source(version),node_locator,0,len(selected),selected));loc["selected_text"]=selected;field.locator=loc
+        now=datetime.now(timezone.utc).isoformat()
+        for candidate in candidates:
+            if candidate.get("rf_id")=="RF021" and candidate.get("status")!="CONFIGURED":
+                candidate.update({"status":"CONFIGURED","materialized_type":"REPEATING_GROUP","materialized_id":group.id,"materialization_source":"AUTO_EXACT_MULTIROW","materialized_at":now});result["candidates_materialized"]+=1
+        metadata["binding_candidates"]=candidates;metadata["r364_multirow_schedule"]={"group_id":group.id,"row_count":2,"targets":2,"configured_at":now};version.preview_metadata=metadata
+        session.flush();validate_repeating_groups(version,session)
+        session.add(TemplateAuditEvent(template_id=version.template_id,template_version_id=version.id,actor_id=actor.id,event_type="R364_MULTIROW_SCHEDULE_CONFIGURED",metadata_json={"group_id":group.id,"targets":2,"row_count":2}))
+    session.commit();return result

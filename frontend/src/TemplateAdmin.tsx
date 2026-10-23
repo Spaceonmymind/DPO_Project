@@ -87,6 +87,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     [groupDraft, setGroupDraft] = useState<any>(),
     [groupField, setGroupField] = useState<any>(),
     [blockStart, setBlockStart] = useState<string>(),
+    [repeatBlockStart, setRepeatBlockStart] = useState<string>(),
     [field, setField] = useState<any>(blank()),
     [editing, setEditing] = useState<string>(),
     [name, setName] = useState(""),
@@ -133,6 +134,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     setGroupDraft(null);
     setGroupField(null);
     setBlockStart(undefined);
+    setRepeatBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
       [p, q, links, areas, repeaters, candidates] = await Promise.all([
         api(b + "/preview"),
@@ -369,7 +371,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       setNotice("Условная область удалена.");
     });
   }
-  function draftRepeatingGroup(locator: string) {
+  function draftRepeatingGroup(locator: string, endLocator?: string) {
     setGroupDraft({
       group_key: "",
       name: "",
@@ -379,8 +381,15 @@ function TemplateBuilder({ api }: { api: Api }) {
       required: false,
       position: Math.max(0, ...repeatingGroups.map((g: any) => g.position)) + 1,
       row_locator: locator,
+      end_row_locator: endLocator,
+      row_count: 1,
+      source_repetitions: 1,
       visible_when: null,
     });
+  }
+  function chooseRepeatingBlock(locator:string) {
+    if (!repeatBlockStart) { setRepeatBlockStart(locator); setNotice("Выберите ячейку последней строки повторяемого блока."); return; }
+    draftRepeatingGroup(repeatBlockStart, locator); setRepeatBlockStart(undefined);
   }
   async function saveRepeatingGroup() {
     await run(async () => {
@@ -780,6 +789,12 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         >
                                           Сделать строку повторяемой
                                         </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => chooseRepeatingBlock(node.locator)}
+                                        >
+                                          {repeatBlockStart ? "Завершить блок строк" : "Начать блок строк"}
+                                        </button>
                                       </>
                                     )}
                                   </div>
@@ -986,6 +1001,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 Настройте строки, которые сотрудник сможет
                                 добавлять в анкету.
                               </p>
+                              <p><b>Схема блока:</b> {groupDraft.locator?.row_count || (groupDraft.end_row_locator ? "несколько соседних строк" : "1 строка")}. Одна запись анкеты создаёт одну копию всего блока.</p>
+                              {!groupDraft.id&&<label>Исходных блоков-заготовок заменить<input type="number" min="1" max="20" value={groupDraft.source_repetitions||1} onChange={e=>setGroupDraft({...groupDraft,source_repetitions:Number(e.target.value)})}/></label>}
                               <label>
                                 Название
                                 <input
@@ -1453,6 +1470,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                       )}{" "}
                                       до {g.max_items} записей
                                     </small>
+                                    <small>{g.locator?.row_count || 1} строк в одной записи</small>
                                   </span>
                                   {version.status === "DRAFT" && (
                                     <span>
@@ -1763,9 +1781,9 @@ function regionHasNode(region: any, node: string) {
   );
 }
 function repeatingHasNode(group: any, node: string) {
-  let loc = group.locator || {},
-    prefix = `${loc.part}#/tbl[${loc.table}]/tr[${loc.row}]`;
-  return node.startsWith(prefix);
+  let loc = group.locator || {}, match=node.match(/^(.*)#\/tbl\[(\d+)\]\/tr\[(\d+)\]/);
+  if(!match)return false;
+  let row=Number(match[3]);return (loc.targets||[loc]).some((target:any)=>match![1]===target.part&&Number(match![2])===target.table&&row>=target.row&&row<target.row+(target.source_row_count||target.row_count||1));
 }
 const rowFrom = (x: any) => {
   let neg = x?.operator === "NOT",

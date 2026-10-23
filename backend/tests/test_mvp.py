@@ -87,6 +87,22 @@ def repeating_contract_docx_bytes(vertical_merge=False) -> bytes:
     payload=io.BytesIO(); document.save(payload); return payload.getvalue()
 
 
+def multirow_contract_docx_bytes(block_size=2, source_repetitions=2, vertical_merge=False) -> bytes:
+    document=Document(); document.add_paragraph('Служебное поле')
+    table=document.add_table(rows=1+block_size*source_repetitions+1,cols=2); table.style='Table Grid'
+    table.rows[0].cells[0].text='График';table.rows[0].cells[1].text='Данные'
+    for repetition in range(source_repetitions):
+        start=1+repetition*block_size
+        if vertical_merge:table.rows[start].cells[0].text='MONTH';table.rows[start].cells[1].text='META'
+        else:table.rows[start].cells[0].merge(table.rows[start].cells[1]).text='MONTH'
+        table.rows[start+1].cells[0].text='DATE';table.rows[start+1].cells[1].text='PLACE'
+        for offset in range(2,block_size):table.rows[start+offset].cells[0].merge(table.rows[start+offset].cells[1]).text=f'NOTE{offset}'
+    table.rows[-1].cells[0].merge(table.rows[-1].cells[1]).text='ИТОГО'
+    if vertical_merge:
+        table.rows[1].cells[0].merge(table.rows[2].cells[0])
+    payload=io.BytesIO();document.save(payload);return payload.getvalue()
+
+
 def configure_repeating_platform(client,headers,code,vertical_merge=False,min_items=0,max_items=10,visible_when=None):
     template=create_platform_template(client,headers,code)
     raw=repeating_contract_docx_bytes(vertical_merge)
@@ -948,11 +964,35 @@ def test_r33_horizontal_gridspan_and_row_formatting_survive_cloning():
     assert len(result.rows)==5 and all(row._tr.find('.//'+qn('w:gridSpan')).get(qn('w:val'))=='2' for row in result.rows[1:4]); assert all(row.cells[0].paragraphs[0].alignment==1 for row in result.rows[1:4]); assert result.rows[-1].cells[0].text=='ИТОГО'
 
 
-def test_r33_rejects_vertical_merge_stale_locator_conflict_and_foreign_draft():
-    manager=TestClient(app); headers=auth(manager); _,_,_,response,_=configure_repeating_platform(manager,headers,'R33_VMERGE',vertical_merge=True); assert response.status_code==422 and 'вертикально' in response.text
+@pytest.mark.parametrize('block_size',[2,3])
+def test_r364_multirow_blocks_replace_all_prototypes_and_preserve_order(block_size):
+    raw=multirow_contract_docx_bytes(block_size,2);manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,f'R364_MULTI_{block_size}')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('multi.docx',raw,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}";nodes=manager.get(base+'/preview',headers=headers).json()['nodes']
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'note','label':'Примечание','field_type':'TEXT','required':False,'position':1}).status_code==201
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'show_place','label':'Показывать место','field_type':'BOOLEAN','required':False,'position':2}).status_code==201
+    start=next(x for x in nodes if x['metadata'].get('table')==1 and x['metadata'].get('row')==2 and x['metadata'].get('cell')==1);end=next(x for x in nodes if x['metadata'].get('table')==1 and x['metadata'].get('row')==1+block_size and x['metadata'].get('cell')==1)
+    group=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'schedule','name':'График','min_items':0,'max_items':10,'position':1,'row_locator':start['locator'],'end_row_locator':end['locator'],'source_repetitions':2}).json();assert group['locator']['row_count']==block_size and group['locator']['source_row_count']==block_size*2
+    for position,(key,text) in enumerate((('month','MONTH'),('date','DATE'),('place','PLACE')),1):
+        node=next(x for x in nodes if x['text']==text);field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':key,'label':key,'field_type':'TEXT','required':True,'position':position}).json();assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':node['locator'],'start':0,'end':len(text),'selected_text':text}).status_code==200
+    header=next(x for x in nodes if x['metadata'].get('row')==1 and x['metadata'].get('cell')==2);column=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'place_column','region_type':'CONDITIONAL_TABLE_COLUMN','start_locator':header['locator'],'include_when':{'operator':'EQUALS','field_key':'show_place','value':True}});assert column.status_code==201,column.text
+    published=manager.post(base+'/publish',headers=headers);assert published.status_code==200,published.text
+    employee=TestClient(app);employee_headers=auth(employee,'petrova');draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json();items=[{'_id':str(i),'month':f'M{i}','date':f'D{i}','place':f'P{i}'} for i in (3,1,2)]
+    assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'show_place':False,'schedule':items}}).status_code==200;made=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers).json();rendered=Document(io.BytesIO(employee.get(made['download_url'],headers=employee_headers).content));table=rendered.tables[0]
+    assert len(table.rows)==2+block_size*3 and len(table.rows[0].cells)==1 and [table.rows[1+i*block_size].cells[0].text for i in range(3)]==['M3','M1','M2'] and table.rows[-1].cells[0].text=='ИТОГО'
+
+
+def test_r364_vertical_merge_must_be_contained_inside_block():
+    raw=multirow_contract_docx_bytes(2,1,vertical_merge=True);manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'R364_VMERGE');version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('merge.docx',raw,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}";nodes=manager.get(base+'/preview',headers=headers).json()['nodes'];start=next(x for x in nodes if x['metadata'].get('row')==2 and x['metadata'].get('cell')==1);end=next(x for x in nodes if x['metadata'].get('row')==3 and x['metadata'].get('cell')==1)
+    accepted=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'inside','name':'Внутри','position':1,'row_locator':start['locator'],'end_row_locator':end['locator']});assert accepted.status_code==201,accepted.text
+    manager.delete(base+f"/repeating-groups/{accepted.json()['id']}",headers=headers)
+    rejected=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'crossing','name':'Пересечение','position':1,'row_locator':start['locator']});assert rejected.status_code==422 and 'пересекает конец' in rejected.text
+
+
+def test_r33_vertical_merge_stale_locator_conflict_and_foreign_draft():
+    manager=TestClient(app); headers=auth(manager); _,_,_,response,_=configure_repeating_platform(manager,headers,'R33_VMERGE',vertical_merge=True); assert response.status_code==201,response.text
     template,version,_,_,group=configure_repeating_platform(manager,headers,'R33_SAFETY'); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
     database=SessionLocal(); from app.db import RepeatingGroup
-    stored=database.query(RepeatingGroup).filter_by(id=group['id']).one(); original=stored.locator; stored.locator={**original,'row_hash':'0'*64}; database.commit(); database.close(); stale=manager.post(base+'/publish',headers=headers); assert stale.status_code==422 and 'устарела' in stale.text
+    stored=database.query(RepeatingGroup).filter_by(id=group['id']).one(); original=stored.locator; stored.locator={**original,'row_hashes':['0'*64]}; database.commit(); database.close(); stale=manager.post(base+'/publish',headers=headers); assert stale.status_code==422 and 'устарела' in stale.text
     database=SessionLocal(); stored=database.query(RepeatingGroup).filter_by(id=group['id']).one(); stored.locator=original; database.commit(); database.close()
     preview=manager.get(base+'/preview',headers=headers).json(); date_node=next(x for x in preview['nodes'] if 'DATE' in x['text']); conflict=manager.post(base+'/bindings',headers=headers,json={'binding_key':'conflict','locator':date_node['locator'],'start':0,'end':4,'selected_text':'DATE'}); assert conflict.status_code==201
     assert manager.post(base+'/publish',headers=headers).status_code==422

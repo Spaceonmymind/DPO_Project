@@ -6,9 +6,9 @@
     "PHYSICAL_PERSON": {"questionnaire_fields": 18, "bindings": 2, "conditional_regions": 7},
     "INDIVIDUAL_ENTREPRENEUR": {"questionnaire_fields": 20, "bindings": 2, "conditional_regions": 7}
   },
-  "coverage": {"CONFIGURED": 18, "REVIEW_REQUIRED": 118, "BLOCKED": 4, "GENERATED_AND_VERIFIED": 0},
-  "configured_mechanisms": {"DOCUMENT_BINDING": 4, "CONDITIONAL_PARAGRAPH_GROUP": 6, "CONDITIONAL_TABLE_COLUMN": 4, "CONDITIONAL_TABLE_ROW": 4},
+  "coverage": {"CONFIGURED": 90, "REVIEW_REQUIRED": 46, "BLOCKED": 4, "GENERATED_AND_VERIFIED": 0},
+  "configured_mechanisms": {"DOCUMENT_BINDING": 4, "CONDITIONAL_PARAGRAPH_GROUP": 6, "CONDITIONAL_TABLE_COLUMN": 4, "CONDITIONAL_TABLE_ROW": 4, "REPEATING_GROUP_MULTIROW": 72},
   "control_documents": 0,
   "complete": false,
-  "blocking_minimum": ["4 юридико-структурных BLOCKED", "RF021: двухстрочный повторяемый блок", "RF008: вложенные условия", "остальные неподтверждённые юридические и derived-операции"]
+  "blocking_minimum": ["4 юридико-структурных BLOCKED", "RF008: вложенные условия", "остальные неподтверждённые юридические и derived-операции"]
 }

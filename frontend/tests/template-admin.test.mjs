@@ -98,6 +98,14 @@ test('specialist can configure a repeating DOCX row without technical locators',
   assert.doesNotMatch(component,/OOXML path|XPath/);
 });
 
+test('specialist can select a multi-row repeating block and inspect its schema',()=>{
+  assert.match(component,/Начать блок строк/);
+  assert.match(component,/Завершить блок строк/);
+  assert.match(component,/Исходных блоков-заготовок заменить/);
+  assert.match(component,/строк в одной записи/);
+  assert.doesNotMatch(component,/w:tr|tblGrid/);
+});
+
 test('employee repeating group supports stable records, ordering and autosave',()=>{
   assert.match(catalog,/randomUUID/);
   assert.match(catalog,/Добавить запись/);

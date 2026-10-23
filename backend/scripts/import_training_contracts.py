@@ -5,7 +5,7 @@ from pathlib import Path
 from app.db import SessionLocal, User, settings
 from app.training_contract_import import apply_plan, build_plan
 from app.training_resolver_import import configure_training_resolver, execute_training_fixtures
-from app.training_structural_config import configure_training_regions
+from app.training_structural_config import configure_training_regions, configure_training_schedules
 
 parser = argparse.ArgumentParser(description="Безопасный R3.6.1 import черновика")
 parser.add_argument("--apply", action="store_true", help="создать только безопасную черновую часть")
@@ -24,5 +24,6 @@ if args.apply:
         result["resolver"] = configure_training_resolver(db, owner, Path(settings.contract_templates_path) / "training")
         result["resolver_execution"] = execute_training_fixtures(db, owner)
         result["structural_configuration"] = configure_training_regions(db, owner)
+        result["schedule_configuration"] = configure_training_schedules(db, owner)
     finally: db.close()
 print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

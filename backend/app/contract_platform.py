@@ -135,7 +135,7 @@ class RegionPayload(BaseModel):
 class RegionUpdatePayload(BaseModel):
  region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]
 class RepeatingGroupPayload(BaseModel):
- group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; visible_when:dict[str,Any]|None=None
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; end_row_locator:str|None=None; row_count:int=Field(default=1,ge=1,le=20); source_repetitions:int=Field(default=1,ge=1,le=20); visible_when:dict[str,Any]|None=None
 class RepeatingGroupUpdatePayload(BaseModel):
  group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None
 class RepeatingFieldPayload(BaseModel):
@@ -474,23 +474,67 @@ def _regions_overlap(a,b):
     if a.region_type==b.region_type=='CONDITIONAL_RUN': return la['text_start']<lb['text_end'] and la['text_end']>lb['text_start']
     return True
  return False
-def _resolve_repeating_row(path,row_locator,structure_fingerprint):
+def _row_layout(row,grid_count):
+ cells=[];cursor=1
+ for physical,cell in enumerate(row.findall('./w:tc',NS),1):
+  span=_span(cell)
+  if span<1 or cursor+span-1>grid_count:raise ValueError('Строка не согласована с tblGrid')
+  if cell.find('./w:tcPr/w:hMerge',NS) is not None:raise ValueError('Устаревшее hMerge внутри повторяемого блока не поддерживается; используйте gridSpan')
+  merge=cell.find('./w:tcPr/w:vMerge',NS);merge_value=merge.get(f'{{{WORD_NS}}}val','continue') if merge is not None else None
+  cells.append({'cell':cell,'physical':physical,'start':cursor,'span':span,'vmerge':merge_value});cursor+=span
+ if cursor-1!=grid_count:raise ValueError('Строка не покрывает полный tblGrid')
+ return cells
+def _validate_block_merges(rows,table_rows,start_index,grid_count):
+ layouts=[_row_layout(row,grid_count) for row in rows]
+ def coverage(layout,column):return next((x for x in layout if x['start']<=column<x['start']+x['span']),None)
+ active=set()
+ for row_index,layout in enumerate(layouts):
+  for column in range(1,grid_count+1):
+   item=coverage(layout,column);state=item['vmerge']
+   if state=='restart':active.add(column)
+   elif state=='continue':
+    if column not in active:raise ValueError('Вертикальное объединение пересекает начало повторяемого блока')
+   else:active.discard(column)
+ if start_index+len(rows)<len(table_rows):
+  following=_row_layout(table_rows[start_index+len(rows)],grid_count)
+  for column in active:
+   if coverage(following,column)['vmerge']=='continue':raise ValueError('Вертикальное объединение пересекает конец повторяемого блока')
+ return layouts
+def _resolve_repeating_row(path,row_locator,structure_fingerprint,end_row_locator=None,row_count=1,source_repetitions=1):
  preview=adapter.preview(path); node=next((x for x in preview['nodes'] if x['locator']==row_locator),None)
  parsed=_table_parts(row_locator)
  if not node or not parsed: raise ValueError('Выберите ячейку строки таблицы')
  part,table_no,row_no,_,_=parsed; root=_part_root(path,part); body=_body(root)
- try: row=body.findall('./w:tbl',NS)[table_no-1].findall('./w:tr',NS)[row_no-1]
+ if end_row_locator:
+  end=_table_parts(end_row_locator)
+  if not end or end[0]!=part or end[1]!=table_no:raise ValueError('Блок должен состоять из строк одной таблицы')
+  if end[2]<row_no:raise ValueError('Конец повторяемого блока должен находиться после начала')
+  row_count=end[2]-row_no+1
+ if not 1<=row_count<=20 or not 1<=source_repetitions<=20:raise ValueError('Размер блока и число заготовок должны быть от 1 до 20')
+ try:
+  table=body.findall('./w:tbl',NS)[table_no-1];table_rows=table.findall('./w:tr',NS);source_count=row_count*source_repetitions;source_rows=table_rows[row_no-1:row_no-1+source_count];rows=source_rows[:row_count]
  except IndexError: raise ValueError('Строка-образец не найдена')
- if row.find('.//w:vMerge',NS) is not None: raise ValueError('Строки с вертикально объединёнными ячейками пока нельзя повторять')
- bad=_unsafe(row)
- if bad: raise ValueError(f'Строка содержит неподдерживаемую структуру Word ({bad})')
- cells=row.findall('./w:tc',NS)
- if not cells: raise ValueError('Строка-образец не содержит ячеек')
- return {'locator_version':3,'structure_fingerprint':structure_fingerprint,'part':part,'table':table_no,'row':row_no,'row_node':f'{part}#/tbl[{table_no}]/tr[{row_no}]','row_hash':_element_hash(row),'cell_count':len(cells),'has_grid_span':row.find('.//w:gridSpan',NS) is not None,'prototype_text':' | '.join(_paragraph_text(x) for x in cells)}
-def _group_row(root,loc): return _body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1]
+ if len(source_rows)!=source_count:raise ValueError('Граница исходных блоков-заготовок выходит за таблицу')
+ grid=table.find('./w:tblGrid',NS);grid_count=len(grid.findall('./w:gridCol',NS)) if grid is not None else 0
+ if not grid_count:raise ValueError('В таблице отсутствует корректный tblGrid')
+ layouts=_validate_block_merges(rows,table_rows,row_no-1,grid_count)
+ for offset in range(0,source_count,row_count):_validate_block_merges(source_rows[offset:offset+row_count],table_rows,row_no-1+offset,grid_count)
+ for row in source_rows:
+  bad=_unsafe(row)
+  if bad:raise ValueError(f'Строка содержит неподдерживаемую структуру Word ({bad})')
+ return {'locator_version':4,'structure_fingerprint':structure_fingerprint,'part':part,'table':table_no,'row':row_no,'row_count':row_count,'source_repetitions':source_repetitions,'source_row_count':source_count,'row_nodes':[f'{part}#/tbl[{table_no}]/tr[{i}]' for i in range(row_no,row_no+row_count)],'row_hashes':[_element_hash(x) for x in rows],'source_row_hashes':[_element_hash(x) for x in source_rows],'row_node':f'{part}#/tbl[{table_no}]/tr[{row_no}]','row_hash':_element_hash(rows[0]),'cell_counts':[len(x) for x in layouts],'grid_count':grid_count,'has_grid_span':any(row.find('.//w:gridSpan',NS) is not None for row in rows),'has_vertical_merge':any(row.find('.//w:vMerge',NS) is not None for row in rows),'prototype_text':' || '.join(' | '.join(_paragraph_text(x['cell']) for x in layout) for layout in layouts)}
+def _group_rows(root,loc):
+ rows=_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS);count=int(loc.get('row_count',1));return rows[loc['row']-1:loc['row']-1+count]
+def _group_source_rows(root,loc):
+ rows=_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS);count=int(loc.get('source_row_count',loc.get('row_count',1)));return rows[loc['row']-1:loc['row']-1+count]
+def _group_targets(loc):return loc.get('targets') or [loc]
+def _group_row(root,loc): return _group_rows(root,loc)[0]
 def _field_in_group_row(locator,group):
  parsed=_table_parts(locator)
- return bool(parsed and parsed[0]==group.locator['part'] and parsed[1]==group.locator['table'] and parsed[2]==group.locator['row'])
+ return bool(parsed and any(parsed[0]==target['part'] and parsed[1]==target['table'] and target['row']<=parsed[2]<target['row']+int(target.get('row_count',1)) for target in _group_targets(group.locator)))
+def _field_in_primary_group_row(locator,group):
+ parsed=_table_parts(locator);loc=group.locator
+ return bool(parsed and parsed[0]==loc['part'] and parsed[1]==loc['table'] and loc['row']<=parsed[2]<loc['row']+int(loc.get('row_count',1)))
 def validate_repeating_groups(v,s,bindings=None,regions=None):
  schema=schema_for(v.id,s); questionnaire=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').order_by(RepeatingGroup.position).all(); occupied=set()
@@ -502,18 +546,27 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
    except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Группа «{group.name}»: {exc}')
   loc=group.locator or {}
   if loc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» устарела')
-  try: root=_part_root(safe_source(v),loc['part']); row=_group_row(root,loc)
-  except (KeyError,IndexError): raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» не найдена')
-  if _element_hash(row)!=loc.get('row_hash'): raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» устарела')
-  key=(loc['part'],loc['table'],loc['row'])
-  if key in occupied: raise HTTPException(422,detail='Несколько повторяемых групп используют одну строку-образец')
-  occupied.add(key)
+  for target in _group_targets(loc):
+   try: root=_part_root(safe_source(v),target['part']); rows=_group_rows(root,target);source_rows=_group_source_rows(root,target)
+   except (KeyError,IndexError): raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» не найдена')
+   count=int(target.get('row_count',1));hashes=target.get('row_hashes') or [target.get('row_hash')]
+   source_count=int(target.get('source_row_count',count));source_hashes=target.get('source_row_hashes') or hashes
+   if len(rows)!=count or [_element_hash(row) for row in rows]!=hashes or len(source_rows)!=source_count or [_element_hash(row) for row in source_rows]!=source_hashes: raise HTTPException(422,detail=f'Строка-образец группы «{group.name}» устарела')
+   try:
+    table=_body(root).findall('./w:tbl',NS)[target['table']-1];grid=table.find('./w:tblGrid',NS);grid_count=len(grid.findall('./w:gridCol',NS)) if grid is not None else 0
+    if not grid_count:raise ValueError('В таблице отсутствует корректный tblGrid')
+    _validate_block_merges(rows,table.findall('./w:tr',NS),target['row']-1,grid_count)
+   except ValueError as exc:raise HTTPException(422,detail=f'Группа «{group.name}»: {exc}')
+   keys={(target['part'],target['table'],row) for row in range(target['row'],target['row']+source_count)}
+   if occupied & keys: raise HTTPException(422,detail='Повторяемые группы пересекаются по строкам')
+   occupied|=keys
+  root=_part_root(safe_source(v),loc['part'])
   fields=s.query(RepeatingGroupField).filter_by(group_id=group.id).order_by(RepeatingGroupField.position).all()
   if not fields: raise HTTPException(422,detail=f'Добавьте поля в группу «{group.name}»')
   for field in fields:
    if not field.locator: raise HTTPException(422,detail=f'Свяжите поле «{field.label}» с текстом в строке-образце')
    floc=field.locator
-   if not _field_in_group_row(floc.get('node',''),group) or floc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
+   if not _field_in_primary_group_row(floc.get('node',''),group) or floc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
    try: p=paragraph_for(root,floc['node']); text=_paragraph_text(p)
    except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Привязка поля «{field.label}» не найдена')
    if text[floc['text_start']:floc['text_end']]!=floc.get('selected_text'): raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
@@ -524,8 +577,10 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
   for binding in bindings or []:
    if _field_in_group_row(binding.locator.get('node',''),group): raise HTTPException(422,detail=f'Обычная привязка пересекает строку-образец группы «{group.name}»')
   for region in regions or []:
-   fake=type('RowRegion',(),{'region_type':'CONDITIONAL_TABLE_ROW','locator':loc})()
-   if _regions_overlap(fake,region): raise HTTPException(422,detail=f'Условная область пересекает строку-образец группы «{group.name}»')
+   for target in _group_targets(loc):
+    for row_number in range(target['row'],target['row']+int(target.get('source_row_count',target.get('row_count',1)))):
+     fake=type('RowRegion',(),{'region_type':'CONDITIONAL_TABLE_ROW','locator':{**target,'row':row_number}})()
+     if _regions_overlap(fake,region): raise HTTPException(422,detail=f'Условная область пересекает строку-образец группы «{group.name}»')
  return groups
 def paragraph_for(root,locator):
  path=locator.split('#/',1)[1]; body=root.find('w:body',NS) if root.tag.endswith('document') else root
@@ -563,46 +618,51 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
  grouped={}
  for b in bindings: grouped.setdefault(b.locator['part'],{'bindings':[],'regions':[]})['bindings'].append(b)
  for r in excluded: grouped.setdefault(r.locator['part'],{'bindings':[],'regions':[]})['regions'].append(r)
- for g in repeating_groups: grouped.setdefault(g.locator['part'],{'bindings':[],'regions':[],'groups':[]}).setdefault('groups',[]).append(g)
+ for g in repeating_groups:
+  for part in {target['part'] for target in _group_targets(g.locator)}:grouped.setdefault(part,{'bindings':[],'regions':[],'groups':[]}).setdefault('groups',[]).append(g)
  with zipfile.ZipFile(safe_source(v),'r') as src,zipfile.ZipFile(target,'w') as dst:
   for info in src.infolist():
    raw=src.read(info.filename)
    if info.filename in grouped:
-    root=ET.fromstring(raw); by_node={}; jobs=[]
-    for group in grouped[info.filename].get('groups',[]): jobs.append((group,_group_row(root,group.locator)))
+    root=ET.fromstring(raw); by_node={}; jobs=[];structural_removals=[];column_removals=[]
+    for group in grouped[info.filename].get('groups',[]):
+     for target_loc in (x for x in _group_targets(group.locator) if x['part']==info.filename):jobs.append((group,target_loc,_group_rows(root,target_loc),_group_source_rows(root,target_loc)))
+    # Resolve structural targets before row insertion changes table indices.
+    for region in grouped[info.filename]['regions']:
+     loc=region.locator
+     if region.region_type=='CONDITIONAL_RUN':continue
+     if region.region_type in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}:structural_removals.extend(paragraph_for(root,x) for x in loc['nodes'])
+     elif region.region_type=='CONDITIONAL_TABLE_ROW':structural_removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1])
+     elif region.region_type=='CONDITIONAL_TABLE_COLUMN':column_removals.append((_body(root).findall('./w:tbl',NS)[loc['table']-1],loc['column']))
+     else:structural_removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1])
     for b in grouped[info.filename]['bindings']: by_node.setdefault(b.locator['node'],[]).append((b.locator['text_start'],b.locator['text_end'],values[b.id] if b.id in values else values[b.binding_key]))
     for region in grouped[info.filename]['regions']:
      if region.region_type=='CONDITIONAL_RUN': by_node.setdefault(region.locator['node'],[]).append((region.locator['text_start'],region.locator['text_end'],''))
     for locator,items in by_node.items():
      p=paragraph_for(root,locator)
      for start,end,value in sorted(items,key=lambda x:x[0],reverse=True): replace_range(p,start,end,value)
-    for group,row in jobs:
-     table=_parent_of(root,row)
+    for group,target_loc,rows,source_rows in jobs:
+     if not rows:raise ValueError(f'Блок-образец группы «{group.name}» недоступен')
+     table=_parent_of(root,rows[0])
      if table is None: raise ValueError(f'Строка-образец группы «{group.name}» недоступна')
-     insert_at=list(table).index(row); items=repeating_values.get(group.group_key,[]); fields=repeating_fields.get(group.id,[])
-     for offset,item in enumerate(items):
-      clone=copy.deepcopy(row); actions={}
+     if any(_parent_of(root,row) is not table for row in rows):raise ValueError(f'Строки группы «{group.name}» находятся в разных таблицах')
+     insert_at=list(table).index(rows[0]);items=repeating_values.get(group.group_key,[]);fields=repeating_fields.get(group.id,[]);block_size=len(rows)
+     for item_index,item in enumerate(items):
+      clones=[copy.deepcopy(row) for row in rows];actions={}
       for field in fields:
        loc=field.locator; parsed=_table_parts(loc['node'])
        if not parsed: raise ValueError(f'Привязка поля «{field.label}» повреждена')
-       _,_,_,cell_no,paragraph_no=parsed
-       try: paragraph=clone.findall('./w:tc',NS)[cell_no-1].findall('./w:p',NS)[paragraph_no-1]
+       _,_,source_row,cell_no,paragraph_no=parsed;row_offset=source_row-group.locator['row']
+       try: paragraph=clones[row_offset].findall('./w:tc',NS)[cell_no-1].findall('./w:p',NS)[paragraph_no-1]
        except IndexError: raise ValueError(f'Привязка поля «{field.label}» устарела')
        cfg=field.config or {}; formatted=render_value(field,item.get(field.field_key,'')) if field.field_type=='BOOLEAN' and cfg.get('output_format','RAW')=='RAW' else ValueFormatter.format(item.get(field.field_key,''),cfg.get('output_format','RAW'),{'precision':cfg.get('precision',2),'rounding':cfg.get('rounding','HALF_UP')})
        actions.setdefault(paragraph,[]).append((loc['text_start'],loc['text_end'],formatted))
       for paragraph,ranges in actions.items():
        for start,end,value in sorted(ranges,key=lambda x:x[0],reverse=True): replace_range(paragraph,start,end,value)
-      table.insert(insert_at+offset,clone)
-     table.remove(row)
-    removals=[]
-    for region in grouped[info.filename]['regions']:
-     loc=region.locator
-     if region.region_type=='CONDITIONAL_RUN': continue
-     elif region.region_type in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: removals.extend(paragraph_for(root,x) for x in loc['nodes'])
-     elif region.region_type=='CONDITIONAL_TABLE_ROW': removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1])
-     elif region.region_type=='CONDITIONAL_TABLE_COLUMN': _remove_table_column(_body(root).findall('./w:tbl',NS)[loc['table']-1],loc['column'])
-     else: removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1])
-    for node in removals:
+      for row_offset,clone in enumerate(clones):table.insert(insert_at+item_index*block_size+row_offset,clone)
+     for row in source_rows:table.remove(row)
+    for table,column in column_removals:_remove_table_column(table,column)
+    for node in structural_removals:
      parent=_parent_of(root,node)
      if parent is None: raise ValueError('Не удалось безопасно удалить OOXML-область')
      parent.remove(node)
@@ -910,7 +970,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
   try:
    if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
-   locator=_resolve_repeating_row(safe_source(v),p.row_locator,v.structure_fingerprint)
+   locator=_resolve_repeating_row(safe_source(v),p.row_locator,v.structure_fingerprint,p.end_row_locator,p.row_count,p.source_repetitions)
   except (ConditionConfigurationError,ValueError) as exc: raise HTTPException(422,detail=str(exc))
   x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
  @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}')
@@ -966,7 +1026,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not group or group.template_version_id!=v.id or not field or field.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
   try: loc=adapter.get_structural_locator(safe_source(v),adapter.select_range(safe_source(v),p.locator,p.start,p.end,p.selected_text))
   except ValueError as exc: raise HTTPException(422,detail=str(exc))
-  if not _field_in_group_row(loc['node'],group): raise HTTPException(422,detail='Выделение должно находиться в строке-образце этой группы')
+  if not _field_in_primary_group_row(loc['node'],group): raise HTTPException(422,detail='Выделение должно находиться в основном блоке-образце этой группы')
   loc['selected_text']=p.selected_text
   for other in s.query(RepeatingGroupField).filter(RepeatingGroupField.group_id==gid,RepeatingGroupField.id!=fid):
    old=other.locator or {}

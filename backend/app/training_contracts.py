@@ -205,7 +205,7 @@ def extract_training_facts(text: str, current: dict | None=None) -> dict:
         if any(word in t for word in words): put('labor.'+field,True)
         elif any(x in t for x in ('без признаков трудовых','гпх, трудовых признаков нет')): put('labor.'+field,False)
     patterns={
-      'price.total':r'(?:стоимость|цена)\s*(?:(?:договора|услуг)\s*)?[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
+      'price.total':r'(?:стоимость|цена)\s*(?:(?:договора|услуг)\s*)?[:—-]?\s*(\d[\d ]*(?:[,.]\d+)?)',
       'tax.ndfl_rate':r'ндфл\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'tax.ndfl_amount':r'(?:сумма ндфл|ндфл составляет)\s*[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
       'tax.vat_rate':r'ндс\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'tax.vat_amount':r'(?:сумма ндс|ндс составляет)\s*[:—-]?\s*([\d ]+(?:[,.]\d+)?)',
       'payment.advance_percent':r'аванс\s*[:—-]?\s*(\d+(?:[,.]\d+)?)\s*%', 'payment.advance_days':r'аванс[^.]{0,50}?(\d+)\s*(?:календарн\w*\s*)?дн',

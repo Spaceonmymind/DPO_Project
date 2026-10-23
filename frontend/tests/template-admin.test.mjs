@@ -148,3 +148,11 @@ test('R3.6.3 finalization exposes readiness filters materialization and rollback
   assert.match(component,/batch-materialize/);
   assert.match(component,/selectedCandidates/);
 });
+
+test('R3.6.3 completion exposes resolver fixtures and grouped legal review',()=>{
+  assert.match(productAdmin,/run-fixtures/);
+  assert.match(productAdmin,/Выполнить 120 сценариев матрицы/);
+  assert.match(productAdmin,/PASS:/);
+  assert.match(component,/Действие специалиста:/);
+  assert.match(component,/Выбрать подтверждённую группу/);
+});

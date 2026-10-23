@@ -82,7 +82,7 @@ def apply_plan(plan: dict, owner, session=None) -> dict:
             if template_version:
                 metadata=dict(template_version.preview_metadata or {});existing={x.get("candidate_id"):x for x in metadata.get("binding_candidates",[])}
                 for candidate in (x for x in plan["candidates"] if x["variant"]==variant):
-                    previous=existing.get(candidate["candidate_id"],{});preserved={key:value for key,value in previous.items() if key in {"review_decision","materialized_id","materialized_type","materialization_source","materialized_at"}}
+                    previous=existing.get(candidate["candidate_id"],{});preserved={key:value for key,value in previous.items() if key in {"status","review_decision","materialized_id","materialized_type","materialization_source","materialized_at","review_group","review_reason","required_specialist_action"}}
                     existing[candidate["candidate_id"]]={**candidate,**preserved}
                     if preserved.get("materialized_id"):existing[candidate["candidate_id"]]["status"]="CONFIGURED"
                 metadata["binding_candidates"]=list(existing.values());metadata["r363_import_signature"]=plan["signature"];template_version.preview_metadata=metadata;candidate_counts[variant]=len(existing)

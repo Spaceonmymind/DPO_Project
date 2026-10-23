@@ -54,10 +54,18 @@ class ContractVariantResolver:
   try:
    ConditionEngine.validate_schema(fields)
    rules=v.rules or {}
-   conditions=[rules.get('applicable_when')]+[x.get('condition') for x in rules.get('blocking_rules',[])]+[x.get('condition') for x in rules.get('manual_review_rules',[])]+[x.selection_condition for x in variants]
+   conditions=[x.get('condition') for x in rules.get('decision_rules',[])]+[rules.get('applicable_when')]+[x.get('condition') for x in rules.get('blocking_rules',[])]+[x.get('condition') for x in rules.get('manual_review_rules',[])]+[x.selection_condition for x in variants]
    for condition in conditions:
     if condition: ConditionEngine.validate_condition(condition,fields)
   except (ConditionConfigurationError,KeyError,TypeError) as exc: return {'state':'CONFIGURATION_ERROR','reason':'Конфигурация правил повреждена','details':[str(exc)]}
+  for rule in sorted(rules.get('decision_rules',[]),key=lambda item:item.get('priority',9999)):
+   referenced=refs(rule['condition']);missing=sorted(k for k in referenced if k not in answers)
+   if missing:return {'state':'NEED_MORE_INFORMATION','reason':'Нужны дополнительные сведения для применения правил','missing_fields':missing,'rule_id':rule.get('rule_id')}
+   if ConditionEngine.evaluate(rule['condition'],answers):
+    if rule.get('state')!='SELECTED':return {'state':rule.get('state','NOT_APPLICABLE'),'reason':rule.get('message','Договорный продукт неприменим'),'reason_code':rule.get('reason_code'),'rule_id':rule.get('rule_id')}
+    matched=next((item for item in variants if item.status=='ACTIVE' and item.code==rule.get('variant_code')),None)
+    if not matched:return {'state':'CONFIGURATION_ERROR','reason':'Вариант из правила не настроен','rule_id':rule.get('rule_id')}
+    return {'state':'SELECTED','reason':rule.get('message',f'Выбран вариант «{matched.name}»'),'reason_code':rule.get('reason_code'),'rule_id':rule.get('rule_id'),'variant_id':matched.id,'template_version_id':matched.template_version_id}
   required=set()
   for condition in conditions: required|=refs(condition)
   missing=sorted(k for k in required if k not in answers or answers.get(k) in (None,''))
@@ -144,7 +152,7 @@ def build_contract_product_router(current_dependency):
  def rules(pid:str,vid:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   manager(u); _,v=version_owned(pid,vid,u,s); draft_version(v); fields=s.query(ContractProductField).filter_by(product_version_id=v.id).all()
   try:
-   for condition in [payload.get('applicable_when')]+[x.get('condition') for x in payload.get('blocking_rules',[])]+[x.get('condition') for x in payload.get('manual_review_rules',[])]:
+   for condition in [x.get('condition') for x in payload.get('decision_rules',[])]+[payload.get('applicable_when')]+[x.get('condition') for x in payload.get('blocking_rules',[])]+[x.get('condition') for x in payload.get('manual_review_rules',[])]:
     if condition:ConditionEngine.validate_condition(condition,fields)
   except ConditionConfigurationError as exc:raise HTTPException(422,detail=str(exc))
   v.rules=payload;s.add(ContractProductAuditEvent(product_id=v.product_id,product_version_id=v.id,actor_id=u.id,event_type='PRODUCT_RULES_UPDATED'));s.commit(); return version_out(v,s)
@@ -171,7 +179,7 @@ def build_contract_product_router(current_dependency):
  def add_variant(pid:str,vid:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   manager(u); _,v=version_owned(pid,vid,u,s); draft_version(v); tv=s.get(TemplateVersion,payload.get('template_version_id'))
   template=s.get(DocumentTemplate,tv.template_id) if tv else None
-  if not tv or tv.status!='PUBLISHED' or not template or (template.owner_id!=u.id and 'administrator' not in roles(u)):raise HTTPException(422,detail='Вариант должен ссылаться на доступную опубликованную версию DOCX')
+  if not tv or tv.status not in {'DRAFT','PUBLISHED'} or not template or (template.owner_id!=u.id and 'administrator' not in roles(u)):raise HTTPException(422,detail='Вариант должен ссылаться на доступную версию DOCX')
   fields=s.query(ContractProductField).filter_by(product_version_id=v.id).all()
   try:ConditionEngine.validate_condition(payload.get('condition'),fields)
   except ConditionConfigurationError as exc:raise HTTPException(422,detail=str(exc))
@@ -211,6 +219,15 @@ def build_contract_product_router(current_dependency):
  @r.post(prefix+'/{pid}/versions/{vid}/resolve')
  def preview(pid:str,vid:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   _,v=version_owned(pid,vid,u,s); return resolve(v,s,payload.get('answers') or {})
+ @r.post(prefix+'/{pid}/versions/{vid}/run-fixtures')
+ def run_fixtures(pid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  manager(u);p,v=version_owned(pid,vid,u,s);scenarios=(v.rules or {}).get('test_scenarios',[]);results=[]
+  for scenario in scenarios:
+   actual=resolve(v,s,scenario.get('answers',{}));variant=s.get(ContractProductVariant,actual.get('variant_id')) if actual.get('variant_id') else None
+   passed=actual.get('state')==scenario.get('expected_state') and actual.get('rule_id')==scenario.get('expected_rule_id') and (scenario.get('expected_variant') in {None,'NONE'} or (variant and variant.code==scenario.get('expected_variant')))
+   results.append({'name':scenario.get('name'),'expected_state':scenario.get('expected_state'),'actual_state':actual.get('state'),'expected_rule_id':scenario.get('expected_rule_id'),'actual_rule_id':actual.get('rule_id'),'expected_variant':scenario.get('expected_variant'),'actual_variant':variant.code if variant else 'NONE','status':'PASS' if passed else 'FAIL','reason':actual.get('reason')})
+  rules=dict(v.rules or {});rules['resolver_results']=results;v.rules=rules;s.add(ContractProductAuditEvent(product_id=p.id,product_version_id=v.id,actor_id=u.id,event_type='PRODUCT_FIXTURES_EXECUTED',metadata_json={'pass':sum(x['status']=='PASS' for x in results),'fail':sum(x['status']=='FAIL' for x in results)}));s.commit()
+  return {'total':len(results),'pass':sum(x['status']=='PASS' for x in results),'fail':sum(x['status']=='FAIL' for x in results),'results':results}
  @r.post(prefix+'/{pid}/versions/{vid}/publish')
  def publish(pid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   manager(u); publisher(u); p,v=version_owned(pid,vid,u,s); draft_version(v); fields=s.query(ContractProductField).filter_by(product_version_id=v.id).all(); variants=s.query(ContractProductVariant).filter_by(product_version_id=v.id,status='ACTIVE').all()

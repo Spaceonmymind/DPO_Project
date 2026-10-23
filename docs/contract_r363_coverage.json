@@ -1,16 +1,14 @@
 {
-  "baseline": "ac61458d76aca904c420486331ec4b5f7397831c",
-  "source": {"facts": 40, "rules": 19, "rf_fields": 25, "matrix_occurrences": 74, "physical_occurrences": 140, "prompt_fixtures": 120},
-  "candidate_discovery": {"CANDIDATE_FOUND": 42, "REVIEW_REQUIRED": 78, "NOT_FOUND": 20},
-  "operations": {"DELETE": 4, "DERIVED": 15, "INCLUDE": 1, "INCLUDE_EXCLUDE": 18, "REPEAT": 72, "REPLACE": 22, "REPLACE_OR_DELETE": 2, "SELECT_BLOCK": 6},
-  "rf_status": {
-    "RF001": "BLOCKED", "RF002": "BLOCKED", "RF003": "BLOCKED", "RF004": "BLOCKED", "RF005": "BLOCKED",
-    "RF006": "BLOCKED", "RF007": "BLOCKED", "RF008": "BLOCKED", "RF009": "BLOCKED", "RF010": "BLOCKED",
-    "RF011": "BLOCKED", "RF012": "BLOCKED", "RF013": "BLOCKED", "RF014": "BLOCKED", "RF015": "BLOCKED",
-    "RF016": "BLOCKED", "RF017": "BLOCKED", "RF018": "BLOCKED", "RF019": "BLOCKED", "RF020": "BLOCKED",
-    "RF021": "BLOCKED", "RF022": "BLOCKED", "RF023": "BLOCKED", "RF024": "BLOCKED", "RF025": "BLOCKED"
+  "baseline": "ef19bcd56919adc6df97c6f9736adb4144e1b44f",
+  "resolver": {"variants": 2, "decision_rules": 16, "fixtures": 120, "pass": 120, "fail": 0, "blocked": 0, "published": false},
+  "source": {"rf_fields": 25, "physical_occurrences": 140},
+  "templates": {
+    "PHYSICAL_PERSON": {"questionnaire_fields": 18, "bindings": 2, "conditional_regions": 7},
+    "INDIVIDUAL_ENTREPRENEUR": {"questionnaire_fields": 20, "bindings": 2, "conditional_regions": 7}
   },
-  "generated_control_documents": 0,
+  "coverage": {"CONFIGURED": 18, "REVIEW_REQUIRED": 118, "BLOCKED": 4, "GENERATED_AND_VERIFIED": 0},
+  "configured_mechanisms": {"DOCUMENT_BINDING": 4, "CONDITIONAL_PARAGRAPH_GROUP": 6, "CONDITIONAL_TABLE_COLUMN": 4, "CONDITIONAL_TABLE_ROW": 4},
+  "control_documents": 0,
   "complete": false,
-  "reason": "Кандидаты структурных узлов ещё не преобразованы в проверенные bindings/regions/groups; две версии остаются DRAFT."
+  "blocking_minimum": ["4 юридико-структурных BLOCKED", "RF021: двухстрочный повторяемый блок", "RF008: вложенные условия", "остальные неподтверждённые юридические и derived-операции"]
 }

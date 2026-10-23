@@ -652,7 +652,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     <button type="button" className="back-link" onClick={() => document.querySelector(`[data-locator="${CSS.escape(candidate.locator || "")}"]`)?.scrollIntoView({behavior:"smooth", block:"center"})}>{candidate.rf_id} · {candidate.matrix_location}</button>
                                     <small>{candidate.operation} · {candidate.status}</small>
                                     <p>{candidate.context || "Структурный узел не найден"}</p>
+                                    {candidate.review_reason&&<p><b>Причина:</b> {candidate.review_reason}<br/><b>Действие специалиста:</b> {candidate.required_specialist_action}</p>}
                                     <div>
+                                      {candidate.review_group&&<button type="button" className="secondary" onClick={()=>setSelectedCandidates(bindingCandidates.filter((x:any)=>x.review_group===candidate.review_group&&x.review_decision==="CONFIRMED"&&x.status!=="CONFIGURED"&&x.locator).map((x:any)=>x.candidate_id))}>Выбрать подтверждённую группу</button>}
                                       <button type="button" disabled={version.status !== "DRAFT" || candidate.review_decision === "CONFIRMED"} onClick={() => decideCandidate(candidate, "CONFIRMED")}>Подтвердить</button>
                                       <button type="button" className="secondary" disabled={version.status !== "DRAFT" || candidate.review_decision === "REJECTED"} onClick={() => decideCandidate(candidate, "REJECTED")}>Отклонить</button>
                                       {candidate.review_decision==="CONFIRMED"&&candidate.status!=="CONFIGURED"&&<button type="button" onClick={()=>materializeCandidate(candidate)}>Создать привязку</button>}

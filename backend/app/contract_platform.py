@@ -412,7 +412,10 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
    if row.find('.//w:vMerge',NS) is not None: raise ValueError('Нельзя условно удалить строку с вертикально объединёнными ячейками')
    targets=[row]; locator.update({'table':table_no,'row':row_no,'nodes':[f'{part}#/tbl[{table_no}]/tr[{row_no}]'],'element_hash':_element_hash(row)})
   else: targets=[table]; locator.update({'table':table_no,'nodes':[f'{part}#/tbl[{table_no}]'],'element_hash':_element_hash(table)})
- bad=next((_unsafe(x) for x in targets if _unsafe(x)),None)
+ # A whole paragraph/row/table can be removed atomically even when it contains
+ # Word fields or drawings.  Only a run-level edit could split such a node and
+ # therefore retains the strict safety gate.
+ bad=next((_unsafe(x) for x in targets if _unsafe(x)),None) if p.region_type=='CONDITIONAL_RUN' else None
  if bad: raise ValueError(f'Область содержит неподдерживаемую структуру Word ({bad})')
  original='\n'.join(_paragraph_text(x) for target in targets for x in ([target] if target.tag==f'{{{WORD_NS}}}p' else target.findall('.//w:p',NS)))
  if not original.strip(): raise ValueError('Условная область не содержит текста')

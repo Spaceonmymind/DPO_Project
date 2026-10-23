@@ -77,6 +77,10 @@ function TemplateBuilder({ api }: { api: Api }) {
     [regions, setRegions] = useState<any[]>([]),
     [repeatingGroups, setRepeatingGroups] = useState<any[]>([]),
     [bindingCandidates, setBindingCandidates] = useState<any[]>([]),
+    [candidateFilter, setCandidateFilter] = useState({rf_id:"", status:"", operation:""}),
+    [selectedCandidates, setSelectedCandidates] = useState<string[]>([]),
+    [testAnswers, setTestAnswers] = useState<any>({}),
+    [testDocument, setTestDocument] = useState<any>(),
     [selection, setSelection] = useState<any>(),
     [repeatingBinding, setRepeatingBinding] = useState(""),
     [regionDraft, setRegionDraft] = useState<any>(),
@@ -151,6 +155,32 @@ function TemplateBuilder({ api }: { api: Api }) {
       const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/${encodeURIComponent(candidate.candidate_id)}`, {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({decision})});
       setBindingCandidates(bindingCandidates.map((item) => item.candidate_id === updated.candidate_id ? updated : item));
       setNotice(decision === "CONFIRMED" ? "Структурный кандидат подтверждён." : "Кандидат отклонён и оставлен на ручную разметку.");
+    });
+  }
+  async function materializeCandidate(candidate: any) {
+    await run(async () => {
+      const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/${encodeURIComponent(candidate.candidate_id)}/materialize`, {method:"POST"});
+      setBindingCandidates(bindingCandidates.map((item) => item.candidate_id === updated.candidate_id ? updated : item));
+      setNotice("Кандидат преобразован в настоящую привязку.");
+    });
+  }
+  async function rollbackCandidate(candidate: any) {
+    await run(async () => {
+      const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/${encodeURIComponent(candidate.candidate_id)}/materialization`, {method:"DELETE"});
+      setBindingCandidates(bindingCandidates.map((item) => item.candidate_id === updated.candidate_id ? updated : item));
+      setNotice("Материализация отменена.");
+    });
+  }
+  async function batchMaterialize() {
+    await run(async () => {
+      await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/batch-materialize`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({candidate_ids:selectedCandidates})});
+      await openVersion(version); setSelectedCandidates([]); setNotice("Выбранные и ранее подтверждённые кандидаты материализованы.");
+    });
+  }
+  async function generateTestDocument() {
+    await run(async()=>{
+      const result=await api(`/document-templates/${version.template_id}/versions/${version.id}/test-drive`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answers:testAnswers})});
+      setTestDocument(result);setNotice("Тестовый DOCX сформирован и промаркирован.");
     });
   }
   async function create(e: FormEvent) {
@@ -609,20 +639,36 @@ function TemplateBuilder({ api }: { api: Api }) {
                             <section className="selection-card binding-candidate-review" aria-label="Кандидаты структурной разметки">
                               <Link2 />
                               <div>
-                                <h3>Кандидаты разметки ({bindingCandidates.length})</h3>
+                                <h3>Готовность структурной разметки</h3>
+                                <div className="candidate-metrics">
+                                  <b>Обнаружено: {bindingCandidates.length}</b><span>Подтверждено: {bindingCandidates.filter(x=>x.review_decision==="CONFIRMED").length}</span><span>Материализовано: {bindingCandidates.filter(x=>x.status==="CONFIGURED"||x.status==="GENERATED_AND_VERIFIED").length}</span><span>Проверено генерацией: {bindingCandidates.filter(x=>x.status==="GENERATED_AND_VERIFIED").length}</span><span>Ручная настройка: {bindingCandidates.filter(x=>!["CONFIGURED","GENERATED_AND_VERIFIED","BLOCKED"].includes(x.status)).length}</span><span>Заблокировано: {bindingCandidates.filter(x=>x.status==="BLOCKED").length}</span>
+                                </div>
                                 <p>Автоматически найденные места требуют подтверждения специалиста. Подтверждение не создаёт привязку само по себе.</p>
-                                {bindingCandidates.map((candidate: any) => (
+                                <div className="candidate-filters"><select value={candidateFilter.rf_id} onChange={e=>setCandidateFilter({...candidateFilter,rf_id:e.target.value})}><option value="">Все RF</option>{[...new Set(bindingCandidates.map(x=>x.rf_id))].map((x:any)=><option key={x}>{x}</option>)}</select><select value={candidateFilter.status} onChange={e=>setCandidateFilter({...candidateFilter,status:e.target.value})}><option value="">Все статусы</option>{[...new Set(bindingCandidates.map(x=>x.status))].map((x:any)=><option key={x}>{x}</option>)}</select><select value={candidateFilter.operation} onChange={e=>setCandidateFilter({...candidateFilter,operation:e.target.value})}><option value="">Все операции</option>{[...new Set(bindingCandidates.map(x=>x.operation))].map((x:any)=><option key={x}>{x}</option>)}</select></div>
+                                {selectedCandidates.length>0&&<button type="button" onClick={batchMaterialize}>Материализовать выбранные ({selectedCandidates.length})</button>}
+                                {bindingCandidates.filter((x:any)=>(!candidateFilter.rf_id||x.rf_id===candidateFilter.rf_id)&&(!candidateFilter.status||x.status===candidateFilter.status)&&(!candidateFilter.operation||x.operation===candidateFilter.operation)).map((candidate: any) => (
                                   <article key={candidate.candidate_id} className="candidate-row">
+                                    <input aria-label={`Выбрать ${candidate.candidate_id}`} type="checkbox" checked={selectedCandidates.includes(candidate.candidate_id)} disabled={candidate.review_decision!=="CONFIRMED"||candidate.status==="CONFIGURED"} onChange={e=>setSelectedCandidates(e.target.checked?[...selectedCandidates,candidate.candidate_id]:selectedCandidates.filter(x=>x!==candidate.candidate_id))}/>
                                     <button type="button" className="back-link" onClick={() => document.querySelector(`[data-locator="${CSS.escape(candidate.locator || "")}"]`)?.scrollIntoView({behavior:"smooth", block:"center"})}>{candidate.rf_id} · {candidate.matrix_location}</button>
                                     <small>{candidate.operation} · {candidate.status}</small>
                                     <p>{candidate.context || "Структурный узел не найден"}</p>
                                     <div>
                                       <button type="button" disabled={version.status !== "DRAFT" || candidate.review_decision === "CONFIRMED"} onClick={() => decideCandidate(candidate, "CONFIRMED")}>Подтвердить</button>
                                       <button type="button" className="secondary" disabled={version.status !== "DRAFT" || candidate.review_decision === "REJECTED"} onClick={() => decideCandidate(candidate, "REJECTED")}>Отклонить</button>
+                                      {candidate.review_decision==="CONFIRMED"&&candidate.status!=="CONFIGURED"&&<button type="button" onClick={()=>materializeCandidate(candidate)}>Создать привязку</button>}
+                                      {candidate.status==="CONFIGURED"&&<button type="button" className="secondary" onClick={()=>rollbackCandidate(candidate)}>Отменить материализацию</button>}
                                     </div>
                                   </article>
                                 ))}
                               </div>
+                            </section>
+                          )}
+                          {stage===6&&version.status==="DRAFT"&&(
+                            <section className="selection-card draft-test-drive" aria-label="Тестовая генерация черновика">
+                              <FileText/><div><h3>Test-drive черновой версии</h3><p>Генерация доступна только после завершения всей структурной разметки. Файл получит метку «ТЕСТОВЫЙ ДОКУМЕНТ» в колонтитуле и свойствах DOCX.</p>
+                              <div className="scenario-facts">{(schema?.fields||[]).map((item:any)=><TestDriveField key={item.id} field={item} value={testAnswers[item.field_key]} change={(value:any)=>setTestAnswers({...testAnswers,[item.field_key]:value})}/>)}</div>
+                              <button type="button" disabled={bindingCandidates.some(x=>!["CONFIGURED","GENERATED_AND_VERIFIED"].includes(x.status))} onClick={generateTestDocument}>Сформировать тестовый DOCX</button>
+                              {testDocument&&<a className="primary" href={testDocument.download_url}><Download size={15}/>Скачать тестовый DOCX</a>}</div>
                             </section>
                           )}
                           <div className="preview-notice">
@@ -1664,6 +1710,14 @@ function TemplateBuilder({ api }: { api: Api }) {
       </section>
     </div>
   );
+}
+
+function TestDriveField({field,value,change}:any){
+  if(field.field_type==="BOOLEAN")return <label>{field.label}<select value={String(value??"")} onChange={e=>change(e.target.value===""?null:e.target.value==="true")}><option value="">Не выбрано</option><option value="true">Да</option><option value="false">Нет</option></select></label>;
+  if(field.field_type==="SINGLE_SELECT")return <label>{field.label}<select value={value??""} onChange={e=>change(e.target.value)}><option value="">Не выбрано</option>{(field.config?.options||[]).map((option:string)=><option key={option}>{option}</option>)}</select></label>;
+  if(field.field_type==="LIST")return <label>{field.label}<textarea value={(value||[]).join("\n")} onChange={e=>change(e.target.value.split("\n").filter(Boolean))}/></label>;
+  if(field.field_type==="COMPOSITE")return <fieldset><legend>{field.label}</legend>{(field.config?.components||[]).map((part:any)=><label key={part.key}>{part.label}<input value={(value||{})[part.key]||""} onChange={e=>change({...value,[part.key]:e.target.value})}/></label>)}</fieldset>;
+  return <label>{field.label}<input type={field.field_type==="DATE"?"date":field.field_type==="INTEGER"||field.field_type==="DECIMAL"?"number":"text"} value={value??""} onChange={e=>change(field.field_type==="INTEGER"||field.field_type==="DECIMAL"?Number(e.target.value):e.target.value)}/></label>;
 }
 
 const OPS: any = {

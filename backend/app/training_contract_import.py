@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from app.db import (
     ContractProduct, ContractProductAuditEvent, ContractProductField,
     ContractProductVersion, DocumentTemplate, SessionLocal, TemplateVersion,
+    QuestionnaireSchema,QuestionnaireField,settings,
 )
 from app.training_contract_audit import EXPECTED, audit_training_sources
 from app.training_mapping import discover_candidates
@@ -17,6 +18,7 @@ PRODUCT_CODE = "TRAINING_CONTRACT"
 PRODUCT_NAME = "Договор на проведение тренировок"
 UNSUPPORTED_FACT_TYPES = {"ARRAY_STRING", "ARRAY_OBJECT"}
 TYPE_MAP = {"ENUM": "SINGLE_SELECT", "BOOLEAN": "BOOLEAN", "STRING": "TEXT", "DECIMAL": "DECIMAL", "INTEGER": "INTEGER", "DATE": "DATE"}
+RF_TYPE_MAP={"SELECT":"SINGLE_SELECT","ARRAY":"LIST","OBJECT":"COMPOSITE","BOOLEAN_BLOCK":"BOOLEAN","INTEGER":"INTEGER","STRING":"TEXT","TEXT":"TEXT","DERIVED":"TEXT","BLOCK":"BOOLEAN"}
 
 
 def _options(raw):
@@ -72,16 +74,32 @@ def apply_plan(plan: dict, owner, session=None) -> dict:
             session.add(ContractProductField(product_version_id=version.id, **item)); created += 1
         if created_product:
             session.add(ContractProductAuditEvent(product_id=product.id, product_version_id=version.id, actor_id=owner.id, event_type="R361_DRAFT_IMPORTED", metadata_json={"signature": plan["signature"]}))
-        candidate_counts={}
+        candidate_counts={};template_field_counts={}
+        workbook=load_workbook(Path(settings.contract_templates_path)/"training"/"Матрица_применимости_LLM_v2.xlsx",data_only=True)
+        rf_rows=list(workbook["RED_FIELD_SCHEMA"].iter_rows(min_row=2,values_only=True))
         for variant,filename in (("PHYSICAL_PERSON","Шаблон_тренировки_физлицо.docx"),("INDIVIDUAL_ENTREPRENEUR","Шаблон_тренировки_ИП.docx")):
             sha=EXPECTED[filename];template_version=session.query(TemplateVersion).filter_by(source_sha256=sha,status="DRAFT").first()
             if template_version:
                 metadata=dict(template_version.preview_metadata or {});existing={x.get("candidate_id"):x for x in metadata.get("binding_candidates",[])}
                 for candidate in (x for x in plan["candidates"] if x["variant"]==variant):
-                    if candidate["candidate_id"] not in existing:existing[candidate["candidate_id"]]=candidate
+                    previous=existing.get(candidate["candidate_id"],{});preserved={key:value for key,value in previous.items() if key in {"review_decision","materialized_id","materialized_type","materialization_source","materialized_at"}}
+                    existing[candidate["candidate_id"]]={**candidate,**preserved}
+                    if preserved.get("materialized_id"):existing[candidate["candidate_id"]]["status"]="CONFIGURED"
                 metadata["binding_candidates"]=list(existing.values());metadata["r363_import_signature"]=plan["signature"];template_version.preview_metadata=metadata;candidate_counts[variant]=len(existing)
+                schema=session.query(QuestionnaireSchema).filter_by(template_version_id=template_version.id).first()
+                known={x.field_key for x in session.query(QuestionnaireField).filter_by(schema_id=schema.id)} if schema else set();added=0
+                for position,row in enumerate(rf_rows,1):
+                    rf_id,key,kind,scope,condition,required,allowed,render,question,operation,missing=row
+                    if scope not in {"BOTH",variant}:continue
+                    if key in known:continue
+                    config={"group":"Поля договора","description":render or "","rf_id":rf_id,"source_operation":operation}
+                    if kind=="SELECT":config["options"]=_options(allowed)
+                    if kind=="ARRAY":config["item_config"]={"min_items":0,"max_items":50,"max_length":500}
+                    if kind=="OBJECT":config["components"]=[{"key":"passport","label":"Паспортные данные","field_type":"TEXT","required":True},{"key":"snils","label":"СНИЛС","field_type":"TEXT","required":True}]
+                    session.add(QuestionnaireField(schema_id=schema.id,field_key=key,label=question if question and question!='—' else render or key,field_type=RF_TYPE_MAP.get(kind,"TEXT"),required=required=="YES",position=position,config=config));added+=1
+                template_field_counts[variant]=added
         session.commit()
-        return {"product_id": product.id, "version_id": version.id, "created_product": created_product, "created_fields": created, "total_fields": session.query(ContractProductField).filter_by(product_version_id=version.id).count(), "candidate_counts":candidate_counts,"variants_created": 0, "published": False}
+        return {"product_id": product.id, "version_id": version.id, "created_product": created_product, "created_fields": created, "total_fields": session.query(ContractProductField).filter_by(product_version_id=version.id).count(), "candidate_counts":candidate_counts,"template_fields_created":template_field_counts,"variants_created": 0, "published": False}
     except Exception:
         session.rollback(); raise
     finally:

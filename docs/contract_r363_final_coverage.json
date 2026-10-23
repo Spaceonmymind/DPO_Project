@@ -1,0 +1,16 @@
+{
+  "baseline": "dac02e76791e6f53f2956bd82eae1d6e45d92bdd",
+  "complete": false,
+  "physical_occurrences": 140,
+  "materialized": 4,
+  "generated_and_verified": 0,
+  "requires_specialist_configuration": 132,
+  "blocked": 4,
+  "variants": {
+    "PHYSICAL_PERSON": {"occurrences": 69, "materialized": 2, "control_docx": false},
+    "INDIVIDUAL_ENTREPRENEUR": {"occurrences": 71, "materialized": 2, "control_docx": false}
+  },
+  "discovery_status": {"CANDIDATE_FOUND": 38, "REVIEW_REQUIRED": 94, "CONFIGURED": 4, "BLOCKED": 4},
+  "resolver_fixtures": {"total": 120, "pass": 0, "fail": 0, "blocked": 120, "reason": "Draft ContractProduct has no configured variants and declarative resolver rules."},
+  "rf_generated_status": {"RF001":"BLOCKED","RF002":"BLOCKED","RF003":"BLOCKED","RF004":"BLOCKED","RF005":"BLOCKED","RF006":"BLOCKED","RF007":"BLOCKED","RF008":"BLOCKED","RF009":"BLOCKED","RF010":"BLOCKED","RF011":"BLOCKED","RF012":"BLOCKED","RF013":"BLOCKED","RF014":"BLOCKED","RF015":"BLOCKED","RF016":"BLOCKED","RF017":"BLOCKED","RF018":"BLOCKED","RF019":"BLOCKED","RF020":"BLOCKED","RF021":"BLOCKED","RF022":"BLOCKED","RF023":"BLOCKED","RF024":"BLOCKED","RF025":"BLOCKED"}
+}

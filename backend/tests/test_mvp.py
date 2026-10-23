@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 import fitz
 import openpyxl
 import xlwt
-from app.db import Base, engine, SessionLocal, User, QuestionnaireField
+from app.db import Base, engine, SessionLocal, User, QuestionnaireField, TemplateVersion, DocumentBinding
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -105,6 +105,23 @@ def configure_repeating_platform(client,headers,code,vertical_merge=False,min_it
         bound=client.put(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/repeating-groups/{group['id']}/fields/{field['id']}/binding",headers=headers,json={'locator':target['locator'],'start':start,'end':start+len(needle),'selected_text':needle})
         assert bound.status_code==200,bound.text; fields.append(bound.json())
     return template,version,raw,response,group
+
+
+def test_structural_candidate_materialization_is_reviewed_idempotent_and_draft_only():
+    with TestClient(app) as client:
+        headers=auth(client); template=create_platform_template(client,headers,'MATERIALIZATION_POC')
+        raw=contract_docx_bytes(); version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('candidate.docx',raw,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+        field=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/fields",headers=headers,json={'field_key':'customer_name','label':'Заказчик','field_type':'TEXT','required':True,'position':1}).json()
+        preview=client.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/preview",headers=headers).json();node=next(x for x in preview['nodes'] if 'АО «НСПК»' in x['text']);start=node['text'].index('АО «НСПК»')
+        candidate={'candidate_id':'O001:TEST','occurrence_id':'O001','rf_id':'RF001','field_path':'customer_name','variant':'TEST','matrix_location':'P0','locator':node['locator'],'part':node['part'],'structure_fingerprint':preview['structure_fingerprint'],'start':start,'end':start+len('АО «НСПК»'),'selected_text':'АО «НСПК»','context':node['text'],'operation':'REPLACE','status':'CANDIDATE_FOUND'}
+        session=SessionLocal();stored=session.get(TemplateVersion,version['id']);stored.preview_metadata={**(stored.preview_metadata or {}),'binding_candidates':[candidate]};session.commit();session.close()
+        response=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/binding-candidates/auto-materialize",headers=headers);assert response.status_code==200,response.text
+        assert response.json()['materialized']==['O001:TEST']
+        session=SessionLocal();assert session.query(DocumentBinding).filter_by(template_version_id=version['id']).count()==1;session.close()
+        repeated=client.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/binding-candidates/auto-materialize",headers=headers);assert repeated.status_code==200
+        session=SessionLocal();assert session.query(DocumentBinding).filter_by(template_version_id=version['id']).count()==1;session.close()
+        rolled=client.delete(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/binding-candidates/O001:TEST/materialization",headers=headers);assert rolled.status_code==200,rolled.text
+        session=SessionLocal();assert session.query(DocumentBinding).filter_by(template_version_id=version['id']).count()==0;session.close()
 
 
 def test_clarification_asks_only_one_atomic_field():

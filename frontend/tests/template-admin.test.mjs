@@ -137,8 +137,14 @@ test('R3.6.2 mechanisms are configured without JSON',()=>{
 
 test('R3.6.3 structural candidates require explicit specialist review',()=>{
   assert.match(component,/binding-candidates/);
-  assert.match(component,/Кандидаты разметки/);
+  assert.match(component,/Готовность структурной разметки/);
   assert.match(component,/Подтвердить/);
   assert.match(component,/Отклонить/);
   assert.match(component,/Подтверждение не создаёт привязку само по себе/);
+});
+
+test('R3.6.3 finalization exposes readiness filters materialization and rollback',()=>{
+  for(const text of ['Обнаружено:', 'Подтверждено:', 'Материализовано:', 'Проверено генерацией:', 'Ручная настройка:', 'Заблокировано:', 'Все RF', 'Все статусы', 'Все операции', 'Создать привязку', 'Отменить материализацию']) assert.match(component,new RegExp(text));
+  assert.match(component,/batch-materialize/);
+  assert.match(component,/selectedCandidates/);
 });

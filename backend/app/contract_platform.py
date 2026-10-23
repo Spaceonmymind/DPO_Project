@@ -1,6 +1,6 @@
 """Deterministic, non-AI contract-template platform."""
 from __future__ import annotations
-import copy,hashlib,re,zipfile
+import copy,hashlib,re,zipfile,uuid
 from abc import ABC,abstractmethod
 from datetime import date
 from decimal import Decimal,InvalidOperation
@@ -12,6 +12,7 @@ from fastapi import APIRouter,Depends,File,HTTPException,UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
+from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
 from app.db import ConditionalDocumentRegion,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
@@ -143,6 +144,8 @@ class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); en
 class AnswersPayload(BaseModel): answers:dict[str,Any]
 class CandidateDecisionPayload(BaseModel):
  decision:str=Field(pattern=r'^(CONFIRMED|REJECTED)$')
+class CandidateBatchPayload(BaseModel):
+ candidate_ids:list[str]=Field(min_length=1,max_length=100)
 
 def validate_field_payload(p):
  if p.field_type not in FIELD_TYPES: raise HTTPException(422,detail='Неподдерживаемый тип поля')
@@ -697,10 +700,12 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
   return FileResponse(safe_source(v),filename=v.original_filename,media_type=DOCX_MIME)
  @r.get(prefix+'/{tid}/versions/{vid}/binding-candidates')
- def binding_candidates(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+ def binding_candidates(tid:str,vid:str,rf_id:str|None=None,variant:str|None=None,status:str|None=None,operation:str|None=None,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s)
   if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
-  return (v.preview_metadata or {}).get('binding_candidates',[])
+  items=(v.preview_metadata or {}).get('binding_candidates',[])
+  filters={'rf_id':rf_id,'variant':variant,'status':status,'operation':operation}
+  return [item for item in items if all(value is None or item.get(key)==value for key,value in filters.items())]
  @r.patch(prefix+'/{tid}/versions/{vid}/binding-candidates/{candidate_id}')
  def decide_binding_candidate(tid:str,vid:str,candidate_id:str,p:CandidateDecisionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v)
@@ -713,6 +718,74 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   metadata['binding_candidates']=candidates; v.preview_metadata=metadata
   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='BINDING_CANDIDATE_'+p.decision,metadata_json={'candidate_id':candidate_id}))
   s.commit(); return candidate
+ @r.post(prefix+'/{tid}/versions/{vid}/binding-candidates/{candidate_id}/materialize')
+ def materialize_candidate(tid:str,vid:str,candidate_id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  from app.binding_materialization import BindingMaterializationService,MaterializationError
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  try:return BindingMaterializationService(s,u).materialize(v,candidate_id,manual=True)
+  except MaterializationError as exc:s.rollback();raise HTTPException(422,detail=str(exc))
+ @r.post(prefix+'/{tid}/versions/{vid}/binding-candidates/auto-materialize')
+ def auto_materialize_candidates(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  from app.binding_materialization import BindingMaterializationService,MaterializationError
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  service=BindingMaterializationService(s,u);done=[];blocked=[]
+  for item in list((v.preview_metadata or {}).get('binding_candidates',[])):
+   try:done.append(service.materialize(v,item['candidate_id'],manual=False)['candidate_id'])
+   except MaterializationError as exc:s.rollback();v=s.get(TemplateVersion,vid);blocked.append({'candidate_id':item['candidate_id'],'reason':str(exc)})
+  return {'materialized':done,'blocked':blocked}
+ @r.post(prefix+'/{tid}/versions/{vid}/binding-candidates/batch-materialize')
+ def batch_materialize_candidates(tid:str,vid:str,p:CandidateBatchPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  from app.binding_materialization import BindingMaterializationService,MaterializationError
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  if len(set(p.candidate_ids))!=len(p.candidate_ids):raise HTTPException(422,detail='Список содержит дубликаты')
+  service=BindingMaterializationService(s,u);done=[]
+  try:
+   for candidate_id in p.candidate_ids:done.append(service.materialize(v,candidate_id,manual=True)['candidate_id']);v=s.get(TemplateVersion,vid)
+  except MaterializationError as exc:s.rollback();raise HTTPException(422,detail={'message':str(exc),'materialized_before_error':done})
+  return {'materialized':done}
+ @r.delete(prefix+'/{tid}/versions/{vid}/binding-candidates/{candidate_id}/materialization')
+ def rollback_candidate(tid:str,vid:str,candidate_id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  from app.binding_materialization import BindingMaterializationService,MaterializationError
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  try:return BindingMaterializationService(s,u).rollback(v,candidate_id)
+  except MaterializationError as exc:s.rollback();raise HTTPException(422,detail=str(exc))
+ @r.post(prefix+'/{tid}/versions/{vid}/test-drive',status_code=201)
+ def draft_test_drive(tid:str,vid:str,p:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  candidates=(v.preview_metadata or {}).get('binding_candidates',[]);unresolved=[x['candidate_id'] for x in candidates if x.get('status') not in {'CONFIGURED','GENERATED_AND_VERIFIED'}]
+  if unresolved:raise HTTPException(409,detail={'message':'Сначала завершите структурную разметку','unresolved_count':len(unresolved),'candidate_ids':unresolved[:50]})
+  schema=schema_for(v.id,s);fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+  known={x.field_key for x in fields}
+  if set(p.answers)-known:raise HTTPException(422,detail='Анкета содержит неизвестные поля')
+  validate_condition_schema(fields);errors=validate_active_answers(fields,p.answers)
+  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all();errors.update(validate_repeating_answers(groups,s,fields,p.answers,True))
+  if errors:raise HTTPException(422,detail={'message':'Исправьте тестовые ответы','fields':errors})
+  bindings=validate_bindings(v,s);regions=validate_regions(v,s,bindings);groups=validate_repeating_groups(v,s,bindings,regions)
+  active={x.field_key:x for x in ConditionEngine.active_fields(fields,p.answers)};bindings=[x for x in bindings if x.binding_key in active];legal=condition_answers(fields,p.answers);included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal)}
+  groups,calculated,repeated=calculated_document_values(v.id,s,fields,p.answers);values=formatted_bindings(bindings,calculated,fields);group_fields={x.id:x.fields for x in groups}
+  document_id=str(uuid.uuid4());root=(Path(settings.storage)/'test_contracts'/v.id).resolve();root.mkdir(parents=True,exist_ok=True);target=root/f'{document_id}.docx'
+  try:
+   render_docx(v,bindings,values,target,regions,included,groups,repeated,group_fields)
+   marked=Document(target);marked.core_properties.title='ТЕСТОВЫЙ ДОКУМЕНТ';marked.core_properties.comments='Создано в draft test-drive. Не является официальным договором.'
+   for section in marked.sections:
+    paragraph=section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph();paragraph.text='ТЕСТОВЫЙ ДОКУМЕНТ · НЕ ДЛЯ ПОДПИСАНИЯ'
+   marked.save(target)
+  except (ValueError,IndexError,KeyError,CalculationError) as exc:raise HTTPException(422,detail=f'Не удалось сформировать тестовый DOCX: {exc}')
+  raw=target.read_bytes();checksum=hashlib.sha256(raw).hexdigest();metadata=copy.deepcopy(v.preview_metadata or {});documents=metadata.get('test_documents',[]);documents.append({'id':document_id,'path':str(target),'sha256':checksum,'created_by_id':u.id,'created_at':now().isoformat()});metadata['test_documents']=documents[-20:];v.preview_metadata=metadata
+  s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='DRAFT_TEST_DOCUMENT_GENERATED',metadata_json={'document_id':document_id,'sha256':checksum}));s.commit()
+  return {'id':document_id,'test_only':True,'sha256':checksum,'download_url':f'{prefix}/{tid}/versions/{vid}/test-documents/{document_id}/download'}
+ @r.get(prefix+'/{tid}/versions/{vid}/test-documents/{document_id}/download')
+ def download_test_document(tid:str,vid:str,document_id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  item=next((x for x in (v.preview_metadata or {}).get('test_documents',[]) if x.get('id')==document_id and (x.get('created_by_id')==u.id or 'administrator' in roles(u))),None)
+  if not item:raise HTTPException(404,detail='Тестовый документ не найден')
+  return FileResponse(safe_file(item['path'],'test_contracts',item['sha256']),filename=f'ТЕСТОВЫЙ_{t.name}.docx',media_type=DOCX_MIME)
  @r.get(prefix+'/{tid}/versions/{vid}/questionnaire')
  def questionnaire(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s)

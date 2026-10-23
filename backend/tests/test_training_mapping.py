@@ -16,8 +16,9 @@ def test_real_matrix_discovery_is_complete_and_fail_closed():
     candidates = discover_candidates(ROOT)
     assert len(candidates) == 140
     assert {item["variant"] for item in candidates} == {"PHYSICAL_PERSON", "INDIVIDUAL_ENTREPRENEUR"}
-    assert {item["status"] for item in candidates} <= {"CANDIDATE_FOUND", "REVIEW_REQUIRED", "NOT_FOUND"}
+    assert {item["status"] for item in candidates} <= {"CANDIDATE_FOUND", "REVIEW_REQUIRED", "BLOCKED"}
     assert all(item["structure_fingerprint"] for item in candidates)
     assert all(item["candidate_id"] and item["rf_id"] for item in candidates)
     # Discovery may propose a node, but never promotes it to a configured binding.
     assert "CONFIGURED" not in {item["status"] for item in candidates}
+    assert all(item.get("diagnostics", {}).get("reason") for item in candidates if item["status"] == "BLOCKED")

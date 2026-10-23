@@ -141,6 +141,8 @@ class RepeatingFieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
 class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
 class AnswersPayload(BaseModel): answers:dict[str,Any]
+class CandidateDecisionPayload(BaseModel):
+ decision:str=Field(pattern=r'^(CONFIRMED|REJECTED)$')
 
 def validate_field_payload(p):
  if p.field_type not in FIELD_TYPES: raise HTTPException(422,detail='Неподдерживаемый тип поля')
@@ -694,6 +696,23 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); v,t=owned_version(vid,u,s)
   if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
   return FileResponse(safe_source(v),filename=v.original_filename,media_type=DOCX_MIME)
+ @r.get(prefix+'/{tid}/versions/{vid}/binding-candidates')
+ def binding_candidates(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  return (v.preview_metadata or {}).get('binding_candidates',[])
+ @r.patch(prefix+'/{tid}/versions/{vid}/binding-candidates/{candidate_id}')
+ def decide_binding_candidate(tid:str,vid:str,candidate_id:str,p:CandidateDecisionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  metadata=copy.deepcopy(v.preview_metadata or {}); candidates=metadata.get('binding_candidates',[])
+  candidate=next((x for x in candidates if x.get('candidate_id')==candidate_id),None)
+  if candidate is None: raise HTTPException(404,detail='Кандидат разметки не найден')
+  candidate['review_decision']=p.decision
+  candidate['status']='REVIEW_REQUIRED' if p.decision=='REJECTED' else candidate.get('status','CANDIDATE_FOUND')
+  metadata['binding_candidates']=candidates; v.preview_metadata=metadata
+  s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='BINDING_CANDIDATE_'+p.decision,metadata_json={'candidate_id':candidate_id}))
+  s.commit(); return candidate
  @r.get(prefix+'/{tid}/versions/{vid}/questionnaire')
  def questionnaire(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s)

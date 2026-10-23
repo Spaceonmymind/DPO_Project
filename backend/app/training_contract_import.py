@@ -11,6 +11,7 @@ from app.db import (
     ContractProductVersion, DocumentTemplate, SessionLocal, TemplateVersion,
 )
 from app.training_contract_audit import EXPECTED, audit_training_sources
+from app.training_mapping import discover_candidates
 
 PRODUCT_CODE = "TRAINING_CONTRACT"
 PRODUCT_NAME = "Договор на проведение тренировок"
@@ -40,13 +41,13 @@ def build_plan(root: Path) -> dict:
         fields.append({"field_key": key, "label": question if question and question != "—" else meaning or key, "field_type": kind, "required": requirement in {"CRITICAL", "REQUIRED_TO_RENDER"}, "position": position, "config": config})
     blockers = [
         {"code": "DRAFT_TEMPLATE_VERSIONS", "severity": "P0", "detail": "Оба реальных TemplateVersion не опубликованы; варианты продукта создавать нельзя"},
-        {"code": "TEXT_DERIVATION", "severity": "P0", "detail": "Нет декларативных текстовых expressions для RF003/004/006/009/015/017/018/019"},
-        {"code": "TABLE_COLUMN_OPERATION", "severity": "P0", "detail": "Нет безопасной операции целой колонки для RF020"},
-        {"code": "COMPOSITE_AND_ARRAY", "severity": "P0", "detail": "Нет composite/array полей для RF002/RF021/RF024"},
-        {"code": "REAL_BINDINGS_MISSING", "severity": "P0", "detail": "74 occurrence не имеют проверенных structural bindings"},
+        {"code": "CANDIDATE_REVIEW", "severity": "P0", "detail": "Структурные кандидаты требуют решения специалиста; неразрешённые места нельзя материализовать автоматически"},
+        {"code": "REAL_BINDINGS_MISSING", "severity": "P0", "detail": "140 физических вхождений ещё не имеют проверенных runtime bindings/regions/groups"},
+        {"code": "CONTROL_GENERATION", "severity": "P0", "detail": "Оба варианта ещё не прошли draft generation и OOXML/Word acceptance"},
     ]
     signature = hashlib.sha256((audit["files"]["Матрица_применимости_LLM_v2.xlsx"]["sha256"] + PRODUCT_CODE).encode()).hexdigest()
-    return {"signature": signature, "audit": audit, "fields": fields, "unsupported_facts": blocked, "blockers": blockers, "source_counts": {"facts": 40, "rf_fields": 25, "occurrences": 74, "scenarios": 120}}
+    candidates=discover_candidates(root)
+    return {"signature": signature, "audit": audit, "fields": fields, "candidates": candidates, "unsupported_facts": blocked, "blockers": blockers, "source_counts": {"facts": 40, "rf_fields": 25, "occurrences": 74, "physical_occurrences":len(candidates), "scenarios": 120}}
 
 
 def apply_plan(plan: dict, owner, session=None) -> dict:
@@ -71,8 +72,16 @@ def apply_plan(plan: dict, owner, session=None) -> dict:
             session.add(ContractProductField(product_version_id=version.id, **item)); created += 1
         if created_product:
             session.add(ContractProductAuditEvent(product_id=product.id, product_version_id=version.id, actor_id=owner.id, event_type="R361_DRAFT_IMPORTED", metadata_json={"signature": plan["signature"]}))
+        candidate_counts={}
+        for variant,filename in (("PHYSICAL_PERSON","Шаблон_тренировки_физлицо.docx"),("INDIVIDUAL_ENTREPRENEUR","Шаблон_тренировки_ИП.docx")):
+            sha=EXPECTED[filename];template_version=session.query(TemplateVersion).filter_by(source_sha256=sha,status="DRAFT").first()
+            if template_version:
+                metadata=dict(template_version.preview_metadata or {});existing={x.get("candidate_id"):x for x in metadata.get("binding_candidates",[])}
+                for candidate in (x for x in plan["candidates"] if x["variant"]==variant):
+                    if candidate["candidate_id"] not in existing:existing[candidate["candidate_id"]]=candidate
+                metadata["binding_candidates"]=list(existing.values());metadata["r363_import_signature"]=plan["signature"];template_version.preview_metadata=metadata;candidate_counts[variant]=len(existing)
         session.commit()
-        return {"product_id": product.id, "version_id": version.id, "created_product": created_product, "created_fields": created, "total_fields": session.query(ContractProductField).filter_by(product_version_id=version.id).count(), "variants_created": 0, "published": False}
+        return {"product_id": product.id, "version_id": version.id, "created_product": created_product, "created_fields": created, "total_fields": session.query(ContractProductField).filter_by(product_version_id=version.id).count(), "candidate_counts":candidate_counts,"variants_created": 0, "published": False}
     except Exception:
         session.rollback(); raise
     finally:

@@ -134,3 +134,11 @@ test('R3.6.2 mechanisms are configured without JSON',()=>{
   assert.match(catalog,/field\.field_type==="LIST"/);
   assert.match(catalog,/field\.field_type==="COMPOSITE"/);
 });
+
+test('R3.6.3 structural candidates require explicit specialist review',()=>{
+  assert.match(component,/binding-candidates/);
+  assert.match(component,/Кандидаты разметки/);
+  assert.match(component,/Подтвердить/);
+  assert.match(component,/Отклонить/);
+  assert.match(component,/Подтверждение не создаёт привязку само по себе/);
+});

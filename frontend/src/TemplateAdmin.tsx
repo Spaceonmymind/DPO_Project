@@ -76,6 +76,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     [bindings, setBindings] = useState<any[]>([]),
     [regions, setRegions] = useState<any[]>([]),
     [repeatingGroups, setRepeatingGroups] = useState<any[]>([]),
+    [bindingCandidates, setBindingCandidates] = useState<any[]>([]),
     [selection, setSelection] = useState<any>(),
     [repeatingBinding, setRepeatingBinding] = useState(""),
     [regionDraft, setRegionDraft] = useState<any>(),
@@ -129,19 +130,28 @@ function TemplateBuilder({ api }: { api: Api }) {
     setGroupField(null);
     setBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
-      [p, q, links, areas, repeaters] = await Promise.all([
+      [p, q, links, areas, repeaters, candidates] = await Promise.all([
         api(b + "/preview"),
         api(b + "/questionnaire"),
         api(b + "/bindings"),
         api(b + "/conditional-regions"),
         api(b + "/repeating-groups"),
+        api(b + "/binding-candidates"),
       ]);
     setPreview(p);
     setSchema(q);
     setBindings(links);
     setRegions(areas);
     setRepeatingGroups(repeaters);
+    setBindingCandidates(candidates);
     setField(blank(q.fields.length + 1));
+  }
+  async function decideCandidate(candidate: any, decision: "CONFIRMED" | "REJECTED") {
+    await run(async () => {
+      const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/${encodeURIComponent(candidate.candidate_id)}`, {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({decision})});
+      setBindingCandidates(bindingCandidates.map((item) => item.candidate_id === updated.candidate_id ? updated : item));
+      setNotice(decision === "CONFIRMED" ? "Структурный кандидат подтверждён." : "Кандидат отклонён и оставлен на ручную разметку.");
+    });
   }
   async function create(e: FormEvent) {
     e.preventDefault();
@@ -595,6 +605,26 @@ function TemplateBuilder({ api }: { api: Api }) {
                           <nav>{preview.nodes.filter((node:any) => node.text.trim().toLowerCase().includes(docQuery.toLowerCase())).slice(0, 80).map((node:any, index:number) => <button key={node.locator} onClick={() => document.querySelector(`[data-locator="${CSS.escape(node.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})}><span>{node.kind === "table_cell" ? "Ячейка" : "Абзац"} {index + 1}</span><b>{node.text.trim() || "Пустой фрагмент"}</b></button>)}</nav>
                         </aside>
                         <section className="document-canvas">
+                          {bindingCandidates.length > 0 && (
+                            <section className="selection-card binding-candidate-review" aria-label="Кандидаты структурной разметки">
+                              <Link2 />
+                              <div>
+                                <h3>Кандидаты разметки ({bindingCandidates.length})</h3>
+                                <p>Автоматически найденные места требуют подтверждения специалиста. Подтверждение не создаёт привязку само по себе.</p>
+                                {bindingCandidates.map((candidate: any) => (
+                                  <article key={candidate.candidate_id} className="candidate-row">
+                                    <button type="button" className="back-link" onClick={() => document.querySelector(`[data-locator="${CSS.escape(candidate.locator || "")}"]`)?.scrollIntoView({behavior:"smooth", block:"center"})}>{candidate.rf_id} · {candidate.matrix_location}</button>
+                                    <small>{candidate.operation} · {candidate.status}</small>
+                                    <p>{candidate.context || "Структурный узел не найден"}</p>
+                                    <div>
+                                      <button type="button" disabled={version.status !== "DRAFT" || candidate.review_decision === "CONFIRMED"} onClick={() => decideCandidate(candidate, "CONFIRMED")}>Подтвердить</button>
+                                      <button type="button" className="secondary" disabled={version.status !== "DRAFT" || candidate.review_decision === "REJECTED"} onClick={() => decideCandidate(candidate, "REJECTED")}>Отклонить</button>
+                                    </div>
+                                  </article>
+                                ))}
+                              </div>
+                            </section>
+                          )}
                           <div className="preview-notice">
                             Выделите текст для привязки или условного фрагмента.
                             Для структурной области используйте действия у

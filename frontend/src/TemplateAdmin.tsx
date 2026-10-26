@@ -1,6 +1,6 @@
 import "./selection-panel.css";
 import "./template-workspace.css";
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   FileText,
@@ -71,6 +71,7 @@ export function TemplateAdmin({ api }: { api: Api }) {
   return <TemplateBuilder api={api} />;
 }
 function TemplateBuilder({ api }: { api: Api }) {
+  const inspectorRef = useRef<HTMLElement | null>(null);
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
     [versions, setVersions] = useState<any[]>([]),
@@ -119,6 +120,9 @@ function TemplateBuilder({ api }: { api: Api }) {
     const query = docQuery.trim().toLocaleLowerCase("ru");
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
+  useEffect(() => {
+    if (showFieldEditor && inspectorRef.current) inspectorRef.current.scrollTop = 0;
+  }, [showFieldEditor, editing]);
   async function load() {
     setTemplates(await api("/document-templates"));
   }
@@ -264,6 +268,8 @@ function TemplateBuilder({ api }: { api: Api }) {
     if (text.trim())
       setActiveBinding(null);
     if (text.trim())
+      setShowFieldEditor(false);
+    if (text.trim())
       setSelection({
         locator: a.dataset.locator,
         start,
@@ -289,6 +295,7 @@ function TemplateBuilder({ api }: { api: Api }) {
         setEditing(saved.id);
         setShowFieldEditor(true);
         setStage(4);
+        setWorkspaceTab("questions");
       }
       setSelectionDraft(null);
       if (selectionDraft || !saved?.id) {
@@ -315,13 +322,15 @@ function TemplateBuilder({ api }: { api: Api }) {
     });
   }
   function newField() {
-    if (selection) {
-      setSelectionDraft(selection);
-      setSelection(null);
-    }
+    setSelectionDraft(selection || null);
+    setSelection(null);
+    setActiveBinding(null);
+    setRegionDraft(null);
+    setGroupDraft(null);
+    setGroupField(null);
     setStage(4);
     setEditing(undefined);
-    setField({ ...blank((schema?.fields?.length || 0) + 1), field_key: `question_${crypto.randomUUID().replace(/-/g, "")}` });
+    setField({ ...blank((schema?.fields?.length || 0) + 1), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
     setShowFieldEditor(true);
   }
   async function removeField(id: string) {
@@ -1269,14 +1278,14 @@ function TemplateBuilder({ api }: { api: Api }) {
                             </section>
                           </InspectorPortal>}
                         </section>
-                        <aside className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
-                          <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor && stage === 4 ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
+                        <aside ref={inspectorRef} className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
+                          <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
                           <div id="workspace-context-inspector" />
                           {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
                           {(stage === 3 || stage === 5) && !selection && !activeBinding && !regionDraft && !groupDraft && <p className="workspace-inspector-tip">Создайте вопрос анкеты или выделите фрагмент Word для привязки. Для условий и таблиц используйте действия у фрагментов документа.</p>}
                           {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
                           <h3 className="panel-questionnaire">Вопросы анкеты</h3>
-                          {version.status === "DRAFT" && showFieldEditor && stage === 4 && !selection && !regionDraft && !groupDraft && (
+                          {version.status === "DRAFT" && showFieldEditor && !selection && !activeBinding && !regionDraft && !groupDraft && (
                             <form className="field-editor" onSubmit={saveField}>
                               <label>
                                 Раздел
@@ -1490,7 +1499,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   ? "Сохранить изменения"
                                   : "Добавить вопрос"}
                               </button>
-                              <button type="button" className="secondary" onClick={() => { setShowFieldEditor(false); if (selectionDraft) { setSelection(selectionDraft); setSelectionDraft(null); setStage(3); } }}>Отмена</button>
+                              <button type="button" className="secondary" onClick={() => { setShowFieldEditor(false); setEditing(undefined); if (selectionDraft) { setSelection(selectionDraft); setSelectionDraft(null); setStage(3); } }}>Отмена</button>
                             </form>
                           )}
                           {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}</div>}

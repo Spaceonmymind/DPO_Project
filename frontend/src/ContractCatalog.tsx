@@ -1,4 +1,5 @@
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import "./contract-choice-options.css";
 import {
   FileText,
   Search,
@@ -18,6 +19,26 @@ type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
   `row-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+
+function readableApiError(error: any): { message: string; fields: Record<string, string> } {
+  const raw = String(error?.message || error || "Неизвестная ошибка");
+  try {
+    const parsed = JSON.parse(raw);
+    const detail = parsed.detail || parsed;
+    const fields = detail.fields || {};
+    const messages = Object.entries(fields)
+      .map(([key, value]) => `${key}: ${String(value)}`);
+    return {
+      message: messages.length
+        ? `Проверьте поля анкеты: ${messages.join("; ")}`
+        : String(detail.message || (typeof detail === "string" ? detail : raw)),
+      fields,
+    };
+  } catch {
+    return { message: raw, fields: {} };
+  }
+}
 
 export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (path: string) => void; manager?: boolean }) {
   const [catalog, setCatalog] = useState<any[]>([]),
@@ -77,9 +98,11 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           body: JSON.stringify({ answers }),
         })
           .then(() => { savedSnapshot.current = JSON.stringify(answers); })
-          .catch((e: any) =>
-            setError(`Автосохранение не выполнено: ${e.message}`),
-          ),
+          .catch((e: any) => {
+            const parsed = readableApiError(e);
+            setErrors(parsed.fields);
+            setError(`Автосохранение не выполнено. ${parsed.message}`);
+          }),
       650,
     );
     return () => clearTimeout(timer);
@@ -91,13 +114,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     try {
       await fn();
     } catch (e: any) {
-      let detail = e.message;
-      try {
-        let parsed = JSON.parse(detail);
-        setErrors(parsed.fields || {});
-        detail = parsed.message || detail;
-      } catch {}
-      setError(detail);
+      const parsed = readableApiError(e);
+      setErrors(parsed.fields);
+      setError(parsed.message);
     } finally {
       setBusy(false);
     }
@@ -161,6 +180,30 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         value.length < v.min_length
       )
         e[f.field_key] = `Минимум ${v.min_length} символов`;
+
+      if (typeof value === "string" && v.regex) {
+        try {
+          if (!new RegExp(v.regex).test(value))
+            e[f.field_key] = "Значение не соответствует требуемому формату";
+        } catch {}
+      }
+
+      if (f.field_type === "COMPOSITE" && value && typeof value === "object") {
+        for (const component of f.config?.components || []) {
+          const componentValue = String(value[component.key] ?? "");
+          if (component.required && !componentValue.trim()) {
+            e[f.field_key] = `«${component.label}»: обязательное поле`;
+            break;
+          }
+          if (component.config?.validation?.regex || component.validation?.regex) {
+            const pattern = component.config?.validation?.regex || component.validation.regex;
+            if (componentValue && !new RegExp(pattern).test(componentValue)) {
+              e[f.field_key] = `«${component.label}»: значение не соответствует требуемому формату`;
+              break;
+            }
+          }
+        }
+      }
     });
     (draft.schema.repeating_groups || []).forEach((g: any) => {
       if (!groupActive(g)) return;
@@ -189,6 +232,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         );
     });
     setErrors(e);
+    if (Object.keys(e).length) {
+      setReview(false);
+      setError("Исправьте указанные ниже поля анкеты.");
+    } else {
+      setError("");
+    }
     return !Object.keys(e).length;
   }
   async function save() {
@@ -258,11 +307,22 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   const activeFields = draft
     ? draft.schema.fields.filter((f: any) => fieldState(f, answers).visible && !f.config?.calculated)
     : [];
-  const completedFields = activeFields.filter((f: any) => {
+  const requiredFields = activeFields.filter(
+    (f: any) => fieldState(f, answers).required
+  );
+  const completedFields = requiredFields.filter((f: any) => {
     const value = answers[f.field_key];
-    return value !== undefined && value !== null && value !== "";
+    if (value === undefined || value === null || value === "") return false;
+    if (f.field_type === "COMPOSITE") {
+      return (f.config?.components || []).every(
+        (c: any) => !c.required || String(value?.[c.key] ?? "").trim()
+      );
+    }
+    return true;
   }).length;
-  const progress = activeFields.length ? Math.round((completedFields / activeFields.length) * 100) : 100;
+  const progress = requiredFields.length
+    ? Math.round((completedFields / requiredFields.length) * 100)
+    : 100;
   if (productDraft)
     return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
   if (draft)
@@ -292,6 +352,29 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             {notice}
           </div>
         )}
+        {Object.keys(errors).filter((key) => errors[key]).length > 0 && (
+          <div className="platform-error" role="alert">
+            <strong>Проверьте следующие поля:</strong>
+            <ul>
+              {Object.entries(errors)
+                .filter(([, message]) => Boolean(message))
+                .map(([key, message]) => {
+                  const field = draft.schema.fields.find(
+                    (f: any) => f.field_key === key
+                  );
+                  const group = (draft.schema.repeating_groups || []).find(
+                    (g: any) => g.group_key === key
+                  );
+                  return (
+                    <li key={key}>
+                      <b>{field?.label || group?.name || key}</b>
+                      {": "}{String(message)}
+                    </li>
+                  );
+                })}
+            </ul>
+          </div>
+        )}
         <form className="dynamic-form" onSubmit={review ? generate : (event) => { event.preventDefault(); if (validate()) setReview(true); }}>
           {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{String(answers[f.field_key] ?? "—")}</b></div>)}</section>}
           {!review && <>
@@ -312,7 +395,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                       ? calculated.values[f.field_key]
                       : answers[f.field_key]
                   }
-                  error={errors[f.field_key] || calculated.errors?.[f.field_key]}
+                  error={errors[f.field_key]}
                   change={(value: any) => {
                     setAnswers({ ...answers, [f.field_key]: value });
                     setErrors({ ...errors, [f.field_key]: undefined });
@@ -544,12 +627,27 @@ function RepeatingGroupForm({
 }
 function groups(fields: any[]) {
   let map = new Map<string, any[]>();
-  fields.forEach((f) => {
+  fields.filter((f) => !f.config?.calculated).forEach((f) => {
     let key = f.config?.group || "Основные сведения";
     map.set(key, [...(map.get(key) || []), f]);
   });
   return [...map.entries()];
 }
+
+const SELECT_LABELS: Record<string, string> = {
+  TYPICAL_FORM: "Типовая форма договора",
+  CUSTOM_FORM: "Иная форма договора",
+  PREPAY: "Предоплата",
+  POSTPAY: "Оплата после оказания услуг",
+  MIXED: "Смешанная оплата",
+  VAT_PAYER: "Исполнитель является плательщиком НДС",
+  NO_VAT: "Исполнитель не является плательщиком НДС",
+};
+
+function selectLabel(value: string): string {
+  return SELECT_LABELS[value] || value;
+}
+
 function Question({ field, value, error, change, required }: any) {
   let id = `field-${field.id}`,
     common = {
@@ -562,13 +660,23 @@ function Question({ field, value, error, change, required }: any) {
       "aria-describedby": error ? id + "-error" : undefined,
     };
   if (field.config?.calculated)
-    return (
+    return null;
+
+  /* Служебные вычисляемые поля скрыты из анкеты.
+  return (
       <output className={`calculated-value ${error ? "invalid" : ""}`} aria-live="polite">
         <span>{field.label}</span>
-        <b>{error || (value ?? 0)}</b>
-        <small>{error ? "Проверьте исходные значения" : "Рассчитывается автоматически"}</small>
+        <b>{value !== undefined && value !== null && value !== ""
+          ? String(value)
+          : "—"}</b>
+        <small>
+          {value === undefined || value === null || value === ""
+            ? "Заполните исходные данные для расчёта"
+            : "Рассчитано автоматически"}
+        </small>
       </output>
     );
+  */
   if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
   if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
   return (
@@ -580,26 +688,53 @@ function Question({ field, value, error, change, required }: any) {
       {field.config?.description && <small>{field.config.description}</small>}
       {field.field_type === "MULTILINE_TEXT" ? (
         <textarea {...common} />
-      ) : field.field_type === "BOOLEAN" ? (
-        <select
-          {...common}
-          value={value === undefined ? "" : String(value)}
-          onChange={(e) =>
-            change(e.target.value === "" ? "" : e.target.value === "true")
-          }
+      ) : field.field_type === "BOOLEAN" ||
+          field.field_type === "SINGLE_SELECT" ? (
+        <div
+          className="contract-choice-options"
+          role="group"
+          aria-label={field.label}
         >
-          <option value="">Выберите ответ</option>
-          <option value="true">Да</option>
-          <option value="false">Нет</option>
-        </select>
-      ) : field.field_type === "SINGLE_SELECT" ? (
-        <select {...common}>
-          <option value="">Выберите значение</option>
-          {(field.config?.options || []).map((x: string) => (
-            <option key={x}>{x}</option>
-          ))}
-        </select>
-      ) : (
+          {(field.field_type === "BOOLEAN"
+            ? [
+                { value: "true", label: "Да" },
+                { value: "false", label: "Нет" },
+              ]
+            : (field.config?.options || []).map((x: string) => ({
+                value: x,
+                label: selectLabel(x),
+              }))
+          ).map((option: any) => {
+            const selected =
+              value !== undefined &&
+              value !== null &&
+              value !== "" &&
+              String(value) === option.value;
+
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={`contract-choice ${
+                  selected ? "contract-choice-selected" : ""
+                }`}
+                aria-pressed={selected}
+                onClick={() =>
+                  change(
+                    field.field_type === "BOOLEAN"
+                      ? option.value === "true"
+                      : option.value
+                  )
+                }
+              >
+                <span>{option.label}</span>
+                <span className="contract-choice-indicator">
+                  {selected ? "✓" : ""}
+                </span>
+              </button>
+            );
+          })}
+        </div>      ) : (
         <input
           {...common}
           type={
@@ -618,4 +753,67 @@ function Question({ field, value, error, change, required }: any) {
     </label>
   );
 }
-function CompositeInputs({components,value,change}:any){return <>{components.map((x:any)=>x.type==="COMPOSITE"?<fieldset key={x.key}><legend>{x.label}</legend><CompositeInputs components={x.components||[]} value={value[x.key]||{}} change={(nested:any)=>change({...value,[x.key]:nested})}/></fieldset>:<label key={x.key}><span>{x.label}{x.required&&<i>Обязательно</i>}</span><input type={x.type==="DATE"?"date":x.type==="INTEGER"?"number":"text"} value={value[x.key]??""} onChange={e=>change({...value,[x.key]:e.target.value})}/></label>)}</>}
+function CompositeInputs({ components, value, change }: any) {
+  const hints: Record<string, string> = {
+    passport_series: "4 цифры без пробелов, например 4500",
+    passport_number: "6 цифр без пробелов, например 123456",
+    passport_issue_date: "Дата выдачи паспорта",
+    snils: "Формат: 123-456-789 00",
+  };
+
+  return (
+    <>
+      {components.map((component: any) => {
+        const current = value?.[component.key] ?? "";
+
+        if (component.type === "COMPOSITE") {
+          return (
+            <fieldset key={component.key}>
+              <legend>{component.label}</legend>
+              <CompositeInputs
+                components={component.components || []}
+                value={current || {}}
+                change={(nested: any) =>
+                  change({ ...value, [component.key]: nested })
+                }
+              />
+            </fieldset>
+          );
+        }
+
+        const pattern = component.validation?.regex;
+        const invalid =
+          Boolean(pattern) &&
+          String(current).length > 0 &&
+          !new RegExp(pattern).test(String(current));
+
+        return (
+          <label key={component.key} className={invalid ? "invalid" : ""}>
+            <span>
+              {component.label}
+              {component.required && <i>Обязательно</i>}
+            </span>
+            {hints[component.key] && <small>{hints[component.key]}</small>}
+            <input
+              type={
+                component.type === "DATE"
+                  ? "date"
+                  : component.type === "INTEGER"
+                    ? "number"
+                    : "text"
+              }
+              value={current}
+              aria-invalid={invalid}
+              onChange={(e) =>
+                change({ ...value, [component.key]: e.target.value })
+              }
+            />
+            {invalid && (
+              <b>Проверьте формат. {hints[component.key] || "Некорректное значение"}</b>
+            )}
+          </label>
+        );
+      })}
+    </>
+  );
+}

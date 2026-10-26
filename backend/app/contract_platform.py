@@ -17,6 +17,7 @@ from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
 from app.db import ConditionalDocumentRegion,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
+
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
 WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT','LIST','COMPOSITE'}
 REGION_TYPES={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE','CONDITIONAL_TABLE_COLUMN'}
@@ -187,6 +188,11 @@ def _validate_composite(components,value):
   if item.get('required') and current in (None,''):return f'Заполните «{item.get("label",key)}»'
   if current not in (None,'') and item.get('type')=='COMPOSITE':
    if error:=_validate_composite(item.get('components') or [],current):return f'«{item.get("label",key)}»: {error.lower()}'
+  elif current not in (None,''):
+   component_type=item.get('type',item.get('field_type','TEXT'))
+   if component_type in {'TEXT','MULTILINE_TEXT','DATE'} and not isinstance(current,str):return f'«{item.get("label",key)}»: ожидалась строка'
+   component=type('CompositeComponent',(),{'field_type':component_type,'config':{'validation':item.get('validation') or {}},'required':bool(item.get('required'))})()
+   if error:=validate_answer(component,current):return f'«{item.get("label",key)}»: {error.lower()}'
  return None
 def _render_composite(components,value,separator=', '):
  out=[]
@@ -241,9 +247,38 @@ def validate_answer(field,value):
 def render_value(field,value):
  if value in (None,''): return ''
  if field.field_type=='BOOLEAN': return 'Да' if value else 'Нет'
- if field.field_type=='LIST': return (field.config or {}).get('separator','; ').join(str(x) for x in value)
+ if field.field_type=='LIST':
+  config=field.config or {};numbering=config.get('numbering')
+  if numbering:
+   start=int(numbering.get('start',1));item_prefix=str(numbering.get('item_prefix','№ '));name_separator=str(numbering.get('name_separator',' — '))
+   return str(numbering.get('prefix',''))+str(config.get('separator','; ')).join(f'{item_prefix}{start+i}{name_separator}{item}' for i,item in enumerate(value)) if value else ''
+  return config.get('separator','; ').join(str(x) for x in value)
  if field.field_type=='COMPOSITE':
-  cfg=field.config or {};return _render_composite(cfg.get('components',[]),value,cfg.get('separator',', '))
+  cfg=field.config or {}
+  template=cfg.get('output_template')
+  if template:
+   from string import Formatter
+   components={item['key'] for item in cfg.get('components',[])}
+   keys=[]
+   for literal,key,spec,conversion in Formatter().parse(template):
+    if key is not None:
+     if key not in components or spec or conversion:
+      raise ValueError('Недопустимый компонент шаблона вывода')
+     keys.append(key)
+   if not keys:
+    raise ValueError('Шаблон вывода не содержит компонентов')
+   if not isinstance(value,dict):
+    raise ValueError('Ожидалось составное значение')
+   if any(value.get(key) in (None,'') for key in keys):
+    raise ValueError('Не заполнены компоненты шаблона вывода')
+   formatted=dict(value)
+   for item in cfg.get('components',[]):
+    key=item['key']
+    if item.get('type')=='DATE' and formatted.get(key):
+     from datetime import date as date_type
+     formatted[key]=date_type.fromisoformat(str(formatted[key])).strftime('%d.%m.%Y')
+   return template.format_map(formatted)
+  return _render_composite(cfg.get('components',[]),value,cfg.get('separator',', '))
  return str(value)
 def schema_for(version_id,s,create=False,u=None):
  x=s.query(QuestionnaireSchema).filter_by(template_version_id=version_id).order_by(QuestionnaireSchema.schema_version.desc()).first()
@@ -269,7 +304,7 @@ def formatted_bindings(bindings,values,fields=None):
  result={}
  for binding in bindings:
   cfg=binding.format_config or {}; value=values.get(binding.binding_key,''); field=by_id.get(binding.field_id)
-  result[binding.id]=render_value(field,value) if field and field.field_type=='BOOLEAN' and cfg.get('format','RAW')=='RAW' else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
+  result[binding.id]=render_value(field,value) if field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list'))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
  return result
 def validate_active_answers(fields,answers):
  errors={}
@@ -331,6 +366,26 @@ def _body(root): return root.find('w:body',NS) if root.tag.endswith('document') 
 def _unsafe(node):
  names=('fldChar','instrText','drawing','pict','object','bookmarkStart','bookmarkEnd')
  return next((name for name in names if node.find(f'.//w:{name}',NS) is not None),None)
+def _safe_text_range_around_word_fields(paragraph,start,end):
+ """Allow a run edit beside a Word field, never inside its code or displayed result."""
+ if any(paragraph.find(f'.//w:{name}',NS) is not None for name in ('drawing','pict','object','bookmarkStart','bookmarkEnd')):return False
+ depth=0;position=0
+ for element in paragraph.iter():
+  local=element.tag.rsplit('}',1)[-1]
+  if local=='fldChar':
+   if start<position<end:return False
+   kind=element.get(f'{{{WORD_NS}}}fldCharType')
+   if kind=='begin':depth+=1
+   elif kind=='end':
+    depth-=1
+    if depth<0:return False
+  elif local=='instrText':
+   if start<position<end:return False
+  elif local=='t':
+   length=len(element.text or '')
+   if depth and start<position+length and end>position:return False
+   position+=length
+ return depth==0
 def _table_parts(locator):
  match=re.fullmatch(r'(.+)#/tbl\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]/p\[(\d+)\]',locator)
  return (match.group(1),*map(int,match.groups()[1:])) if match else None
@@ -416,6 +471,7 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
  # Word fields or drawings.  Only a run-level edit could split such a node and
  # therefore retains the strict safety gate.
  bad=next((_unsafe(x) for x in targets if _unsafe(x)),None) if p.region_type=='CONDITIONAL_RUN' else None
+ if bad in {'fldChar','instrText'} and _safe_text_range_around_word_fields(targets[0],p.start,p.end):bad=None
  if bad: raise ValueError(f'Область содержит неподдерживаемую структуру Word ({bad})')
  original='\n'.join(_paragraph_text(x) for target in targets for x in ([target] if target.tag==f'{{{WORD_NS}}}p' else target.findall('.//w:p',NS)))
  if not original.strip(): raise ValueError('Условная область не содержит текста')
@@ -460,6 +516,12 @@ def validate_regions(v,s,bindings=None):
 def _regions_overlap(a,b):
  la,lb=a.locator,b.locator
  if la.get('part')!=lb.get('part'): return False
+ # A run can be removed before its containing conditional paragraph/group.
+ # Keep run/run overlap checks below; only this exact parent relationship is safe.
+ if {a.region_type,b.region_type} & {'CONDITIONAL_RUN'}:
+  run,parent=(a,b) if a.region_type=='CONDITIONAL_RUN' else (b,a)
+  if parent.region_type=='CONDITIONAL_PARAGRAPH_GROUP' and run.locator.get('node') in parent.locator.get('nodes',[]):
+   return False
  def paragraphs(region):
   loc=region.locator
   if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: return {loc['node']}
@@ -590,7 +652,7 @@ def paragraph_for(root,locator):
  if not m: raise ValueError('Неподдерживаемый структурный locator')
  t,r,c,p=map(int,m.groups()); return body.findall('./w:tbl',NS)[t-1].findall('./w:tr',NS)[r-1].findall('./w:tc',NS)[c-1].findall('./w:p',NS)[p-1]
 def replace_range(p,start,end,value):
- if p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None: raise ValueError('Привязка внутри поля Word не поддерживается')
+ if (p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None) and not _safe_text_range_around_word_fields(p,start,end): raise ValueError('Привязка внутри поля Word не поддерживается')
  spans=[]; pos=0
  for node in p.findall('.//w:t',NS): text=node.text or ''; spans.append((node,pos,pos+len(text),text)); pos+=len(text)
  if start==end==0 and pos==0:
@@ -820,10 +882,15 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def draft_test_drive(tid:str,vid:str,p:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u);v,t=owned_version(vid,u,s);require_draft(v)
   if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
-  candidates=(v.preview_metadata or {}).get('binding_candidates',[]);unresolved=[x['candidate_id'] for x in candidates if x.get('status') not in {'CONFIGURED','GENERATED_AND_VERIFIED'}]
-  if unresolved:raise HTTPException(409,detail={'message':'Сначала завершите структурную разметку','unresolved_count':len(unresolved),'candidate_ids':unresolved[:50]})
+  # Частично настроенный DOCX допускается к тестовой генерации.
+  # Все существующие привязки и условия проверяются ниже.
+  if not s.query(DocumentBinding).filter_by(
+   template_version_id=v.id,status='ACTIVE'
+  ).first():
+   raise HTTPException(422,detail='Создайте хотя бы одну привязку к DOCX')
   schema=schema_for(v.id,s);fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
   known={x.field_key for x in fields}
+  known.update(x.group_key for x in s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all())
   if set(p.answers)-known:raise HTTPException(422,detail='Анкета содержит неизвестные поля')
   validate_condition_schema(fields);errors=validate_active_answers(fields,p.answers)
   groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all();errors.update(validate_repeating_answers(groups,s,fields,p.answers,True))
@@ -1032,16 +1099,209 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    old=other.locator or {}
    if old.get('node')==loc['node'] and loc['text_start']<old.get('text_end',0) and loc['text_end']>old.get('text_start',0): raise HTTPException(409,detail='Выделение пересекается с другой привязкой строки')
   field.locator=loc; s.commit(); return repeating_field_out(field)
+
+ @r.post(prefix+'/{tid}/versions/{vid}/clone',status_code=201)
+ def clone_template_version(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  """Create an editable copy of a published version, retaining configuration."""
+  import shutil
+  from sqlalchemy import func
+
+  require_manager(u)
+  original,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  if original.status!='PUBLISHED':
+   raise HTTPException(409,detail='Копирование доступно для опубликованной версии')
+
+  if s.query(TemplateVersion).filter_by(template_id=t.id,status='DRAFT').first():
+   raise HTTPException(409,detail='У шаблона уже есть черновая версия')
+
+  new_id=str(uuid.uuid4())
+  source=safe_source(original)
+  target=Path(settings.storage)/'template_sources'/(new_id+'.docx')
+  target.parent.mkdir(parents=True,exist_ok=True)
+
+  def duplicate(model,obj,**overrides):
+   excluded={'id','created_at','updated_at','published_at'}
+   values={
+    col.name:copy.deepcopy(getattr(obj,col.name))
+    for col in model.__table__.columns
+    if col.name not in excluded
+   }
+   values.update(overrides)
+   return model(**values)
+
+  id_map={}
+
+  try:
+   shutil.copyfile(source,target)
+
+   next_number=(s.query(func.max(TemplateVersion.version_number))
+      .filter_by(template_id=t.id).scalar() or 0)+1
+
+   metadata=copy.deepcopy(original.preview_metadata or {})
+   metadata.pop('test_documents',None)
+
+   new_version=duplicate(
+    TemplateVersion,original,
+    id=new_id,
+    version_number=next_number,
+    status='DRAFT',
+    source_path=str(target),
+    preview_metadata=metadata,
+    created_by_id=u.id,
+    published_by_id=None,
+    published_at=None,
+   )
+   s.add(new_version)
+   s.flush()
+
+   old_schema=s.query(QuestionnaireSchema).filter_by(
+    template_version_id=original.id
+   ).order_by(QuestionnaireSchema.schema_version.desc()).first()
+
+   if old_schema:
+    new_schema=duplicate(
+     QuestionnaireSchema,old_schema,
+     template_version_id=new_id,
+     status='DRAFT',
+     created_by_id=u.id,
+    )
+    s.add(new_schema)
+    s.flush()
+
+    for old_field in s.query(QuestionnaireField).filter_by(
+     schema_id=old_schema.id
+    ).order_by(QuestionnaireField.position):
+     new_field=duplicate(
+      QuestionnaireField,old_field,schema_id=new_schema.id
+     )
+     s.add(new_field)
+     s.flush()
+     id_map[old_field.id]=new_field.id
+
+   for old_binding in s.query(DocumentBinding).filter_by(
+    template_version_id=original.id
+   ):
+    new_binding=duplicate(
+     DocumentBinding,old_binding,
+     template_version_id=new_id,
+     field_id=id_map.get(old_binding.field_id,old_binding.field_id),
+     created_by_id=u.id,
+    )
+    s.add(new_binding)
+    s.flush()
+    id_map[old_binding.id]=new_binding.id
+
+   for old_region in s.query(ConditionalDocumentRegion).filter_by(
+    template_version_id=original.id
+   ):
+    new_region=duplicate(
+     ConditionalDocumentRegion,old_region,
+     template_version_id=new_id,
+     created_by_id=u.id,
+    )
+    s.add(new_region)
+    s.flush()
+    id_map[old_region.id]=new_region.id
+
+   for old_group in s.query(RepeatingGroup).filter_by(
+    template_version_id=original.id
+   ):
+    new_group=duplicate(
+     RepeatingGroup,old_group,
+     template_version_id=new_id,
+     created_by_id=u.id,
+    )
+    s.add(new_group)
+    s.flush()
+    id_map[old_group.id]=new_group.id
+
+    for old_group_field in s.query(RepeatingGroupField).filter_by(
+     group_id=old_group.id
+    ):
+     new_group_field=duplicate(
+      RepeatingGroupField,old_group_field,
+      group_id=new_group.id,
+     )
+     s.add(new_group_field)
+     s.flush()
+     id_map[old_group_field.id]=new_group_field.id
+
+   def remap(value):
+    if isinstance(value,str):return id_map.get(value,value)
+    if isinstance(value,list):return [remap(x) for x in value]
+    if isinstance(value,dict):return {k:remap(v) for k,v in value.items()}
+    return value
+
+   new_version.preview_metadata=remap(metadata)
+
+   s.add(TemplateAuditEvent(
+    template_id=t.id,
+    template_version_id=new_id,
+    actor_id=u.id,
+    event_type='VERSION_CLONED',
+    metadata_json={'source_version_id':original.id},
+   ))
+
+   s.commit()
+   return version_out(new_version)
+
+  except Exception:
+   s.rollback()
+   target.unlink(missing_ok=True)
+   raise
+
  @r.post(prefix+'/{tid}/versions/{vid}/publish')
  def publish(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); require_publisher(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s)
   if not schema: raise HTTPException(422,detail='Создайте анкету')
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); groups=validate_repeating_groups(v,s,bindings,regions)
   if not fields: raise HTTPException(422,detail='Добавьте хотя бы одно поле анкеты')
+  if not bindings: raise HTTPException(422,detail='Создайте хотя бы одну привязку к DOCX')
   validate_condition_schema(fields)
   validate_calculations(v.id,s)
   bound={x.field_id for x in bindings}
-  if any((x.required or (x.config or {}).get('required_when') is not None) and x.id not in bound for x in fields): raise HTTPException(422,detail='Все обязательные поля должны иметь привязку в DOCX')
+  from app.binding_materialization import candidate_is_resolved
+  import json as _json
+  candidates=(v.preview_metadata or {}).get('binding_candidates',[])
+  expressions=[
+   (f.config or {}).get('text_expression') or (f.config or {}).get('expression')
+   for f in fields if (f.config or {}).get('calculated')
+  ]
+  conditions=[
+   condition
+   for f in fields
+   for condition in (
+    (f.config or {}).get('visible_when'),
+    (f.config or {}).get('required_when'),
+    (f.config or {}).get('document_condition')
+   )
+   if condition
+  ]
+  conditions.extend(r.include_when for r in regions)
+  conditions.extend((g.config or {}).get('visible_when') for g in groups if (g.config or {}).get('visible_when'))
+  dependencies=_json.dumps(expressions+conditions,ensure_ascii=False)
+  missing=[]
+  for f in fields:
+   cfg=f.config or {}
+   if not (f.required or cfg.get('required_when') is not None):
+    continue
+   if f.id in bound or ('"'+f.field_key+'"') in dependencies:
+    continue
+   matching=[
+    c for c in candidates
+    if c.get('field_path')==f.field_key
+    and c.get('status') in {'BINDING_COVERAGE','REGION_BINDING_COVERAGE'}
+    and candidate_is_resolved(s,v,c,candidates)
+   ]
+   if matching:
+    continue
+   missing.append(f.field_key)
+  if missing:
+   raise HTTPException(422,detail={
+    'message':'Обязательные поля не подключены к формированию договора',
+    'fields':missing
+   })
   if any(not x.field_id for x in bindings): raise HTTPException(422,detail='Найдены привязки без поля анкеты')
   probe={x.field_key:('Да' if x.field_type=='BOOLEAN' else '2026-01-01' if x.field_type=='DATE' else '1') for x in fields if not (x.config or {}).get('calculated')}; temp=Path(v.source_path).parent/'publish-check.docx'
   group_fields={x.id:s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all() for x in groups}

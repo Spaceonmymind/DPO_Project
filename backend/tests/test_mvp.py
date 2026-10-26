@@ -140,6 +140,64 @@ def test_structural_candidate_materialization_is_reviewed_idempotent_and_draft_o
         session=SessionLocal();assert session.query(DocumentBinding).filter_by(template_version_id=version['id']).count()==0;session.close()
 
 
+def test_derived_candidate_requires_calculated_field_and_exact_reviewed_range():
+    from app.binding_materialization import candidate_is_resolved
+    with TestClient(app) as client:
+        headers=auth(client);template=create_platform_template(client,headers,'DERIVED_MATERIALIZATION')
+        version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('derived.docx',contract_docx_bytes(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+        base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+        assert client.post(base+'/fields',headers=headers,json={'field_key':'vat','label':'НДС','field_type':'SINGLE_SELECT','required':True,'position':1,'options':['YES','NO']}).status_code==201
+        assert client.post(base+'/fields',headers=headers,json={'field_key':'clause','label':'Пункт','field_type':'TEXT','required':False,'position':2,'calculated':True,'text_expression':{'operation':'IF','condition':{'operator':'EQUALS','field_key':'vat','value':'YES'},'then':{'literal':'Есть НДС'},'else':{'literal':'Нет НДС'}}}).status_code==201
+        preview=client.get(base+'/preview',headers=headers).json();node=next(x for x in preview['nodes'] if 'Заказчик:' in x['text'])
+        candidate={'candidate_id':'O013:TEST','occurrence_id':'O013','rf_id':'RF010','field_path':'clause','variant':'TEST','matrix_location':'P0','locator':node['locator'],'part':node['part'],'structure_fingerprint':preview['structure_fingerprint'],'start':0,'end':len(node['text']),'selected_text':node['text'],'context':node['text'],'operation':'DERIVED','status':'REVIEW_REQUIRED','review_decision':'CONFIRMED'}
+        alias={**candidate,'candidate_id':'O014:TEST','occurrence_id':'O014','status':'STRUCTURAL_ALIAS','alias_of_candidate_id':'O013:TEST','materialized_id':None}
+        session=SessionLocal();stored=session.get(TemplateVersion,version['id']);stored.preview_metadata={**(stored.preview_metadata or {}),'binding_candidates':[candidate,alias]};session.commit();session.close()
+        auto=client.post(base+'/binding-candidates/auto-materialize',headers=headers);assert auto.status_code==200 and auto.json()['materialized']==[]
+        made=client.post(base+'/binding-candidates/O013:TEST/materialize',headers=headers);assert made.status_code==200,made.text
+        session=SessionLocal();stored=session.get(TemplateVersion,version['id']);items=stored.preview_metadata['binding_candidates'];assert candidate_is_resolved(session,stored,items[1],items);session.close()
+        rolled=client.delete(base+'/binding-candidates/O013:TEST/materialization',headers=headers);assert rolled.status_code==200,rolled.text
+        session=SessionLocal();stored=session.get(TemplateVersion,version['id']);items=stored.preview_metadata['binding_candidates'];assert not candidate_is_resolved(session,stored,items[1],items);session.close()
+
+
+def test_conditional_run_beside_word_field_keeps_field_and_allows_nested_payment_clause():
+    from types import SimpleNamespace
+    from app.contract_platform import _regions_overlap, _safe_text_range_around_word_fields, replace_range
+    paragraph=Document().add_paragraph();paragraph.add_run('Оплата ')
+    field_run=paragraph.add_run();begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');field_run._r.append(begin)
+    paragraph.add_run('[срок]')
+    field_run=paragraph.add_run();end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');field_run._r.append(end)
+    paragraph.add_run(' и предоставления банковской гарантии.')
+    source=paragraph.text;start=source.index(' и предоставления');finish=source.index('.',start)
+    assert _safe_text_range_around_word_fields(paragraph._p,start,finish)
+    assert not _safe_text_range_around_word_fields(paragraph._p,source.index('[срок]'),source.index('[срок]')+len('[срок]'))
+    part='word/document.xml';node=f'{part}#/p[1]'
+    parent=SimpleNamespace(region_type='CONDITIONAL_PARAGRAPH_GROUP',locator={'part':part,'nodes':[node]})
+    child=SimpleNamespace(region_type='CONDITIONAL_RUN',locator={'part':part,'node':node,'text_start':start,'text_end':finish})
+    assert not _regions_overlap(parent,child)
+    replace_range(paragraph._p,start,finish,'')
+    assert paragraph.text=='Оплата [срок].'
+    assert len(paragraph._p.findall('.//'+qn('w:fldChar')))==2
+
+
+def test_conditional_row_alias_becomes_unresolved_after_anchor_rollback():
+    from app.binding_materialization import candidate_is_resolved
+    with TestClient(app) as client:
+        headers=auth(client);template=create_platform_template(client,headers,'ROW_ALIAS_ROLLBACK')
+        version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('rows.docx',contract_docx_bytes(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+        base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+        assert client.post(base+'/fields',headers=headers,json={'field_key':'extra_option.enabled','label':'Дополнительная опция','field_type':'BOOLEAN','position':1}).status_code==201
+        preview=client.get(base+'/preview',headers=headers).json();start=next(item for item in preview['nodes'] if item['text']=='Срок');alias_node=next(item for item in preview['nodes'] if item['text']=='30 дней')
+        created=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'extra_row','region_type':'CONDITIONAL_TABLE_ROW','start_locator':start['locator'],'include_when':{'operator':'EQUALS','field_key':'extra_option.enabled','value':True}})
+        assert created.status_code==201,created.text
+        anchor={'candidate_id':'O048:TEST','rf_id':'RF022','field_path':'extra_option.enabled','structure_fingerprint':preview['structure_fingerprint'],'status':'CONFIGURED','materialized_type':'CONDITIONAL_DOCUMENT_REGION','materialized_id':created.json()['id']}
+        alias={'candidate_id':'O049:TEST','rf_id':'RF022','field_path':'extra_option.enabled','structure_fingerprint':preview['structure_fingerprint'],'status':'STRUCTURAL_ALIAS','alias_of_candidate_id':'O048:TEST','locator':alias_node['locator']}
+        session=SessionLocal();stored=session.get(TemplateVersion,version['id'])
+        assert candidate_is_resolved(session,stored,alias,[anchor,alias])
+        assert not candidate_is_resolved(session,stored,alias,[{**anchor,'status':'REVIEW_REQUIRED'},alias])
+        assert not candidate_is_resolved(session,stored,{**alias,'locator':start['locator'].replace('/tr[2]','/tr[1]')},[anchor,alias])
+        session.close()
+
+
 def test_clarification_asks_only_one_atomic_field():
     question, fields, _ = clarification(['purpose', 'deadline'], [], 0)
     assert fields == ['purpose']

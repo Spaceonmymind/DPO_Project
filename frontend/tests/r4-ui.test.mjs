@@ -36,11 +36,34 @@ test('catalog has search, empty state and resumable questionnaire',()=>{
 });
 
 test('builder exposes staged wide structural workspace',()=>{
-  for(const label of ['Общие сведения','Исходный документ','Поля и привязки','Анкета','Условия и повторяемые таблицы','Проверка и публикация']) assert.match(builder,new RegExp(label));
+  for(const label of ['Общие сведения','Исходный документ','Вопросы анкеты','Привязки к Word','Условия и таблицы','Проверка и публикация']) assert.match(builder,new RegExp(label));
   assert.match(builder,/document-outline/);
   assert.match(builder,/data-locator/);
-  assert.match(styles,/grid-template-columns:210px minmax\(520px,1fr\) 330px/);
+  assert.match(builder,/workspace-context-inspector/);
+  assert.match(builder,/workspace-question-list/);
+  assert.match(readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8'),/grid-template-columns:minmax\(210px,240px\) minmax\(400px,1fr\) minmax\(300px,340px\)/);
   assert.match(styles,/preview-node:hover>.region-actions/);
+});
+
+test('selection stays in contextual inspector and can create a linked question',()=>{
+  const workspace=readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8');
+  assert.match(builder,/createPortal\(children, target\)/);
+  assert.match(builder,/setSelection\(\{ \.\.\.selectionDraft, field_id: saved\.id \}\)/);
+  assert.match(builder,/Создать новый вопрос/);
+  assert.match(workspace,/#workspace-context-inspector>\.selection-card-floating\{position:static/);
+  assert.match(workspace,/\.document-outline,\.template-open \.questionnaire-builder\{position:sticky/);
+});
+
+test('Word outline keeps full searchable list in independently scrolling rows',()=>{
+  const workspace=readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8');
+  assert.match(builder,/visibleStructureItems\.map/);
+  assert.match(builder,/structureItems\.filter/);
+  assert.match(builder,/CSS\.escape\(item\.locator\)/);
+  assert.doesNotMatch(builder,/visibleStructureItems\.slice\(/);
+  assert.match(workspace,/\.workspace-structure-list\{[^}]*grid-auto-rows:max-content/);
+  assert.match(workspace,/\.workspace-structure-list button\{[^}]*flex-shrink:0/);
+  assert.match(workspace,/\.document-outline nav\{[^}]*overflow-y:auto/);
+  assert.match(workspace,/\.workspace-question-list button\{/);
 });
 
 test('template route stays role gated and publication permission remains server controlled',()=>{

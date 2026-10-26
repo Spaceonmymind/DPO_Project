@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -83,8 +84,14 @@ def apply_plan(plan: dict, owner, session=None) -> dict:
                 metadata=dict(template_version.preview_metadata or {});existing={x.get("candidate_id"):x for x in metadata.get("binding_candidates",[])}
                 for candidate in (x for x in plan["candidates"] if x["variant"]==variant):
                     previous=existing.get(candidate["candidate_id"],{});preserved={key:value for key,value in previous.items() if key in {"status","review_decision","materialized_id","materialized_type","materialization_source","materialized_at","review_group","review_reason","required_specialist_action"}}
-                    existing[candidate["candidate_id"]]={**candidate,**preserved}
-                    if preserved.get("materialized_id"):existing[candidate["candidate_id"]]["status"]="CONFIGURED"
+                    same_source=previous.get("structure_fingerprint")==candidate["structure_fingerprint"] and all(previous.get(key)==candidate[key] for key in ("rf_id","field_path","operation"))
+                    if same_source:
+                        # Keep specialist-reviewed locators and diagnostics. A renewed discovery
+                        # must not point a materialized binding back at an incorrect matrix row.
+                        existing[candidate["candidate_id"]]=copy.deepcopy(previous)
+                    else:
+                        existing[candidate["candidate_id"]]={**candidate,**preserved}
+                        if preserved.get("materialized_id"):existing[candidate["candidate_id"]]["status"]="REVIEW_REQUIRED"
                 metadata["binding_candidates"]=list(existing.values());metadata["r363_import_signature"]=plan["signature"];template_version.preview_metadata=metadata;candidate_counts[variant]=len(existing)
                 schema=session.query(QuestionnaireSchema).filter_by(template_version_id=template_version.id).first()
                 known={x.field_key for x in session.query(QuestionnaireField).filter_by(schema_id=schema.id)} if schema else set();added=0

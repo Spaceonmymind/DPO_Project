@@ -1,4 +1,7 @@
-import React, { FormEvent, useEffect, useState } from "react";
+import "./selection-panel.css";
+import "./template-workspace.css";
+import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   FileText,
   Upload,
@@ -12,6 +15,7 @@ import {
   GitBranch,
   Search,
   ArrowLeft,
+  ChevronRight,
 } from "lucide-react";
 import { evaluateExpression } from "./calculations";
 import { ProductAdmin } from "./ProductAdmin";
@@ -64,7 +68,7 @@ const blank = (position = 1) => ({
 });
 export function TemplateAdmin({ api }: { api: Api }) {
   const [section, setSection] = useState<"templates" | "products">("templates");
-  return <><nav className="platform-section-tabs" aria-label="Раздел конструктора"><button className={section === "templates" ? "active" : ""} onClick={() => setSection("templates")}>Шаблоны DOCX</button><button className={section === "products" ? "active" : ""} onClick={() => setSection("products")}>Договорные продукты</button></nav>{section === "products" ? <ProductAdmin api={api} ConditionEditor={ConditionEditor} /> : <TemplateBuilder api={api} />}</>;
+  return <TemplateBuilder api={api} />;
 }
 function TemplateBuilder({ api }: { api: Api }) {
   const [templates, setTemplates] = useState<any[]>([]),
@@ -82,6 +86,8 @@ function TemplateBuilder({ api }: { api: Api }) {
     [testAnswers, setTestAnswers] = useState<any>({}),
     [testDocument, setTestDocument] = useState<any>(),
     [selection, setSelection] = useState<any>(),
+    [activeBinding, setActiveBinding] = useState<any>(),
+    [selectionDraft, setSelectionDraft] = useState<any>(),
     [repeatingBinding, setRepeatingBinding] = useState(""),
     [regionDraft, setRegionDraft] = useState<any>(),
     [groupDraft, setGroupDraft] = useState<any>(),
@@ -97,7 +103,22 @@ function TemplateBuilder({ api }: { api: Api }) {
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
     [stage, setStage] = useState(1),
-    [docQuery, setDocQuery] = useState("");
+    [docQuery, setDocQuery] = useState(""),
+    [questionQuery, setQuestionQuery] = useState(""),
+    [workspaceTab, setWorkspaceTab] = useState<"questions" | "structure">("questions"),
+    [showFieldEditor, setShowFieldEditor] = useState(false),
+    [zoom, setZoom] = useState(100);
+  const structureItems = useMemo(() => (preview?.nodes || []).map((node: any, index: number) => ({
+    locator: node.locator,
+    kind: node.kind,
+    number: index + 1,
+    description: node.text.trim() || "Пустой фрагмент",
+    searchText: node.text.trim().toLocaleLowerCase("ru"),
+  })), [preview]);
+  const visibleStructureItems = useMemo(() => {
+    const query = docQuery.trim().toLocaleLowerCase("ru");
+    return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
+  }, [structureItems, docQuery]);
   async function load() {
     setTemplates(await api("/document-templates"));
   }
@@ -129,6 +150,9 @@ function TemplateBuilder({ api }: { api: Api }) {
     setVersion(x);
     setStage(2);
     setSelection(null);
+    setActiveBinding(null);
+    setSelectionDraft(null);
+    setShowFieldEditor(false);
     setRepeatingBinding("");
     setRegionDraft(null);
     setGroupDraft(null);
@@ -238,30 +262,48 @@ function TemplateBuilder({ api }: { api: Api }) {
     let start = before.toString().length,
       text = s.toString();
     if (text.trim())
+      setActiveBinding(null);
+    if (text.trim())
       setSelection({
         locator: a.dataset.locator,
         start,
         end: start + text.length,
         selected_text: text,
-        field_id: schema?.fields[0]?.id || "",
+        field_id: "",
       });
   }
   async function saveField(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       let path = `/document-templates/${selected.id}/versions/${version.id}/fields${editing ? "/" + editing : ""}`;
-      await api(path, {
+      const saved = await api(path, {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(field),
       });
       await openVersion(version);
-      setEditing(undefined);
+      if (selectionDraft && saved?.id) {
+        setSelection({ ...selectionDraft, field_id: saved.id });
+        setStage(3);
+      } else if (saved?.id) {
+        setEditing(saved.id);
+        setShowFieldEditor(true);
+        setStage(4);
+      }
+      setSelectionDraft(null);
+      if (selectionDraft || !saved?.id) {
+        setEditing(undefined);
+        setShowFieldEditor(false);
+      }
       setNotice("Поле анкеты сохранено.");
     });
   }
   function editField(x: any) {
     setStage(4);
+    setActiveBinding(null);
+    setSelection(null);
+    setSelectionDraft(null);
+    setShowFieldEditor(true);
     setEditing(x.id);
     setField({
       ...x,
@@ -271,6 +313,16 @@ function TemplateBuilder({ api }: { api: Api }) {
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
+  }
+  function newField() {
+    if (selection) {
+      setSelectionDraft(selection);
+      setSelection(null);
+    }
+    setStage(4);
+    setEditing(undefined);
+    setField({ ...blank((schema?.fields?.length || 0) + 1), field_key: `question_${crypto.randomUUID().replace(/-/g, "")}` });
+    setShowFieldEditor(true);
   }
   async function removeField(id: string) {
     await run(async () => {
@@ -303,7 +355,7 @@ function TemplateBuilder({ api }: { api: Api }) {
         },
       );
       await openVersion(version);
-      setNotice("Фрагмент привязан к вопросу.");
+      setNotice("Привязка создана.");
     });
   }
   async function unbind(id: string) {
@@ -320,6 +372,9 @@ function TemplateBuilder({ api }: { api: Api }) {
     start_locator: string,
     end_locator?: string,
   ) {
+    setSelection(null);
+    setActiveBinding(null);
+    setGroupDraft(null);
     setRegionDraft({
       region_key: "",
       region_type,
@@ -372,6 +427,9 @@ function TemplateBuilder({ api }: { api: Api }) {
     });
   }
   function draftRepeatingGroup(locator: string, endLocator?: string) {
+    setSelection(null);
+    setActiveBinding(null);
+    setRegionDraft(null);
     setGroupDraft({
       group_key: "",
       name: "",
@@ -483,6 +541,20 @@ function TemplateBuilder({ api }: { api: Api }) {
       setNotice("Фрагмент строки привязан к полю группы.");
     });
   }
+  async function cloneVersion() {
+    if (!selected || !version) return;
+    await run(async () => {
+      const created = await api(
+        `/document-templates/${selected.id}/versions/${version.id}/clone`,
+        { method: "POST" },
+      );
+      setVersions(await api(`/document-templates/${selected.id}/versions`));
+      await openVersion(created);
+      setStage(4);
+      setNotice(`Версия ${created.version_number} создана. Можно редактировать.`);
+    });
+  }
+
   async function publish() {
     await run(async () => {
       let x = await api(
@@ -585,6 +657,17 @@ function TemplateBuilder({ api }: { api: Api }) {
                   <h2>{selected.name}</h2>
                   <p>{selected.category}</p>
                 </div>
+                {version?.status === "PUBLISHED" && (
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={busy}
+                    onClick={cloneVersion}
+                  >
+                    <Plus size={16} />
+                    Создать новую версию
+                  </button>
+                )}
                 <label className="secondary upload-version">
                   <Upload size={16} />
                   Загрузить DOCX
@@ -598,7 +681,23 @@ function TemplateBuilder({ api }: { api: Api }) {
                 </label>
               </header>
               <nav className="builder-stages" aria-label="Этапы настройки шаблона">
-                {["Общие сведения", "Исходный документ", "Поля и привязки", "Анкета", "Условия и повторяемые таблицы", "Проверка и публикация"].map((label, index) => <button key={label} className={stage === index + 1 ? "active" : ""} aria-current={stage === index + 1 ? "step" : undefined} onClick={() => setStage(index + 1)}><span>{index + 1}</span>{label}</button>)}
+                {[
+                  { step: 1, label: "Общие сведения" },
+                  { step: 2, label: "Исходный документ" },
+                  { step: 4, label: "Вопросы анкеты" },
+                  { step: 3, label: "Привязки к Word" },
+                  { step: 5, label: "Условия и таблицы" },
+                  { step: 6, label: "Проверка и публикация" },
+                ].map(({ step, label }, index) => (
+                  <button
+                    key={step}
+                    className={stage === step ? "active" : ""}
+                    aria-current={stage === step ? "step" : undefined}
+                    onClick={() => setStage(step)}
+                  >
+                    <span>{index + 1}</span>{label}
+                  </button>
+                ))}
               </nav>
               <div className="version-grid">
                 <section className="version-list">
@@ -638,14 +737,32 @@ function TemplateBuilder({ api }: { api: Api }) {
                         </a>
                       </header>
                       <div className="builder-grid">
-                        <aside className="document-outline">
-                          <h3>Структура документа</h3>
-                          <label><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент"/></label>
-                          <nav>{preview.nodes.filter((node:any) => node.text.trim().toLowerCase().includes(docQuery.toLowerCase())).slice(0, 80).map((node:any, index:number) => <button key={node.locator} onClick={() => document.querySelector(`[data-locator="${CSS.escape(node.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})}><span>{node.kind === "table_cell" ? "Ячейка" : "Абзац"} {index + 1}</span><b>{node.text.trim() || "Пустой фрагмент"}</b></button>)}</nav>
+                        <aside className="document-outline" aria-label="Навигация по шаблону">
+                          <div className="workspace-tabs" role="tablist" aria-label="Навигация">
+                            <button role="tab" aria-selected={workspaceTab === "questions"} className={workspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
+                            <button role="tab" aria-selected={workspaceTab === "structure"} className={workspaceTab === "structure" ? "active" : ""} onClick={() => setWorkspaceTab("structure")}>Word</button>
+                          </div>
+                          {workspaceTab === "questions" ? <>
+                            <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
+                            <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
+                            {version.status === "DRAFT" && <button className="workspace-add" type="button" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}
+                            <nav className="workspace-question-list" aria-label="Список вопросов">
+                              {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{item.group || "Основные сведения"}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
+                              {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
+                              {schema?.fields?.length > 0 && !(schema.fields as any[]).some((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())) && <p className="workspace-empty">По запросу ничего не найдено.</p>}
+                            </nav>
+                          </> : <>
+                            <div className="workspace-panel-heading"><h3>Структура Word</h3><span>{preview.nodes.length}</span></div>
+                            <label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label>
+                            <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => document.querySelector(`[data-locator="${CSS.escape(item.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
+                          </>}
                         </aside>
                         <section className="document-canvas">
+                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><label>Масштаб <select value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div>
                           {bindingCandidates.length > 0 && (
-                            <section className="selection-card binding-candidate-review" aria-label="Кандидаты структурной разметки">
+                            <details className="selection-card binding-candidate-review" aria-label="Кандидаты структурной разметки">
+                              <summary>Кандидаты структурной разметки · {bindingCandidates.length}</summary>
+                              <div className="candidate-review-body">
                               <Link2 />
                               <div>
                                 <h3>Готовность структурной разметки</h3>
@@ -672,14 +789,24 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   </article>
                                 ))}
                               </div>
-                            </section>
+                              </div>
+                            </details>
                           )}
                           {stage===6&&version.status==="DRAFT"&&(
                             <section className="selection-card draft-test-drive" aria-label="Тестовая генерация черновика">
-                              <FileText/><div><h3>Test-drive черновой версии</h3><p>Генерация доступна только после завершения всей структурной разметки. Файл получит метку «ТЕСТОВЫЙ ДОКУМЕНТ» в колонтитуле и свойствах DOCX.</p>
+                              <FileText/><div><h3>Проверка документа</h3><p>Проверьте заполнение настроенных полей перед публикацией. Остальные фрагменты Word останутся без изменений.</p>
                               <div className="scenario-facts">{(schema?.fields||[]).map((item:any)=><TestDriveField key={item.id} field={item} value={testAnswers[item.field_key]} change={(value:any)=>setTestAnswers({...testAnswers,[item.field_key]:value})}/>)}</div>
-                              <button type="button" disabled={bindingCandidates.some(x=>!["CONFIGURED","GENERATED_AND_VERIFIED"].includes(x.status))} onClick={generateTestDocument}>Сформировать тестовый DOCX</button>
-                              {testDocument&&<a className="primary" href={testDocument.download_url}><Download size={15}/>Скачать тестовый DOCX</a>}</div>
+                              <button type="button" disabled={busy} onClick={generateTestDocument}>Сформировать тестовый DOCX</button>
+                              {testDocument&&<a className="primary" href={testDocument.download_url}><Download size={15}/>Скачать тестовый DOCX</a>}
+                              <button
+                                type="button"
+                                className="primary"
+                                disabled={busy}
+                                onClick={publish}
+                              >
+                                {busy ? "Публикация..." : "Опубликовать"}
+                              </button>
+                              </div>
                             </section>
                           )}
                           <div className="preview-notice">
@@ -690,6 +817,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                           <article
                             className="docx-page"
                             onMouseUp={selectRange}
+                            style={{ zoom: `${zoom}%` }}
                           >
                             {preview.nodes.map((node: any) => (
                               <div
@@ -716,6 +844,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         r.region_type === "CONDITIONAL_RUN" &&
                                         r.locator.node === node.locator,
                                     ),
+                                    (binding: any) => { setActiveBinding(binding); setSelection(null); setRegionDraft(null); setGroupDraft(null); setStage(3); },
                                   )}
                                 </p>
                                 {version.status === "DRAFT" && (
@@ -802,8 +931,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                               </div>
                             ))}
                           </article>
-                          {selection && (
-                            <section className="selection-card">
+                          {selection && <InspectorPortal>
+                            <section className="selection-card selection-card-floating" aria-label="Настройка выбранного фрагмента">
                               <Link2 />
                               <div>
                                 <h3>Выбранный фрагмент</h3>
@@ -867,18 +996,32 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     <option value="PERCENT">Процент</option>
                                   </select>
                                 </label>
+                                {!selection.field_id && (
+                                  <p className="selection-help">
+                                    Выберите существующий вопрос или создайте новый для этого фрагмента.
+                                  </p>
+                                )}
+                                {version.status === "DRAFT" && <button className="secondary" type="button" onClick={newField}><Plus size={15}/>Создать новый вопрос</button>}
                                 <button
                                   className="primary"
+                                  type="button"
                                   disabled={busy || !selection.field_id}
                                   onClick={bind}
                                 >
-                                  Создать привязку
+                                  {busy ? "Сохранение..." : "Создать привязку"}
+                                </button>
+                                <button
+                                  className="secondary"
+                                  type="button"
+                                  onClick={() => setSelection(null)}
+                                >
+                                  Закрыть панель
                                 </button>
                                 <button
                                   className="secondary"
                                   type="button"
                                   onClick={() =>
-                                    setRegionDraft({
+                                    { setRegionDraft({
                                       region_key: "",
                                       region_type: "CONDITIONAL_RUN",
                                       start_locator: selection.locator,
@@ -886,7 +1029,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                       end: selection.end,
                                       selected_text: selection.selected_text,
                                       include_when: null,
-                                    })
+                                    }); setSelection(null); }
                                   }
                                 >
                                   Сделать условным фрагментом
@@ -927,8 +1070,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 )}
                               </div>
                             </section>
-                          )}
-                          {regionDraft && (
+                          </InspectorPortal>}
+                          {regionDraft && <InspectorPortal>
                             <section
                               className="region-editor"
                               aria-label="Настройка условной области"
@@ -986,8 +1129,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 </button>
                               </div>
                             </section>
-                          )}
-                          {groupDraft && (
+                          </InspectorPortal>}
+                          {groupDraft && <InspectorPortal>
                             <section
                               className="region-editor repeating-editor"
                               aria-label="Настройка повторяемой группы"
@@ -1124,12 +1267,16 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 </button>
                               </div>
                             </section>
-                          )}
+                          </InspectorPortal>}
                         </section>
-                        <aside className={`questionnaire-builder builder-stage-${stage}`}>
+                        <aside className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
+                          <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor && stage === 4 ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
+                          <div id="workspace-context-inspector" />
+                          {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
+                          {(stage === 3 || stage === 5) && !selection && !activeBinding && !regionDraft && !groupDraft && <p className="workspace-inspector-tip">Создайте вопрос анкеты или выделите фрагмент Word для привязки. Для условий и таблиц используйте действия у фрагментов документа.</p>}
                           {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
                           <h3 className="panel-questionnaire">Вопросы анкеты</h3>
-                          {version.status === "DRAFT" && (
+                          {version.status === "DRAFT" && showFieldEditor && stage === 4 && !selection && !regionDraft && !groupDraft && (
                             <form className="field-editor" onSubmit={saveField}>
                               <label>
                                 Раздел
@@ -1156,8 +1303,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   }
                                 />
                               </label>
-                              <label>
-                                Ключ поля
+                              <details className="workspace-advanced"><summary>Дополнительные настройки</summary><label>
+                                Служебный ключ поля
                                 <input
                                   required
                                   pattern="[A-Za-z][A-Za-z0-9_.-]*"
@@ -1169,7 +1316,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     })
                                   }
                                 />
-                              </label>
+                              </label></details>
                               <label>
                                 Тип
                                 <select
@@ -1337,13 +1484,16 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   setField({ ...field, required_when: value })
                                 }
                               />
+                              {editing && <div className="workspace-linked-fragments"><b>Связанные фрагменты · {bindings.filter((item:any) => item.field_id === editing).length}</b>{bindings.filter((item:any) => item.field_id === editing).map((item:any) => <button key={item.id} type="button" className="secondary" onClick={() => { setActiveBinding(item); setStage(3); document.querySelector(`[data-locator="${CSS.escape(item.locator.node)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"}); }}>{item.selected_text || "Фрагмент Word"}</button>)}</div>}
                               <button className="primary" disabled={busy}>
                                 {editing
                                   ? "Сохранить изменения"
                                   : "Добавить вопрос"}
                               </button>
+                              <button type="button" className="secondary" onClick={() => { setShowFieldEditor(false); if (selectionDraft) { setSelection(selectionDraft); setSelectionDraft(null); setStage(3); } }}>Отмена</button>
                             </form>
                           )}
+                          {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}</div>}
                           <div className="field-list panel-fields">
                             {schema?.fields.map((x: any) => (
                               <article key={x.id}>
@@ -1384,6 +1534,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                           </div>
                           <h3 className="panel-bindings">Привязки</h3>
                           <div className="binding-list panel-bindings">
+                            {bindings.length === 0 && <p className="region-empty">Привязок пока нет. Выделите текст в документе и выберите вопрос анкеты.</p>}
                             {bindings.map((b: any) => (
                               <article key={b.id}>
                                 <span>
@@ -1730,6 +1881,14 @@ function TemplateBuilder({ api }: { api: Api }) {
       </section>
     </div>
   );
+}
+
+function InspectorPortal({ children }: { children: React.ReactNode }) {
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setTarget(document.getElementById("workspace-context-inspector"));
+  }, []);
+  return target ? createPortal(children, target) : null;
 }
 
 function TestDriveField({field,value,change}:any){
@@ -2268,18 +2427,21 @@ function paint(
   items: any[],
   fields: any[],
   conditional: any[] = [],
+  onBindingSelect?: (binding: any) => void,
 ) {
   const ranges = [
     ...items.map((b) => ({
       start: b.locator.text_start,
       end: b.locator.text_end,
       kind: "binding",
+      binding: b,
       title: fields.find((x) => x.id === b.field_id)?.label || "Привязка",
     })),
     ...conditional.map((r) => ({
       start: r.locator.text_start,
       end: r.locator.text_end,
       kind: "conditional",
+      binding: null,
       title: `Условная область: ${r.region_key}`,
     })),
   ];
@@ -2299,6 +2461,10 @@ function paint(
           active.some((r) => r.kind === "conditional") ? "conditional-run" : ""
         }
         title={active.map((r) => r.title).join(" · ")}
+        role={active.some((r) => r.binding) ? "button" : undefined}
+        tabIndex={active.some((r) => r.binding) ? 0 : undefined}
+        onClick={() => { const binding = active.find((r) => r.binding)?.binding; if (binding) onBindingSelect?.(binding); }}
+        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { const binding = active.find((r) => r.binding)?.binding; if (binding) { event.preventDefault(); onBindingSelect?.(binding); } } }}
       >
         {value}
       </mark>

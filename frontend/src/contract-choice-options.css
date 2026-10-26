@@ -1,0 +1,65 @@
+
+.contract-choice-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.contract-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 13px 16px;
+  border: 1px solid #d5e3dc;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #20352e;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+
+.contract-choice:hover {
+  border-color: #008f78;
+  background: #f3faf7;
+}
+
+.contract-choice:focus-visible {
+  outline: 3px solid #94d7ca;
+  outline-offset: 2px;
+}
+
+.contract-choice-selected {
+  border: 2px solid #008f78;
+  background: #eaf7f2;
+  color: #006b59;
+}
+
+.contract-choice-indicator {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 23px;
+  height: 23px;
+  border: 1px solid #c6d7d0;
+  border-radius: 50%;
+  font-size: 14px;
+}
+
+.contract-choice-selected .contract-choice-indicator {
+  border-color: #008f78;
+  background: #008f78;
+  color: #fff;
+}
+
+@media (max-width: 600px) {
+  .contract-choice-options {
+    grid-template-columns: 1fr;
+  }
+}

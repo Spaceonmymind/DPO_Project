@@ -1,0 +1,85 @@
+/* The three panes share the existing template builder and its API state. */
+.template-open .version-grid{grid-template-columns:132px minmax(0,1fr);gap:16px}
+.template-open .docx-preview,.template-open .document-canvas,.template-open .questionnaire-builder{min-width:0}
+.template-open .builder-grid{grid-template-columns:minmax(210px,240px) minmax(400px,1fr) minmax(300px,340px);gap:14px;align-items:start}
+.template-open .document-outline,.template-open .questionnaire-builder{position:sticky;top:12px;height:clamp(440px,calc(100vh - 270px),760px);max-height:none;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.template-open .document-outline{display:flex;flex-direction:column;padding:12px;background:#fff}
+.template-open .workspace-tabs{display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:3px;margin-bottom:16px;border-radius:9px;background:#edf4f1}
+.template-open .workspace-tabs button{min-height:34px;border:0;border-radius:7px;background:transparent;color:#587067;font-size:12px;font-weight:750}
+.template-open .workspace-tabs button.active{background:#fff;color:#086c56;box-shadow:0 1px 5px #163d3017}
+.template-open .workspace-panel-heading{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:11px}
+.template-open .workspace-panel-heading h3{margin:0;font-size:13px}
+.template-open .workspace-panel-heading span{padding:2px 7px;border-radius:99px;background:#e8f6f0;color:#086c56;font-size:11px;font-weight:800}
+.template-open .workspace-search{flex:none}
+.template-open .workspace-add{display:flex;justify-content:center;align-items:center;gap:7px;min-height:38px;margin-top:10px;border:1px solid #0d8168;border-radius:8px;background:#eff9f5;color:#086c56;font-size:12px;font-weight:800}
+.template-open .document-outline nav{min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px;overscroll-behavior:contain}
+.template-open .document-outline .workspace-structure-list{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:max-content;align-content:start;align-items:start;gap:4px;flex:1 1 auto;min-height:0;margin-top:10px}
+.template-open .workspace-structure-list button{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:54px;flex-shrink:0;padding:8px 10px;border:1px solid transparent;border-radius:8px;overflow:hidden;background:transparent;text-align:left;content-visibility:auto;contain-intrinsic-size:auto 54px}
+.template-open .workspace-structure-list button:hover,.template-open .workspace-structure-list button:focus-visible{border-color:#d8e9e1;background:#f0f8f4}
+.template-open .workspace-structure-list button span{display:block;line-height:1.3;font-size:10px;font-weight:750;text-transform:uppercase}
+.template-open .workspace-structure-list button b{display:block;margin-top:4px;overflow:hidden;line-height:1.35;font-size:11px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.template-open .workspace-question-list button{position:relative;width:100%;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;text-align:left;background:transparent}
+.template-open .workspace-question-list button:hover,.template-open .workspace-question-list button.active{border-color:#b8dfd0;background:#eff8f4}
+.template-open .workspace-question-list button span{font-size:10px;text-transform:none}
+.template-open .workspace-question-list button b{margin-top:4px;overflow:visible;white-space:normal;line-height:1.35;font-size:12px}
+.template-open .workspace-question-list button small{display:block;margin-top:5px;color:#6e8179;font-size:10px}
+.template-open .workspace-question-list button svg{position:absolute;right:5px;top:calc(50% - 7px);color:#729084}
+.template-open .workspace-empty{margin:16px 5px;color:#71847c;font-size:12px;line-height:1.5}
+.template-open .workspace-canvas-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;margin-bottom:10px;border:1px solid #dce9e3;border-radius:10px;background:#fff}
+.template-open .workspace-canvas-toolbar b,.template-open .workspace-canvas-toolbar span{display:block}
+.template-open .workspace-canvas-toolbar b{color:#254a3e;font-size:12px}
+.template-open .workspace-canvas-toolbar span{margin-top:2px;color:#71847c;font-size:11px}
+.template-open .workspace-canvas-toolbar label{display:flex;align-items:center;gap:6px;white-space:nowrap;color:#587067;font-size:11px}
+.template-open .workspace-canvas-toolbar select{height:30px;border:1px solid #c9dcd3;border-radius:7px;background:#fff;color:#254a3e}
+.template-open .document-canvas{height:clamp(440px,calc(100vh - 270px),760px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:10px;background:#f7faf8}
+.template-open .workspace-canvas-toolbar{position:sticky;top:0;z-index:3}
+.template-open .docx-page{width:min(860px,100%);min-width:0;box-sizing:border-box}
+.template-open .preview-notice{margin:0 0 10px}
+.template-open .binding-candidate-review{display:block;margin:0 0 10px;padding:0;background:#f5fbf8}
+.template-open .binding-candidate-review summary{padding:11px 13px;cursor:pointer;color:#1b6250;font-size:12px;font-weight:750}
+.template-open .binding-candidate-review .candidate-review-body{display:flex;gap:12px;padding:0 13px 13px}
+.template-open .binding-candidate-review .candidate-review-body>svg{flex:none;width:18px;color:#08755b}
+.template-open .binding-candidate-review .candidate-review-body>div{display:grid;gap:10px;min-width:0;flex:1}
+.template-open .questionnaire-builder{padding:0;background:#fff}
+.template-open .workspace-inspector-header{position:sticky;top:0;z-index:2;display:grid;gap:3px;padding:13px 15px;border-bottom:1px solid #e1ebe6;background:#fff}
+.template-open .workspace-inspector-header span{color:#769087;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}
+.template-open .workspace-inspector-header b{color:#1c4134;font-size:14px}
+.template-open .questionnaire-builder>.field-editor,.template-open .questionnaire-builder>.binding-list,.template-open .questionnaire-builder>.repeat-group-list,.template-open .questionnaire-builder>.region-list,.template-open .questionnaire-builder>.workspace-inspector-empty{margin:14px}
+.template-open .questionnaire-builder>.panel-fields,.template-open .questionnaire-builder>.panel-questionnaire{display:none}
+.template-open .questionnaire-builder>.panel-bindings,.template-open .questionnaire-builder>.panel-conditions{margin-left:14px;margin-right:14px}
+.template-open .questionnaire-builder.has-context>.field-editor,.template-open .questionnaire-builder.has-context>.panel-bindings,.template-open .questionnaire-builder.has-context>.panel-conditions,.template-open .questionnaire-builder.has-context>.repeat-group-list,.template-open .questionnaire-builder.has-context>.workspace-inspector-empty{display:none}
+.template-open #workspace-context-inspector:empty{display:none}
+.template-open #workspace-context-inspector>.selection-card,.template-open #workspace-context-inspector>.region-editor{margin:14px;border-radius:10px;box-shadow:none}
+.template-open #workspace-context-inspector>.selection-card-floating{position:static;width:auto;max-height:none;overflow:visible;z-index:auto;padding:14px;background:#f5fbf8}
+.template-open #workspace-context-inspector>.selection-card-floating>svg{width:18px}
+.template-open #workspace-context-inspector>.selection-card-floating>div{min-width:0}
+.template-open #workspace-context-inspector>.selection-card-floating blockquote{max-height:120px;overflow:auto;overflow-wrap:anywhere;font-size:12px}
+.template-open #workspace-context-inspector>.selection-card-floating button{display:flex;align-items:center;justify-content:center;gap:7px;min-height:36px}
+.template-open .workspace-inspector-empty{display:grid;justify-items:start;gap:9px;padding:20px 6px;color:#759086}
+.template-open .workspace-inspector-empty h3,.template-open .workspace-inspector-empty p{margin:0}
+.template-open .workspace-inspector-empty h3{color:#284a3f;font-size:15px}
+.template-open .workspace-inspector-empty p{font-size:12px;line-height:1.5}
+.template-open .workspace-inspector-empty button{display:flex;align-items:center;gap:6px}
+.template-open .workspace-inspector-tip{margin:14px;padding:10px 12px;border:1px solid #d9e9e0;border-radius:6px;background:#f0f8f4;color:#496a5b;font-size:12px;line-height:1.5}
+.template-open .workspace-question-list button em{display:inline-block;margin-top:6px;padding:2px 6px;border-radius:99px;font-size:9px;font-style:normal;font-weight:800}
+.template-open .workspace-question-list button em.linked{background:#e7f6ef;color:#08785d}
+.template-open .workspace-question-list button em.unlinked{background:#f5f1e5;color:#8a692b}
+.template-open .workspace-active-binding{display:grid;gap:12px;margin:14px;padding:14px;border:1px solid #b9ddcd;border-radius:10px;background:#f4faf7}
+.template-open .workspace-active-binding p,.template-open .workspace-active-binding blockquote{margin:0;overflow-wrap:anywhere;font-size:12px}
+.template-open .workspace-active-binding blockquote{padding:8px 10px;border-radius:6px;background:#e8f5ed}
+.template-open .workspace-active-binding label{display:grid;gap:5px;font-size:12px}
+.template-open .workspace-active-binding label select{min-height:36px;border:1px solid #cbdad4;border-radius:7px;background:#fff}
+.template-open .workspace-active-binding>div{display:flex;flex-wrap:wrap;gap:7px}
+.template-open .workspace-linked-fragments{display:grid;gap:6px;padding:10px;border-radius:8px;background:#f3f8f5;font-size:11px}
+.template-open .workspace-linked-fragments button{min-width:0;overflow:hidden;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.template-open .workspace-advanced{padding:9px 11px;border:1px solid #dde9e3;border-radius:8px}
+.template-open .workspace-advanced summary{cursor:pointer;color:#48685a;font-size:12px;font-weight:750}
+.template-open .workspace-advanced label{margin-top:9px}
+.template-open .questionnaire-builder>.stage-guidance{padding:14px}
+.template-open .questionnaire-builder .field-editor>.primary{position:sticky;bottom:0;z-index:1;min-height:40px;box-shadow:0 -7px 12px #ffffffdb}
+.template-open #workspace-context-inspector>.region-editor>div:last-child{position:sticky;bottom:0;padding:8px 0;background:#fffaf0}
+.template-open .questionnaire-builder button:focus-visible,.template-open .document-outline button:focus-visible,.template-open .workspace-canvas-toolbar select:focus-visible{outline:2px solid #08755b;outline-offset:2px}
+@media(max-width:1450px){.template-open .version-grid{grid-template-columns:1fr}.template-open .version-list{display:flex;gap:8px;overflow:auto}.template-open .version-list h3{display:none}.template-open .version-list button{width:170px;flex:none}}
+@media(max-width:1180px){.template-open .builder-grid{grid-template-columns:minmax(200px,230px) minmax(0,1fr);gap:12px}.template-open .document-outline{display:flex}.template-open .questionnaire-builder{position:relative;grid-column:1/-1;width:100%;height:auto;max-height:none}.template-open .questionnaire-builder>.field-editor{max-width:680px}}
+@media(max-width:760px){.template-open .builder-grid{display:flex;flex-direction:column}.template-open .document-outline,.template-open .document-canvas,.template-open .questionnaire-builder{width:100%;box-sizing:border-box}.template-open .document-outline{position:relative;height:auto;max-height:340px}.template-open .document-canvas{height:min(65vh,620px)}.template-open .questionnaire-builder{margin-top:0}.template-open .docx-page{padding:30px 20px}.template-open .workspace-canvas-toolbar span{display:none}}
+@media(prefers-reduced-motion:reduce){.template-open .document-outline button{scroll-behavior:auto}}

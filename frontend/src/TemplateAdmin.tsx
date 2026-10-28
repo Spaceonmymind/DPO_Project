@@ -66,6 +66,7 @@ const blank = (position = 1) => ({
   components: [],
   separator: "; ",
 });
+const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
 export function TemplateAdmin({ api }: { api: Api }) {
   const [section, setSection] = useState<"templates" | "products">("templates");
   return <TemplateBuilder api={api} />;
@@ -96,6 +97,8 @@ function TemplateBuilder({ api }: { api: Api }) {
     [blockStart, setBlockStart] = useState<string>(),
     [repeatBlockStart, setRepeatBlockStart] = useState<string>(),
     [field, setField] = useState<any>(blank()),
+    [fieldOptionsText, setFieldOptionsText] = useState(""),
+    [groupFieldOptionsText, setGroupFieldOptionsText] = useState(""),
     [editing, setEditing] = useState<string>(),
     [name, setName] = useState(""),
     [code, setCode] = useState(""),
@@ -179,6 +182,8 @@ function TemplateBuilder({ api }: { api: Api }) {
     setRepeatingGroups(repeaters);
     setBindingCandidates(candidates);
     setField(blank(q.fields.length + 1));
+    setFieldOptionsText("");
+    setGroupFieldOptionsText("");
   }
   async function decideCandidate(candidate: any, decision: "CONFIRMED" | "REJECTED") {
     await run(async () => {
@@ -282,12 +287,17 @@ function TemplateBuilder({ api }: { api: Api }) {
     e.preventDefault();
     await run(async () => {
       let path = `/document-templates/${selected.id}/versions/${version.id}/fields${editing ? "/" + editing : ""}`;
+      const payload = field.field_type === "SINGLE_SELECT"
+        ? { ...field, options: parseOptionText(fieldOptionsText) }
+        : field;
       const saved = await api(path, {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(field),
+        body: JSON.stringify(payload),
       });
       await openVersion(version);
+      setFieldOptionsText((payload.options || []).join(", "));
+      setField(payload);
       if (selectionDraft && saved?.id) {
         setSelection({ ...selectionDraft, field_id: saved.id });
         setStage(3);
@@ -320,6 +330,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
+    setFieldOptionsText((x.config.options || []).join(", "));
   }
   function newField() {
     setSelectionDraft(selection || null);
@@ -331,6 +342,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     setStage(4);
     setEditing(undefined);
     setField({ ...blank((schema?.fields?.length || 0) + 1), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
+    setFieldOptionsText("");
     setShowFieldEditor(true);
   }
   async function removeField(id: string) {
@@ -488,6 +500,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     });
   }
   function newGroupField(group: any) {
+    setGroupFieldOptionsText("");
     setGroupField({
       group_id: group.id,
       field_key: "",
@@ -506,11 +519,17 @@ function TemplateBuilder({ api }: { api: Api }) {
       options: [],
     });
   }
+  function editGroupField(group: any, existing: any) {
+    setGroupFieldOptionsText((existing.config?.options || []).join(", "));
+    setGroupField({ ...existing, group_id: group.id, ...existing.config });
+  }
   async function saveGroupField(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       let path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupField.group_id}/fields${groupField.id ? "/" + groupField.id : ""}`,
-        payload = { ...groupField };
+        payload = groupField.field_type === "SINGLE_SELECT"
+          ? { ...groupField, options: parseOptionText(groupFieldOptionsText) }
+          : { ...groupField };
       delete payload.id;
       delete payload.group_id;
       delete payload.locator;
@@ -1443,16 +1462,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 <label>
                                   Варианты через запятую
                                   <input
-                                    value={field.options.join(", ")}
-                                    onChange={(e) =>
-                                      setField({
-                                        ...field,
-                                        options: e.target.value
-                                          .split(",")
-                                          .map((x) => x.trim())
-                                          .filter(Boolean),
-                                      })
-                                    }
+                                    value={fieldOptionsText}
+                                    onChange={(e) => setFieldOptionsText(e.target.value)}
                                   />
                                 </label>
                               )}
@@ -1678,13 +1689,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                       <span>
                                         <button
                                           aria-label="Изменить поле строки"
-                                          onClick={() =>
-                                            setGroupField({
-                                              ...f,
-                                              group_id: g.id,
-                                              ...f.config,
-                                            })
-                                          }
+                                          onClick={() => editGroupField(g, f)}
                                         >
                                           <Pencil size={13} />
                                         </button>
@@ -1816,18 +1821,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 <label>
                                   Варианты через запятую
                                   <input
-                                    value={(groupField.options || []).join(
-                                      ", ",
-                                    )}
-                                    onChange={(e) =>
-                                      setGroupField({
-                                        ...groupField,
-                                        options: e.target.value
-                                          .split(",")
-                                          .map((x) => x.trim())
-                                          .filter(Boolean),
-                                      })
-                                    }
+                                    value={groupFieldOptionsText}
+                                    onChange={(e) => setGroupFieldOptionsText(e.target.value)}
                                   />
                                 </label>
                               )}

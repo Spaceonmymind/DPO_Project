@@ -28,11 +28,12 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     if (path.endsWith("/preview")) return { nodes: [{ locator: "word/document.xml#/p[1]", kind: "paragraph", text: "Оплата по договору" }] };
     if (path.endsWith("/questionnaire")) return { fields: [...fields] };
     if (/\/(bindings|conditional-regions|repeating-groups|binding-candidates)$/.test(path)) return [];
-    if (path.endsWith("/fields") && options.method === "POST") {
+    if ((path.endsWith("/fields") && options.method === "POST") || (path.endsWith("/fields/field-1") && options.method === "PATCH")) {
       const payload = JSON.parse(options.body);
       writes.push(payload);
-      const created = { ...payload, id: "field-1", config: { group: payload.group, placeholder: payload.placeholder } };
-      fields.push(created);
+      const created = { ...payload, id: "field-1", config: { group: payload.group, placeholder: payload.placeholder, options: payload.options || [] } };
+      if (options.method === "PATCH") fields[0] = created;
+      else fields.push(created);
       return created;
     }
     throw new Error(`Unexpected API request: ${options.method || "GET"} ${path}`);
@@ -85,6 +86,28 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     assert.notEqual(dom.window.getComputedStyle(dom.window.document.querySelector(".questionnaire-builder .field-editor")).display, "none");
     await click(dom.window.document.querySelector(".field-editor button.secondary"));
     assert.match(dom.window.document.querySelector(".workspace-inspector-header").textContent, /Привязка фрагмента/, "cancel restores the selected fragment");
+    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    const typeSelect = [...dom.window.document.querySelectorAll(".field-editor label")].find((label) => label.textContent.includes("Тип"))?.querySelector("select");
+    assert.ok(typeSelect);
+    await act(async () => { typeSelect.value = "SINGLE_SELECT"; typeSelect.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+    const optionsInput = [...dom.window.document.querySelectorAll(".field-editor label")].find((label) => label.textContent.includes("Варианты через запятую"))?.querySelector("input");
+    assert.ok(optionsInput);
+    const rawOptions = "100% постоплата, 50% предоплата, Оплата в течение 10 рабочих дней";
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set;
+    for (const character of rawOptions) {
+      await act(async () => { setter.call(optionsInput, optionsInput.value + character); optionsInput.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
+      assert.ok(optionsInput.value.endsWith(character), "typing is not normalized mid-input");
+    }
+    assert.equal(optionsInput.value, rawOptions);
+    await act(async () => dom.window.document.querySelector(".field-editor").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
+    assert.deepEqual(writes.at(-1).options, ["100% постоплата", "50% предоплата", "Оплата в течение 10 рабочих дней"]);
+    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    const reopenedOptions = [...dom.window.document.querySelectorAll(".field-editor label")].find((label) => label.textContent.includes("Варианты через запятую"))?.querySelector("input");
+    assert.equal(reopenedOptions?.value, rawOptions, "saved options reopen with spaces intact");
+    await act(async () => { setter.call(reopenedOptions, `${rawOptions}, , `); reopenedOptions.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
+    assert.equal(reopenedOptions.value, `${rawOptions}, , `, "empty trailing options remain editable until save");
+    await act(async () => dom.window.document.querySelector(".field-editor").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
+    assert.deepEqual(writes.at(-1).options, ["100% постоплата", "50% предоплата", "Оплата в течение 10 рабочих дней"]);
   } finally {
     await act(async () => root.unmount());
     await server.close();

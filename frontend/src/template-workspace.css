@@ -14,14 +14,15 @@
 .template-open .workspace-add{display:flex;justify-content:center;align-items:center;gap:7px;min-height:38px;margin-top:10px;border:1px solid #0d8168;border-radius:8px;background:#eff9f5;color:#086c56;font-size:12px;font-weight:800}
 .template-open .document-outline nav{min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px;overscroll-behavior:contain}
 .template-open .document-outline .workspace-structure-list{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:max-content;align-content:start;align-items:start;gap:4px;flex:1 1 auto;min-height:0;margin-top:10px}
+.template-open .document-outline .workspace-question-list{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:max-content;align-content:start;gap:4px;flex:1 1 auto;min-height:0;margin-top:10px}
 .template-open .workspace-structure-list button{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:54px;flex-shrink:0;padding:8px 10px;border:1px solid transparent;border-radius:8px;overflow:hidden;background:transparent;text-align:left;content-visibility:auto;contain-intrinsic-size:auto 54px}
 .template-open .workspace-structure-list button:hover,.template-open .workspace-structure-list button:focus-visible{border-color:#d8e9e1;background:#f0f8f4}
 .template-open .workspace-structure-list button span{display:block;line-height:1.3;font-size:10px;font-weight:750;text-transform:uppercase}
 .template-open .workspace-structure-list button b{display:block;margin-top:4px;overflow:hidden;line-height:1.35;font-size:11px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
-.template-open .workspace-question-list button{position:relative;width:100%;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;text-align:left;background:transparent}
+.template-open .workspace-question-list button{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:76px;flex-shrink:0;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;overflow:visible;text-align:left;background:transparent}
 .template-open .workspace-question-list button:hover,.template-open .workspace-question-list button.active{border-color:#b8dfd0;background:#eff8f4}
 .template-open .workspace-question-list button span{font-size:10px;text-transform:none}
-.template-open .workspace-question-list button b{margin-top:4px;overflow:visible;white-space:normal;line-height:1.35;font-size:12px}
+.template-open .workspace-question-list button b{margin-top:4px;overflow-wrap:anywhere;white-space:normal;line-height:1.35;font-size:12px}
 .template-open .workspace-question-list button small{display:block;margin-top:5px;color:#6e8179;font-size:10px}
 .template-open .workspace-question-list button svg{position:absolute;right:5px;top:calc(50% - 7px);color:#729084}
 .template-open .workspace-empty{margin:16px 5px;color:#71847c;font-size:12px;line-height:1.5}
@@ -41,6 +42,18 @@
 .template-open .binding-candidate-review .candidate-review-body>svg{flex:none;width:18px;color:#08755b}
 .template-open .binding-candidate-review .candidate-review-body>div{display:grid;gap:10px;min-width:0;flex:1}
 .template-open .questionnaire-builder{padding:0;background:#fff}
+.template-open .questionnaire-builder,.template-open #workspace-context-inspector,.template-open #workspace-context-inspector>.selection-card,.template-open #workspace-context-inspector>.region-editor{box-sizing:border-box;min-width:0;max-width:100%}
+.template-open .questionnaire-builder :is(form,fieldset,.condition-row,.repeat-limits,.repeat-field-form,.workspace-advanced,.workspace-active-binding,.binding-list,.repeat-group-list,.region-list,.region-editor),.template-open #workspace-context-inspector :is(fieldset,.condition-row,.repeat-limits,.repeat-field-form){box-sizing:border-box;min-width:0;max-width:100%}
+.template-open .questionnaire-builder :is(form,.condition-editor,.condition-row,.repeat-limits,.repeat-field-form),.template-open #workspace-context-inspector :is(.condition-editor,.condition-row,.repeat-limits){grid-template-columns:minmax(0,1fr)}
+.template-open .questionnaire-builder .repeat-limits,.template-open #workspace-context-inspector .repeat-limits{grid-template-columns:repeat(2,minmax(0,1fr))}
+.template-open .questionnaire-builder :is(label,input,select,textarea),.template-open #workspace-context-inspector :is(label,input,select,textarea){box-sizing:border-box;min-width:0;max-width:100%}
+.template-open .questionnaire-builder :is(input:not([type="checkbox"]),select,textarea),.template-open #workspace-context-inspector :is(input:not([type="checkbox"]),select,textarea){width:100%}
+.template-open .questionnaire-builder :is(p,small,b,blockquote),.template-open #workspace-context-inspector :is(p,small,b,blockquote){overflow-wrap:anywhere}
+.template-open .questionnaire-builder .repeat-field-form>div,.template-open #workspace-context-inspector .region-editor>div:last-child{display:flex;flex-wrap:wrap;min-width:0;gap:8px}
+.template-open .questionnaire-builder .repeat-field-form>div>*{flex:1 1 110px;min-width:0;max-width:100%}
+.template-open .questionnaire-builder :is(button,.secondary,.primary),.template-open #workspace-context-inspector :is(button,.secondary,.primary){box-sizing:border-box;max-width:100%;white-space:normal}
+.template-open .questionnaire-builder .repeat-group-list :is(article,header,.repeat-field,span),.template-open .questionnaire-builder .binding-list :is(article,span){min-width:0}
+.template-open .questionnaire-builder .repeat-group-list :is(b,small),.template-open .questionnaire-builder .binding-list :is(b,small){overflow-wrap:anywhere}
 .template-open .workspace-inspector-header{position:sticky;top:0;z-index:2;display:grid;gap:3px;padding:13px 15px;border-bottom:1px solid #e1ebe6;background:#fff}
 .template-open .workspace-inspector-header span{color:#769087;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}
 .template-open .workspace-inspector-header b{color:#1c4134;font-size:14px}
@@ -48,6 +61,7 @@
 .template-open .questionnaire-builder>.panel-fields,.template-open .questionnaire-builder>.panel-questionnaire{display:none}
 .template-open .questionnaire-builder>.panel-bindings,.template-open .questionnaire-builder>.panel-conditions{margin-left:14px;margin-right:14px}
 .template-open .questionnaire-builder.has-context>.field-editor,.template-open .questionnaire-builder.has-context>.panel-bindings,.template-open .questionnaire-builder.has-context>.panel-conditions,.template-open .questionnaire-builder.has-context>.repeat-group-list,.template-open .questionnaire-builder.has-context>.workspace-inspector-empty{display:none}
+.template-open .questionnaire-builder:not(.has-context)>.field-editor{display:grid}
 .template-open #workspace-context-inspector:empty{display:none}
 .template-open #workspace-context-inspector>.selection-card,.template-open #workspace-context-inspector>.region-editor{margin:14px;border-radius:10px;box-shadow:none}
 .template-open #workspace-context-inspector>.selection-card-floating{position:static;width:auto;max-height:none;overflow:visible;z-index:auto;padding:14px;background:#f5fbf8}

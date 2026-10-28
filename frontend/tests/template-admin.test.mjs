@@ -70,7 +70,7 @@ test('calculation editor is visual and employee totals recalculate dynamically',
   assert.match(component,/Сумма прописью/);
   assert.doesNotMatch(component,/введите JSON/i);
   assert.match(catalog,/calculateAnswers/);
-  assert.match(catalog,/Рассчитывается автоматически/);
+  assert.match(catalog,/if\s*\(field\.config\?\.calculated\)\s*return null;/);
   assert.match(component,/Проверить на своих значениях/);
   assert.match(component,/Формат вывода/);
   assert.match(component,/bindings\/\$\{binding\.id\}\/format/);

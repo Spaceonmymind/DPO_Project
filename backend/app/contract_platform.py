@@ -26,6 +26,10 @@ def db():
  s=SessionLocal()
  try: yield s
  finally: s.close()
+def validated_draft_title(value):
+ if not isinstance(value,str) or not (title:=value.strip()) or len(title)>200:
+  raise HTTPException(422,detail='Название должно содержать от 1 до 200 символов')
+ return title
 def roles(u): return set(u.roles or [])
 def require_manager(u):
  if not roles(u)&{'dpo_specialist','administrator'}: raise HTTPException(403,detail='Управление шаблонами доступно специалистам ДПО')
@@ -753,11 +757,21 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
   for d in s.query(DocumentDraft).filter_by(owner_id=u.id).order_by(DocumentDraft.updated_at.desc()).all():
-   v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); g=s.query(GeneratedDocument).filter_by(draft_id=d.id).order_by(GeneratedDocument.generation_number.desc()).first(); out.append({'id':d.id,'template_name':t.name,'template_version':v.version_number,'status':d.status,'created_at':d.created_at,'updated_at':d.updated_at,'generated':g.id if g else None,'generated_stale':bool(g and g.created_at<d.updated_at)})
+   v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); g=s.query(GeneratedDocument).filter_by(draft_id=d.id).order_by(GeneratedDocument.generation_number.desc()).first(); out.append({'id':d.id,'title':d.title or t.name,'template_name':t.name,'template_version':v.version_number,'status':d.status,'created_at':d.created_at,'updated_at':d.updated_at,'generated':g.id if g else None,'generated_stale':bool(g and g.created_at<d.updated_at)})
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'status':d.status,'answers':d.answers,'template':template_out(t,s),'schema':schema_out(schema,s)}
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'template':template_out(t,s),'schema':schema_out(schema,s)}
+ @r.post('/api/v1/contract-drafts/{id}/duplicate',status_code=201)
+ def duplicate(id:str,payload:dict|None=None,u=Depends(current_dependency),s:DBS=Depends(db)):
+  import copy
+  source=own_draft(id,u,s); version=s.get(TemplateVersion,source.template_version_id); template=s.get(DocumentTemplate,version.template_id)
+  title=validated_draft_title((payload or {}).get('title',f'Копия — {source.title or template.name}'[:200]))
+  new=DocumentDraft(owner_id=u.id,template_version_id=source.template_version_id,questionnaire_schema_id=source.questionnaire_schema_id,title=title,answers=copy.deepcopy(source.answers or {}),status='DRAFT')
+  s.add(new); s.commit(); return draft(new.id,u,s)
+ @r.patch('/api/v1/contract-drafts/{id}/title')
+ def rename_draft(id:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_draft(id,u,s); d.title=validated_draft_title(payload.get('title')); d.updated_at=now(); s.commit(); return {'id':d.id,'title':d.title}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})

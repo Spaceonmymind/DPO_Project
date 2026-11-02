@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 import fitz
 import openpyxl
 import xlwt
-from app.db import Base, engine, SessionLocal, User, QuestionnaireField, TemplateVersion, DocumentBinding
+from app.db import Base, engine, SessionLocal, User, QuestionnaireField, TemplateVersion, DocumentBinding, DocumentDraft
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -876,6 +876,57 @@ def test_contract_platform_end_to_end_multiple_occurrences_generation_and_owners
     assert outsider.get(generated.json()['download_url'],headers=outsider_headers).status_code==404
 
 
+def test_filled_document_copy_title_and_owner_isolation():
+    manager=TestClient(app); headers=auth(manager)
+    template=create_platform_template(manager,headers,'COPY_DOCUMENT')
+    source=contract_docx_bytes()
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('copy.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    configure_platform_field(manager,headers,template,version)
+    assert manager.post(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/publish",headers=headers).status_code==200
+    owner=TestClient(app); owner_headers=auth(owner,'petrova')
+    original=owner.post('/api/v1/contract-drafts',headers=owner_headers,json={'template_id':template['id']}).json()
+    original_id=original['id']
+    assert owner.patch(f'/api/v1/contract-drafts/{original_id}/autosave',headers=owner_headers,json={'answers':{'customer_name':'Исходный заказчик'}}).status_code==200
+    assert owner.post(f'/api/v1/contract-drafts/{original_id}/generate',headers=owner_headers).status_code==201
+    copy_response=owner.post(f'/api/v1/contract-drafts/{original_id}/duplicate',headers=owner_headers,json={'title':'Копия договора'})
+    assert copy_response.status_code==201,copy_response.text
+    duplicate=copy_response.json()
+    assert duplicate['id']!=original_id and duplicate['status']=='DRAFT' and duplicate['title']=='Копия договора'
+    assert duplicate['answers']=={'customer_name':'Исходный заказчик'}
+    assert duplicate['schema']['id']==original['schema']['id']
+    assert owner.patch(f"/api/v1/contract-drafts/{duplicate['id']}/autosave",headers=owner_headers,json={'answers':{'customer_name':'Новый заказчик'}}).status_code==200
+    assert owner.get(f'/api/v1/contract-drafts/{original_id}',headers=owner_headers).json()['answers']['customer_name']=='Исходный заказчик'
+    assert owner.patch(f"/api/v1/contract-drafts/{duplicate['id']}/title",headers=owner_headers,json={'title':'  Новое имя  '}).json()['title']=='Новое имя'
+    assert owner.patch(f"/api/v1/contract-drafts/{duplicate['id']}/title",headers=owner_headers,json={'title':'  '}).status_code==422
+    assert owner.post(f"/api/v1/contract-drafts/{duplicate['id']}/generate",headers=owner_headers).status_code==201
+    outsider=TestClient(app); outsider_headers=auth(outsider)
+    assert outsider.post(f'/api/v1/contract-drafts/{original_id}/duplicate',headers=outsider_headers).status_code==404
+    assert outsider.patch(f'/api/v1/contract-drafts/{original_id}/title',headers=outsider_headers,json={'title':'Чужое'}).status_code==404
+
+
+def test_copy_preserves_repeating_answers_and_pinned_schema():
+    source=Document(); source.add_paragraph('Исходный текст')
+    table=source.add_table(rows=2,cols=1); table.cell(0,0).text='Дата'; table.cell(1,0).text='DATE'
+    raw=io.BytesIO(); source.save(raw)
+    manager=TestClient(app); headers=auth(manager); template=create_platform_template(manager,headers,'COPY_REPEATING')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('rows.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    node=next(x for x in manager.get(base+'/preview',headers=headers).json()['nodes'] if x['text']=='DATE')
+    group=manager.post(base+'/repeating-groups',headers=headers,json={'group_key':'schedule','name':'График','min_items':0,'max_items':5,'position':1,'row_locator':node['locator']}).json()
+    field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':'date','label':'Дата','field_type':'DATE','required':True,'position':1})
+    assert field.status_code==201,field.text
+    schema=manager.get(base+'/questionnaire',headers=headers).json()
+    db=SessionLocal(); owner=db.query(User).filter_by(external_id='petrova').one(); original=DocumentDraft(owner_id=owner.id,template_version_id=version['id'],questionnaire_schema_id=schema['id']); db.add(original); db.commit(); original_id=original.id; db.close()
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    rows=[{'_id':'one','date':'2026-12-01'},{'_id':'two','date':'2026-12-02'}]
+    assert employee.patch(f'/api/v1/contract-drafts/{original_id}/autosave',headers=employee_headers,json={'answers':{'schedule':rows}}).status_code==200
+    copied=employee.post(f'/api/v1/contract-drafts/{original_id}/duplicate',headers=employee_headers).json()
+    assert copied['id']!=original_id and copied['schema']['id']==schema['id'] and copied['answers']['schedule']==rows
+    revised=[{**rows[0],'date':'2026-12-03'},rows[1]]
+    assert employee.patch(f"/api/v1/contract-drafts/{copied['id']}/autosave",headers=employee_headers,json={'answers':{'schedule':revised}}).status_code==200
+    assert employee.get(f'/api/v1/contract-drafts/{original_id}',headers=employee_headers).json()['answers']['schedule']==rows
+
+
 def test_contract_platform_conditional_payment_question_end_to_end():
     document=Document(); document.add_paragraph('Порядок оплаты: PAYMENT'); document.add_paragraph('Процент предоплаты: ADVANCE')
     payload=io.BytesIO(); document.save(payload)
@@ -986,6 +1037,11 @@ def test_r33_full_repeating_table_flow_preserves_order_static_rows_and_source():
     rows=[{'_id':f'row-{i}','date':f'2026-11-{i:02d}','place':f'Зал {i}'} for i in range(1,6)]; rows[2]['place']='Изменённый зал'; rows.pop(1); rows=[rows[2],rows[0],rows[1],rows[3]]
     saved=employee.patch(f'/api/v1/contract-drafts/{did}/autosave',headers=employee_headers,json={'answers':{'customer_name':'АО Заказчик','schedule':rows}}); assert saved.status_code==200,saved.text
     restored=employee.get(f'/api/v1/contract-drafts/{did}',headers=employee_headers).json(); assert restored['answers']['schedule']==rows
+    duplicate=employee.post(f'/api/v1/contract-drafts/{did}/duplicate',headers=employee_headers).json()
+    assert duplicate['id']!=did and duplicate['answers']['schedule']==rows and duplicate['schema']['id']==restored['schema']['id']
+    changed_rows=[{**rows[0],'place':'Другой зал'},*rows[1:]]
+    assert employee.patch(f"/api/v1/contract-drafts/{duplicate['id']}/autosave",headers=employee_headers,json={'answers':{'schedule':changed_rows}}).status_code==200
+    assert employee.get(f'/api/v1/contract-drafts/{did}',headers=employee_headers).json()['answers']['schedule']==rows
     assert employee.patch(f'/api/v1/contract-drafts/{did}',headers=employee_headers,json={'answers':restored['answers']}).status_code==200
     generated=employee.post(f'/api/v1/contract-drafts/{did}/generate',headers=employee_headers); assert generated.status_code==201,generated.text
     rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content)); table=rendered.tables[0]
@@ -1174,6 +1230,13 @@ def test_r35_product_resolver_and_unified_document_flow():
     common={'contractor_status':'Физическое лицо','contractor_name':'Иван Иванов','labor_signs':False,'foreign_citizen':False}
     saved=employee.patch(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers,json={'common_answers':common,'selected_variant_id':variants[1]['id'],'variant_answers':{}}); assert saved.status_code==200,saved.text; assert saved.json()['selected_variant']['id']==variants[0]['id']
     generated=employee.post(f'/api/v1/contract-product-drafts/{did}/generate',headers=employee_headers,json={}); assert generated.status_code==201,generated.text; assert generated.json()['variant_name']=='Физическое лицо'; rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content)); assert 'Иван Иванов' in rendered.paragraphs[0].text
+    duplicated=employee.post(f'/api/v1/contract-product-drafts/{did}/duplicate',headers=employee_headers,json={'title':'Копия тренировочного договора'})
+    assert duplicated.status_code==201,duplicated.text
+    copied=duplicated.json(); assert copied['id']!=did and copied['title']=='Копия тренировочного договора' and copied['status']=='DRAFT'
+    assert copied['product_version']==draft['product_version'] and copied['common_answers']==common and copied['generated_documents']==[]
+    assert employee.patch(f"/api/v1/contract-product-drafts/{copied['id']}/title",headers=employee_headers,json={'title':'Копия для проверки'}).json()['title']=='Копия для проверки'
+    assert employee.post(f"/api/v1/contract-product-drafts/{copied['id']}/generate",headers=employee_headers,json={}).status_code==201
+    assert employee.get(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers).json()['common_answers']==common
     common['contractor_status']='Индивидуальный предприниматель'; switched=employee.patch(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers,json={'common_answers':common,'variant_answers':{}}); assert switched.status_code==200 and switched.json()['selected_variant']['id']==variants[1]['id']; assert switched.json()['common_answers']['contractor_name']=='Иван Иванов'
     generated_ip=employee.post(f'/api/v1/contract-product-drafts/{did}/generate',headers=employee_headers,json={}); assert generated_ip.status_code==201,generated_ip.text; assert generated_ip.json()['variant_name']=='Индивидуальный предприниматель' and generated_ip.json()['generation_number']==2
     restored=employee.get(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers); assert restored.status_code==200 and restored.json()['selected_variant']['id']==variants[1]['id']
@@ -1181,6 +1244,8 @@ def test_r35_product_resolver_and_unified_document_flow():
     next_version=manager.post(f"/api/v1/contract-products/{product['id']}/versions",headers=headers); assert next_version.status_code==201 and next_version.json()['version_number']==2
     assert employee.get(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers).json()['product_version']==1
     outsider=TestClient(app); outsider_headers=auth(outsider); assert outsider.get(f'/api/v1/contract-product-drafts/{did}',headers=outsider_headers).status_code==404
+    assert outsider.post(f'/api/v1/contract-product-drafts/{did}/duplicate',headers=outsider_headers).status_code==404
+    assert outsider.patch(f'/api/v1/contract-product-drafts/{did}/title',headers=outsider_headers,json={'title':'Чужой'}).status_code==404
     assert employee.post(f"/api/v1/contract-products/{product['id']}/versions/{next_version.json()['id']}/publish",headers=employee_headers).status_code==403
     assert hashlib.sha256(manager.get(f"/api/v1/document-templates/{person['id']}/versions/{pv['id']}/source",headers=headers).content).hexdigest()==hashlib.sha256(praw).hexdigest()
     assert hashlib.sha256(manager.get(f"/api/v1/document-templates/{entrepreneur['id']}/versions/{iv['id']}/source",headers=headers).content).hexdigest()==hashlib.sha256(iraw).hexdigest()

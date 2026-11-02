@@ -1,5 +1,6 @@
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import "./contract-choice-options.css";
+import "./contract-questionnaire-steps.css";
 import {
   FileText,
   Search,
@@ -15,6 +16,8 @@ import {
 import { evaluateCondition, fieldState } from "./conditions";
 import { calculateAnswers } from "./calculations";
 import { ProductQuestionnaire } from "./ProductQuestionnaire";
+import { QuestionHint } from "./QuestionHint";
+import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
@@ -55,6 +58,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [busy, setBusy] = useState(false),
     [document, setDocument] = useState<any>(),
     [review, setReview] = useState(false),
+    [stepIndex, setStepIndex] = useState(0),
     [loading, setLoading] = useState(true);
   const autosaveReady = useRef(false);
   const savedSnapshot = useRef("{}");
@@ -74,7 +78,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     load()
       .then(async () => {
         const id = new URLSearchParams(location.search).get("draft");
+        const productId = new URLSearchParams(location.search).get("productDraft");
         if (id) await restore(id);
+        else if (productId) await restoreProduct(productId);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -154,83 +160,31 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     setErrors({});
     setDocument(null);
     setReview(false);
+    setStepIndex(0);
     setTimeout(() => {
       autosaveReady.current = true;
     }, 0);
   }
   function groupActive(g: any) {
-    return evaluateCondition(g.config?.visible_when, answers);
+    const activeAnswers = Object.fromEntries((draft?.schema.fields || []).filter((f: any) => fieldState(f, answers).visible).map((f: any) => [f.field_key, answers[f.field_key]]));
+    return evaluateCondition(g.config?.visible_when, activeAnswers);
+  }
+  const steps = draft ? questionnaireSteps(draft.schema.fields, draft.schema.repeating_groups || []) : [];
+  const currentStep = steps[Math.min(stepIndex, Math.max(steps.length - 1, 0))];
+  function checkCurrentStep() {
+    if (!draft || !currentStep) return true;
+    const nextErrors = validateStep(currentStep, answers, draft.schema.fields);
+    setErrors(nextErrors);
+    setError(Object.keys(nextErrors).length ? "Исправьте поля текущего раздела." : "");
+    return !Object.keys(nextErrors).length;
+  }
+  function advance() {
+    if (!checkCurrentStep()) return;
+    if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
+    else if (validate()) setReview(true);
   }
   function validate() {
-    let e: any = {};
-    draft.schema.fields.forEach((f: any) => {
-      if (f.config?.calculated) return;
-      let state = fieldState(f, answers);
-      if (!state.visible) return;
-      let value = answers[f.field_key],
-        v = f.config?.validation || {};
-      if (
-        state.required &&
-        (value === undefined || value === null || value === "")
-      )
-        e[f.field_key] = "Обязательное поле";
-      if (
-        typeof value === "string" &&
-        v.min_length &&
-        value.length < v.min_length
-      )
-        e[f.field_key] = `Минимум ${v.min_length} символов`;
-
-      if (typeof value === "string" && v.regex) {
-        try {
-          if (!new RegExp(v.regex).test(value))
-            e[f.field_key] = "Значение не соответствует требуемому формату";
-        } catch {}
-      }
-
-      if (f.field_type === "COMPOSITE" && value && typeof value === "object") {
-        for (const component of f.config?.components || []) {
-          const componentValue = String(value[component.key] ?? "");
-          if (component.required && !componentValue.trim()) {
-            e[f.field_key] = `«${component.label}»: обязательное поле`;
-            break;
-          }
-          if (component.config?.validation?.regex || component.validation?.regex) {
-            const pattern = component.config?.validation?.regex || component.validation.regex;
-            if (componentValue && !new RegExp(pattern).test(componentValue)) {
-              e[f.field_key] = `«${component.label}»: значение не соответствует требуемому формату`;
-              break;
-            }
-          }
-        }
-      }
-    });
-    (draft.schema.repeating_groups || []).forEach((g: any) => {
-      if (!groupActive(g)) return;
-      let items = answers[g.group_key] || [],
-        minimum = Math.max(g.min_items, g.required ? 1 : 0);
-      if (items.length < minimum)
-        e[g.group_key] = `Добавьте минимум ${minimum} записей`;
-      else if (items.length > g.max_items)
-        e[g.group_key] = `Можно добавить не больше ${g.max_items} записей`;
-      else
-        items.some((item: any, index: number) =>
-          g.fields.some((f: any) => {
-            if (
-              !f.config?.calculated &&
-              f.required &&
-              (item[f.field_key] === undefined ||
-                item[f.field_key] === null ||
-                item[f.field_key] === "")
-            ) {
-              e[g.group_key] =
-                `Запись № ${index + 1}: заполните поле «${f.label}»`;
-              return true;
-            }
-            return false;
-          }),
-        );
-    });
+    const e = Object.assign({}, ...steps.map((step) => validateStep(step, answers, draft.schema.fields)));
     setErrors(e);
     if (Object.keys(e).length) {
       setReview(false);
@@ -334,13 +288,14 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         <header className="pagehead">
           <div>
             <p>{draft.template.category}</p>
-            <h1>{draft.template.name}</h1>
+            <h1>{draft.title || draft.template.name}</h1>
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
         <section className="questionnaire-progress" aria-label="Прогресс заполнения">
-          <div><b>{review ? "Шаг 2 из 2 · Проверка" : "Шаг 1 из 2 · Анкета"}</b><span>{progress}% заполнено</span></div>
+          <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
+          <nav className="questionnaire-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], answers, draft.schema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
         </section>
         {error && (
           <div className="platform-error" role="alert">
@@ -375,17 +330,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             </ul>
           </div>
         )}
-        <form className="dynamic-form" onSubmit={review ? generate : (event) => { event.preventDefault(); if (validate()) setReview(true); }}>
+        <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); advance(); }}>
           {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{String(answers[f.field_key] ?? "—")}</b></div>)}</section>}
           {!review && <>
-          {groups(
-            draft.schema.fields.filter(
-              (f: any) => fieldState(f, answers).visible,
-            ),
-          ).map(([group, fields]: any) => (
-            <fieldset key={group}>
-              <legend>{group}</legend>
-              {fields.map((f: any) => (
+          {currentStep && <fieldset key={currentStep.name}>
+              <legend>{currentStep.name}</legend>
+              {currentStep.fields.filter((f:any) => fieldState(f, answers).visible).map((f: any) => (
                 <Question
                   key={f.id}
                   field={f}
@@ -402,9 +352,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                   }}
                 />
               ))}
-            </fieldset>
-          ))}
-          {(draft.schema.repeating_groups || [])
+            </fieldset>}
+          {(currentStep?.groups || [])
             .filter(groupActive)
             .map((g: any) => (
               <RepeatingGroupForm
@@ -432,6 +381,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           </>}
           <div className="form-actions">
             {review && <button type="button" className="secondary" onClick={() => setReview(false)}><ArrowLeft size={16}/>Вернуться к анкете</button>}
+            {!review && stepIndex > 0 && <button type="button" className="secondary" onClick={() => { setStepIndex(stepIndex - 1); setErrors({}); setError(""); }}><ArrowLeft size={16}/>Назад</button>}
             <button
               type="button"
               className="secondary"
@@ -442,7 +392,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
               Сохранить ответы
             </button>
             <button className="primary" disabled={busy}>
-              {review ? "Сформировать DOCX" : "Перейти к проверке"}
+              {review ? "Сформировать DOCX" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
             </button>
           </div>
           {document && (
@@ -507,13 +457,13 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       {drafts.length > 0 && (
         <section className="saved-drafts">
           <h2>Продолжить заполнение</h2>
-          {drafts.map((x) => (
+          {drafts.filter((x) => !x.generated).map((x) => (
             <button key={x.id} onClick={() => restore(x.id)}>
               <span>
-                <b>{x.template_name}</b>
+                <b>{x.title || x.template_name}</b>
                 <small>
                   {x.generated_stale
-                    ? "Ответы изменены — сформируйте новую версию"
+                    ? "Ответы изменены — продолжите заполнение"
                     : x.status === "GENERATED"
                       ? "Документ сформирован"
                       : "Черновик сохранён"}
@@ -527,9 +477,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       {productDrafts.length > 0 && (
         <section className="saved-drafts">
           <h2>Черновики договорных продуктов</h2>
-          {productDrafts.map((x: any) => (
+          {productDrafts.filter((x: any) => !x.generated).map((x: any) => (
             <button key={x.id} onClick={() => restoreProduct(x.id)}>
-              <span><b>{x.product_name}</b><small>Единая анкета · {x.decision?.state === "SELECTED" ? "вариант определён" : "продолжите заполнение"}</small></span>
+              <span><b>{x.title || x.product_name}</b><small>Единая анкета · {x.decision?.state === "SELECTED" ? "вариант определён" : "продолжите заполнение"}</small></span>
               <span>Продолжить</span>
             </button>
           ))}
@@ -677,15 +627,13 @@ function Question({ field, value, error, change, required }: any) {
       </output>
     );
   */
-  if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
-  if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}{required&&<i>Обязательно</i>}</legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
+  if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
+  if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
   return (
     <label className={error ? "invalid" : ""}>
       <span>
-        {field.label}
-        {required && <i>Обязательное</i>}
+        {field.label}<QuestionHint text={field.config?.description} id={id}/>
       </span>
-      {field.config?.description && <small>{field.config.description}</small>}
       {field.field_type === "MULTILINE_TEXT" ? (
         <textarea {...common} />
       ) : field.field_type === "BOOLEAN" ||
@@ -791,7 +739,6 @@ function CompositeInputs({ components, value, change }: any) {
           <label key={component.key} className={invalid ? "invalid" : ""}>
             <span>
               {component.label}
-              {component.required && <i>Обязательно</i>}
             </span>
             {hints[component.key] && <small>{hints[component.key]}</small>}
             <input

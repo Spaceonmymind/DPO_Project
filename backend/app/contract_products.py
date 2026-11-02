@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session as DBS
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.calculations import CalculationError
 from app.db import *
-from app.contract_platform import (DOCX_MIME,FIELD_TYPES,calculated_document_values,condition_answers,formatted_bindings,render_docx,safe_file,schema_for,schema_out,validate_active_answers,validate_bindings,validate_condition_schema,validate_regions,validate_repeating_answers,validate_repeating_groups)
+from app.contract_platform import (DOCX_MIME,FIELD_TYPES,calculated_document_values,condition_answers,formatted_bindings,render_docx,safe_file,schema_for,schema_out,validate_active_answers,validate_bindings,validate_condition_schema,validate_regions,validate_repeating_answers,validate_repeating_groups,validated_draft_title)
 
 STATES={'SELECTED','NEED_MORE_INFORMATION','NOT_APPLICABLE','MANUAL_REVIEW_REQUIRED','AMBIGUOUS','CONFIGURATION_ERROR'}
 
@@ -101,7 +101,7 @@ def draft_out(d,s):
   schema=schema_for(variant.template_version_id,s)
  mapped=[s.get(QuestionnaireField,m.target_field_id).field_key for m in s.query(ContractProductFieldMapping).filter_by(variant_id=variant.id) if s.get(QuestionnaireField,m.target_field_id)] if variant else []
  generated=[{'id':g.id,'generation_number':g.generation_number,'created_at':g.created_at,'download_url':f'/api/v1/generated-documents/{g.id}/download'} for g in s.query(GeneratedDocument).filter_by(product_draft_id=d.id).order_by(GeneratedDocument.created_at.desc())]
- return {'id':d.id,'status':d.status,'product':product_out(p,s),'product_version':v.version_number,'common_answers':d.common_answers or {},'variant_answers':(d.variant_answers or {}).get(variant.id,{}) if variant else {},'decision':decision,'common_fields':[field_out(x) for x in s.query(ContractProductField).filter_by(product_version_id=v.id).order_by(ContractProductField.position)],'selected_variant':variant_out(variant,s) if variant else None,'mapped_field_keys':mapped,'schema':schema_out(schema,s) if schema else None,'generated_documents':generated}
+ return {'id':d.id,'title':d.title or p.name,'status':d.status,'product':product_out(p,s),'product_version':v.version_number,'common_answers':d.common_answers or {},'variant_answers':(d.variant_answers or {}).get(variant.id,{}) if variant else {},'decision':decision,'common_fields':[field_out(x) for x in s.query(ContractProductField).filter_by(product_version_id=v.id).order_by(ContractProductField.position)],'selected_variant':variant_out(variant,s) if variant else None,'mapped_field_keys':mapped,'schema':schema_out(schema,s) if schema else None,'generated_documents':generated}
 
 def build_contract_product_router(current_dependency):
  r=APIRouter(tags=['contract-products']); prefix='/api/v1/contract-products'
@@ -258,9 +258,24 @@ def build_contract_product_router(current_dependency):
   d=ContractProductDraft(owner_id=u.id,product_version_id=p.current_version_id);s.add(d);s.commit();return draft_out(d,s)
  @r.get('/api/v1/contract-product-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
-  return [{'id':d.id,'product_name':s.get(ContractProduct,s.get(ContractProductVersion,d.product_version_id).product_id).name,'status':d.status,'decision':d.decision_snapshot,'updated_at':d.updated_at} for d in s.query(ContractProductDraft).filter_by(owner_id=u.id).order_by(ContractProductDraft.updated_at.desc())]
+  out=[]
+  for d in s.query(ContractProductDraft).filter_by(owner_id=u.id).order_by(ContractProductDraft.updated_at.desc()):
+   p=s.get(ContractProduct,s.get(ContractProductVersion,d.product_version_id).product_id)
+   generated=s.query(GeneratedDocument).filter_by(product_draft_id=d.id).order_by(GeneratedDocument.created_at.desc()).first()
+   out.append({'id':d.id,'title':d.title or p.name,'product_name':p.name,'status':d.status,'decision':d.decision_snapshot,'created_at':d.created_at,'updated_at':d.updated_at,'generated':generated.id if generated else None,'generated_stale':bool(generated and generated.created_at<d.updated_at)})
+  return out
  @r.get('/api/v1/contract-product-drafts/{id}')
  def get_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):return draft_out(own_product_draft(id,u,s),s)
+ @r.post('/api/v1/contract-product-drafts/{id}/duplicate',status_code=201)
+ def duplicate(id:str,payload:dict|None=None,u=Depends(current_dependency),s:DBS=Depends(db)):
+  import copy
+  source=own_product_draft(id,u,s); version=s.get(ContractProductVersion,source.product_version_id); product=s.get(ContractProduct,version.product_id)
+  title=validated_draft_title((payload or {}).get('title',f'Копия — {source.title or product.name}'[:200]))
+  new=ContractProductDraft(owner_id=u.id,product_version_id=source.product_version_id,title=title,common_answers=copy.deepcopy(source.common_answers or {}),variant_answers=copy.deepcopy(source.variant_answers or {}),selected_variant_id=source.selected_variant_id,selected_template_version_id=source.selected_template_version_id,status='DRAFT')
+  s.add(new); s.commit(); return draft_out(new,s)
+ @r.patch('/api/v1/contract-product-drafts/{id}/title')
+ def rename_draft(id:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_product_draft(id,u,s); d.title=validated_draft_title(payload.get('title')); d.updated_at=now(); s.commit(); return {'id':d.id,'title':d.title}
  @r.patch('/api/v1/contract-product-drafts/{id}')
  def save_draft(id:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_product_draft(id,u,s);v=s.get(ContractProductVersion,d.product_version_id);fields=s.query(ContractProductField).filter_by(product_version_id=v.id).all();common=payload.get('common_answers',d.common_answers or {});validate_common(fields,common);decision=resolve(v,s,common);old=d.selected_variant_id;d.common_answers=common;incoming=payload.get('variant_answers');all_answers=dict(d.variant_answers or {})

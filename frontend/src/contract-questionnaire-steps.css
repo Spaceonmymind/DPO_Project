@@ -1,0 +1,23 @@
+.questionnaire-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.questionnaire-steps button{max-width:100%;min-height:34px;padding:6px 10px;border:1px solid #cbdad4;border-radius:8px;background:#f7faf9;color:#426055;font-size:12px;font-weight:700;text-align:left;cursor:pointer}
+.questionnaire-steps button.active,.questionnaire-steps button[aria-current="step"]{border-color:#087d64;background:#e6f5ef;color:#076a55}
+.questionnaire-steps button:focus-visible,.question-hint-trigger:focus-visible,.document-dialog button:focus-visible,.document-dialog input:focus-visible{outline:2px solid #08755b;outline-offset:2px}
+.question-hint{position:relative;display:inline-flex;align-items:center;margin-left:2px;vertical-align:-4px;white-space:nowrap}
+.question-hint-trigger{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:#087d64;cursor:pointer}
+.question-hint-trigger:hover,.question-hint-trigger[aria-expanded="true"]{background:#e6f5ef}
+.question-hint-popup{position:absolute;z-index:30;bottom:calc(100% + 6px);left:0;display:block;width:max-content;max-width:min(300px,calc(100vw - 32px));padding:10px 12px;border:1px solid #b7d7cb;border-radius:10px;background:#fff;box-shadow:0 8px 24px #163e2d26;color:#30483e;font-size:12px;font-weight:400;line-height:1.45;white-space:normal;overflow-wrap:anywhere;text-transform:none}
+.dynamic-form legend .question-hint{font-size:12px}
+.contract-questionnaire .dynamic-form>fieldset{gap:12px;padding:18px;margin-bottom:12px}
+.contract-questionnaire .dynamic-form fieldset fieldset{gap:10px;padding:14px;margin-bottom:0}
+.contract-questionnaire .dynamic-form label{gap:4px;min-width:0}
+.contract-questionnaire .dynamic-form label>span{display:block;min-width:0;line-height:1.45;overflow-wrap:anywhere}
+.contract-questionnaire .dynamic-form label>span .question-hint{font-weight:400}
+.contract-questionnaire .dynamic-form .repeat-item{padding:12px}
+.contract-questionnaire .dynamic-form .repeat-item>header{margin-bottom:9px}
+.contract-questionnaire .dynamic-form .repeat-fields{gap:12px}
+.contract-questionnaire .dynamic-form .contract-choice-options{margin-top:2px}
+.documents-list article>div{flex-wrap:wrap}
+.document-dialog-backdrop{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;padding:16px;background:#152c2580}
+.document-dialog{display:grid;gap:12px;width:min(440px,100%);padding:24px;border:1px solid #d8e6e1;border-radius:16px;background:#fff;box-shadow:0 20px 60px #10261b33}
+.document-dialog h2{margin:0;font-size:20px}.document-dialog label{font-weight:700}.document-dialog input{width:100%;min-height:42px;padding:8px 10px;border:1px solid #b9ccc4;border-radius:8px}.document-dialog .form-actions{margin-top:6px}
+@media(max-width:720px){.question-hint-popup{left:auto;right:0}.document-dialog .form-actions{flex-direction:row}}

@@ -22,7 +22,9 @@ test('home and document history use real contract APIs',()=>{
   assert.match(home,/contract-drafts/);
   assert.match(home,/contract-catalog/);
   assert.match(home,/Последние документы/);
-  assert.match(documents,/template_version/);
+  assert.match(documents,/Дублировать/);
+  assert.match(documents,/Переименовать/);
+  assert.doesNotMatch(documents,/версия шаблона/);
   assert.match(documents,/generated-documents/);
   assert.match(app,/route === "\/documents"/);
 });
@@ -31,8 +33,8 @@ test('catalog has search, empty state and resumable questionnaire',()=>{
   assert.match(catalog,/Найти договор по названию или категории/);
   assert.match(catalog,/Пока нет доступных договоров/);
   assert.match(catalog,/URLSearchParams\(location\.search\)/);
-  assert.match(catalog,/Шаг 1 из 2 · Анкета/);
-  assert.match(catalog,/Шаг 2 из 2 · Проверка/);
+  assert.match(catalog,/Раздел \$\{stepIndex \+ 1\}/);
+  assert.match(catalog,/Проверка ответов/);
 });
 
 test('builder exposes staged wide structural workspace',()=>{

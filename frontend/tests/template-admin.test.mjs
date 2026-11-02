@@ -43,7 +43,7 @@ test('employee questionnaire is schema driven and restores drafts',()=>{
   assert.match(catalog,/contract-drafts/);
   assert.match(catalog,/Продолжить заполнение/);
   assert.match(catalog,/Сформировать DOCX/);
-  assert.match(catalog,/Обязательное поле/);
+  assert.match(readFileSync(new URL('../src/questionnaireSteps.ts',import.meta.url),'utf8'),/Обязательное поле/);
 });
 
 test('condition editor is visual, localized and supports boolean groups',()=>{
@@ -128,7 +128,7 @@ test('contract products expose visual rules, mappings and scenario preview',()=>
 
 test('employee uses one product questionnaire without choosing a technical DOCX',()=>{
   assert.match(catalog,/contract-product-catalog/);
-  assert.match(productFlow,/Система сама выберет утверждённый вариант DOCX/);
+  assert.match(productFlow,/Система выберет утверждённый вариант DOCX/);
   assert.match(productFlow,/contract-product-drafts/);
   assert.match(productFlow,/MANUAL_REVIEW_REQUIRED/);
   assert.doesNotMatch(productFlow,/template_version_id.*select/);

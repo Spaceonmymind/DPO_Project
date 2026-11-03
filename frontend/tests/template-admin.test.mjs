@@ -17,6 +17,13 @@ test('template manager exposes catalog creation and version upload',()=>{
   assert.match(component,/accept="\.docx/);
 });
 
+test('template route opens only the DOCX constructor',()=>{
+  assert.match(component,/return <TemplateBuilder api=\{api\} \/>/);
+  assert.doesNotMatch(component,/template-mode-tabs|<ProductAdmin|Договорные продукты/);
+  assert.doesNotMatch(catalog,/contract-product-catalog|beginProduct/);
+  assert.match(catalog,/restoreProduct/);
+});
+
 test('preview selection persists a structural locator instead of coordinates',()=>{
   assert.match(component,/data-locator/);
   assert.match(component,/selected_text/);
@@ -126,8 +133,10 @@ test('contract products expose visual rules, mappings and scenario preview',()=>
   assert.doesNotMatch(productAdmin,/Тестовые ответы JSON|введите JSON/i);
 });
 
-test('employee uses one product questionnaire without choosing a technical DOCX',()=>{
-  assert.match(catalog,/contract-product-catalog/);
+test('historical product questionnaire remains available through a direct draft link',()=>{
+  assert.doesNotMatch(catalog,/contract-product-catalog|beginProduct/);
+  assert.match(catalog,/productDraft/);
+  assert.match(catalog,/restoreProduct/);
   assert.match(productFlow,/Система выберет утверждённый вариант DOCX/);
   assert.match(productFlow,/contract-product-drafts/);
   assert.match(productFlow,/MANUAL_REVIEW_REQUIRED/);

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session as DBS
 from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
-from app.db import ConditionalDocumentRegion,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
@@ -39,7 +39,7 @@ def require_draft(v):
  if v.status!='DRAFT': raise HTTPException(409,detail='Опубликованная версия неизменяема. Загрузите новую версию DOCX.')
 def owned_template(id,u,s):
  x=s.get(DocumentTemplate,id)
- if not x or (x.owner_id!=u.id and 'administrator' not in roles(u)): raise HTTPException(404,detail='Шаблон не найден')
+ if not x or x.deleted_at or (x.owner_id!=u.id and 'administrator' not in roles(u)): raise HTTPException(404,detail='Шаблон не найден')
  return x
 def owned_version(id,u,s):
  v=s.get(TemplateVersion,id)
@@ -47,7 +47,7 @@ def owned_version(id,u,s):
  return v,owned_template(v.template_id,u,s)
 def own_draft(id,u,s):
  x=s.get(DocumentDraft,id)
- if not x or x.owner_id!=u.id: raise HTTPException(404,detail='Черновик не найден')
+ if not x or x.deleted_at or x.owner_id!=u.id: raise HTTPException(404,detail='Черновик не найден')
  return x
 def safe_file(value,root_name,checksum):
  root=(Path(settings.storage)/root_name).resolve(); path=Path(value).resolve()
@@ -740,28 +740,32 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  r=APIRouter(tags=['contract-platform']); prefix='/api/v1/document-templates'
  @r.get('/api/v1/contract-catalog')
  def catalog(q:str='',u=Depends(current_dependency),s:DBS=Depends(db)):
-  query=s.query(DocumentTemplate).filter_by(status='ACTIVE').filter(DocumentTemplate.current_version_id.is_not(None))
-  product_versions=s.query(ContractProductVersion.id).filter_by(status='PUBLISHED')
-  product_template_versions=s.query(ContractProductVariant.template_version_id).filter(ContractProductVariant.product_version_id.in_(product_versions))
-  query=query.filter(~DocumentTemplate.current_version_id.in_(product_template_versions))
+  query=s.query(DocumentTemplate).join(TemplateVersion,DocumentTemplate.current_version_id==TemplateVersion.id).filter(DocumentTemplate.status=='ACTIVE',DocumentTemplate.deleted_at.is_(None),TemplateVersion.status=='PUBLISHED')
   if q: query=query.filter(DocumentTemplate.name.ilike(f'%{q}%'))
   return [template_out(x,s) for x in query.order_by(DocumentTemplate.name).all()]
  @r.post('/api/v1/contract-drafts',status_code=201)
  def create_draft(payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   t=s.get(DocumentTemplate,payload.get('template_id'))
-  if not t or t.status!='ACTIVE' or not t.current_version_id: raise HTTPException(404,detail='Опубликованный шаблон не найден')
+  if not t or t.deleted_at or t.status!='ACTIVE' or not t.current_version_id: raise HTTPException(404,detail='Опубликованный шаблон не найден')
   v=s.get(TemplateVersion,t.current_version_id); schema=schema_for(v.id,s)
   if not schema or schema.status!='PUBLISHED': raise HTTPException(409,detail='Анкета шаблона не опубликована')
   d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'schema':schema_out(schema,s)}
  @r.get('/api/v1/contract-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
-  for d in s.query(DocumentDraft).filter_by(owner_id=u.id).order_by(DocumentDraft.updated_at.desc()).all():
+  product_children=s.query(GeneratedDocument.draft_id).filter(GeneratedDocument.product_draft_id.is_not(None))
+  for d in s.query(DocumentDraft).filter_by(owner_id=u.id).filter(DocumentDraft.deleted_at.is_(None),~DocumentDraft.id.in_(product_children)).order_by(DocumentDraft.updated_at.desc()).all():
    v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); g=s.query(GeneratedDocument).filter_by(draft_id=d.id).order_by(GeneratedDocument.generation_number.desc()).first(); out.append({'id':d.id,'title':d.title or t.name,'template_name':t.name,'template_version':v.version_number,'status':d.status,'created_at':d.created_at,'updated_at':d.updated_at,'generated':g.id if g else None,'generated_stale':bool(g and g.created_at<d.updated_at)})
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'template':template_out(t,s),'schema':schema_out(schema,s)}
+ @r.delete('/api/v1/contract-drafts/{id}')
+ def delete_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_draft(id,u,s)
+  if s.query(GeneratedDocument).filter(GeneratedDocument.draft_id==d.id,GeneratedDocument.product_draft_id.is_not(None)).first():
+   raise HTTPException(409,detail='Удалите договорный продукт из истории')
+  d.deleted_at=now(); s.commit(); return {'ok':True}
  @r.post('/api/v1/contract-drafts/{id}/duplicate',status_code=201)
  def duplicate(id:str,payload:dict|None=None,u=Depends(current_dependency),s:DBS=Depends(db)):
   import copy
@@ -806,10 +810,14 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def generated(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   g=s.get(GeneratedDocument,id)
   if not g: raise HTTPException(404,detail='Документ не найден')
-  d=own_draft(g.draft_id,u,s); t=s.get(DocumentTemplate,s.get(TemplateVersion,d.template_version_id).template_id); return FileResponse(safe_file(g.path,'generated_contracts',g.sha256),filename=f'{t.name}.docx',media_type=DOCX_MIME)
+  d=own_draft(g.draft_id,u,s)
+  if g.product_draft_id:
+   product_draft=s.get(ContractProductDraft,g.product_draft_id)
+   if not product_draft or product_draft.deleted_at or product_draft.owner_id!=u.id: raise HTTPException(404,detail='Документ не найден')
+  t=s.get(DocumentTemplate,s.get(TemplateVersion,d.template_version_id).template_id); return FileResponse(safe_file(g.path,'generated_contracts',g.sha256),filename=f'{t.name}.docx',media_type=DOCX_MIME)
  @r.get(prefix)
  def templates(u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); query=s.query(DocumentTemplate)
+  require_manager(u); query=s.query(DocumentTemplate).filter(DocumentTemplate.deleted_at.is_(None))
   if 'administrator' not in roles(u): query=query.filter_by(owner_id=u.id)
   return [template_out(x,s) for x in query.order_by(DocumentTemplate.updated_at.desc()).all()]
  @r.post(prefix,status_code=201)
@@ -817,6 +825,28 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); code=payload.code.upper()
   if s.query(DocumentTemplate).filter_by(owner_id=u.id,code=code).first(): raise HTTPException(409,detail='Шаблон с таким кодом уже существует')
   x=DocumentTemplate(owner_id=u.id,code=code,name=payload.name.strip(),category=payload.category.strip(),description=payload.description.strip()); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=x.id,actor_id=u.id,event_type='TEMPLATE_CREATED')); s.commit(); return template_out(x,s)
+ @r.delete(prefix+'/{tid}')
+ def delete_template(tid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); t=owned_template(tid,u,s)
+  versions=s.query(TemplateVersion).filter_by(template_id=t.id)
+  version_ids=[v.id for v in versions]
+  used=bool(version_ids and (s.query(DocumentDraft).filter(DocumentDraft.template_version_id.in_(version_ids)).first() or s.query(ContractProductVariant).filter(ContractProductVariant.template_version_id.in_(version_ids)).first()))
+  published=bool(versions.filter(TemplateVersion.status.in_(['PUBLISHED','SUPERSEDED'])).first())
+  if t.status!='DRAFT' or published or used: raise HTTPException(409,detail='Шаблон используется. Архивируйте его вместо удаления.')
+  t.deleted_at=now(); s.add(TemplateAuditEvent(template_id=t.id,actor_id=u.id,event_type='TEMPLATE_DELETED')); s.commit(); return {'ok':True}
+ @r.post(prefix+'/{tid}/archive')
+ def archive_template(tid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); t=owned_template(tid,u,s)
+  if t.status!='ACTIVE': raise HTTPException(409,detail='Архивировать можно только опубликованный шаблон')
+  active_product=s.query(ContractProductVariant).join(ContractProductVersion,ContractProductVariant.product_version_id==ContractProductVersion.id).join(ContractProduct,ContractProductVersion.product_id==ContractProduct.id).filter(ContractProduct.status=='ACTIVE',ContractProduct.deleted_at.is_(None),ContractProductVersion.status=='PUBLISHED',ContractProductVariant.template_version_id==t.current_version_id).first()
+  if active_product: raise HTTPException(409,detail='Сначала архивируйте договорный продукт, использующий этот шаблон')
+  t.status='ARCHIVED';t.updated_at=now();s.add(TemplateAuditEvent(template_id=t.id,actor_id=u.id,event_type='TEMPLATE_ARCHIVED'));s.commit();return template_out(t,s)
+ @r.post(prefix+'/{tid}/restore')
+ def restore_template(tid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);t=owned_template(tid,u,s)
+  v=s.get(TemplateVersion,t.current_version_id) if t.current_version_id else None
+  if t.status!='ARCHIVED' or not v or v.status!='PUBLISHED':raise HTTPException(409,detail='Восстановить можно архивный шаблон с опубликованной версией')
+  t.status='ACTIVE';t.updated_at=now();s.add(TemplateAuditEvent(template_id=t.id,actor_id=u.id,event_type='TEMPLATE_RESTORED'));s.commit();return template_out(t,s)
  @r.get(prefix+'/{tid}')
  def get_template(tid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); return template_out(owned_template(tid,u,s),s)

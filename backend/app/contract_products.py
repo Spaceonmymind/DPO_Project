@@ -23,7 +23,7 @@ def publisher(u):
  if not roles(u)&{'template_publisher','administrator'}: raise HTTPException(403,detail='Нет разрешения на публикацию договорного продукта')
 def product_owned(pid,u,s):
  x=s.get(ContractProduct,pid)
- if not x or (x.owner_id!=u.id and 'administrator' not in roles(u)): raise HTTPException(404,detail='Договорный продукт не найден')
+ if not x or x.deleted_at or (x.owner_id!=u.id and 'administrator' not in roles(u)): raise HTTPException(404,detail='Договорный продукт не найден')
  return x
 def version_owned(pid,vid,u,s):
  p=product_owned(pid,u,s); v=s.get(ContractProductVersion,vid)
@@ -93,7 +93,7 @@ def validate_common(fields,answers,complete=False):
  return errors
 def own_product_draft(id,u,s):
  d=s.get(ContractProductDraft,id)
- if not d or d.owner_id!=u.id:raise HTTPException(404,detail='Черновик продукта не найден')
+ if not d or d.deleted_at or d.owner_id!=u.id:raise HTTPException(404,detail='Черновик продукта не найден')
  return d
 def draft_out(d,s):
  v=s.get(ContractProductVersion,d.product_version_id); p=s.get(ContractProduct,v.product_id); decision=resolve(v,s,d.common_answers or {}); variant=s.get(ContractProductVariant,decision.get('variant_id')) if decision.get('variant_id') else None; schema=None
@@ -107,7 +107,7 @@ def build_contract_product_router(current_dependency):
  r=APIRouter(tags=['contract-products']); prefix='/api/v1/contract-products'
  @r.get(prefix)
  def products(u=Depends(current_dependency),s:DBS=Depends(db)):
-  manager(u); q=s.query(ContractProduct)
+  manager(u); q=s.query(ContractProduct).filter(ContractProduct.deleted_at.is_(None))
   if 'administrator' not in roles(u):q=q.filter_by(owner_id=u.id)
   return [product_out(x,s) for x in q.order_by(ContractProduct.updated_at.desc())]
  @r.post(prefix,status_code=201)
@@ -116,6 +116,28 @@ def build_contract_product_router(current_dependency):
   if not re.fullmatch(r'[A-Z0-9_-]{2,80}',code) or len(name)<2:raise HTTPException(422,detail='Заполните название и корректный код продукта')
   if s.query(ContractProduct).filter_by(owner_id=u.id,code=code).first():raise HTTPException(409,detail='Продукт с таким кодом уже существует')
   p=ContractProduct(owner_id=u.id,code=code,name=name,description=str(payload.get('description','')).strip()[:2000],category=str(payload.get('category','Другое')).strip()[:120]); s.add(p); s.flush(); v=ContractProductVersion(product_id=p.id,version_number=1,created_by_id=u.id,rules={}); s.add(v); s.flush(); s.add(ContractProductAuditEvent(product_id=p.id,product_version_id=v.id,actor_id=u.id,event_type='PRODUCT_CREATED')); s.commit(); out=product_out(p,s); out['version']=version_out(v,s); return out
+ @r.delete(prefix+'/{pid}')
+ def delete_product(pid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  manager(u);p=product_owned(pid,u,s)
+  versions=s.query(ContractProductVersion).filter_by(product_id=p.id)
+  ids=[v.id for v in versions]
+  published=bool(versions.filter(ContractProductVersion.status.in_(['PUBLISHED','SUPERSEDED'])).first())
+  used=bool(ids and s.query(ContractProductDraft).filter(ContractProductDraft.product_version_id.in_(ids)).first())
+  if p.status!='DRAFT' or published or used:raise HTTPException(409,detail='Продукт используется. Архивируйте его вместо удаления.')
+  p.deleted_at=now();s.add(ContractProductAuditEvent(product_id=p.id,actor_id=u.id,event_type='PRODUCT_DELETED'));s.commit();return {'ok':True}
+ @r.post(prefix+'/{pid}/archive')
+ def archive_product(pid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  manager(u);p=product_owned(pid,u,s)
+  if p.status!='ACTIVE':raise HTTPException(409,detail='Архивировать можно только опубликованный продукт')
+  p.status='ARCHIVED';p.updated_at=now();s.add(ContractProductAuditEvent(product_id=p.id,actor_id=u.id,event_type='PRODUCT_ARCHIVED'));s.commit();return product_out(p,s)
+ @r.post(prefix+'/{pid}/restore')
+ def restore_product(pid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  manager(u);p=product_owned(pid,u,s);v=s.get(ContractProductVersion,p.current_version_id) if p.current_version_id else None
+  if p.status!='ARCHIVED' or not v or v.status!='PUBLISHED':raise HTTPException(409,detail='Восстановить можно архивный продукт с опубликованной версией')
+  for variant in s.query(ContractProductVariant).filter_by(product_version_id=v.id,status='ACTIVE'):
+   tv=s.get(TemplateVersion,variant.template_version_id);template=s.get(DocumentTemplate,tv.template_id) if tv else None
+   if not template or template.deleted_at or template.status!='ACTIVE':raise HTTPException(409,detail='Сначала восстановите шаблоны, используемые продуктом')
+  p.status='ACTIVE';p.updated_at=now();s.add(ContractProductAuditEvent(product_id=p.id,actor_id=u.id,event_type='PRODUCT_RESTORED'));s.commit();return product_out(p,s)
  @r.patch(prefix+'/{pid}')
  def update_product(pid:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   manager(u);p=product_owned(pid,u,s)
@@ -250,22 +272,29 @@ def build_contract_product_router(current_dependency):
   v.status='PUBLISHED';v.published_by_id=u.id;v.published_at=now();p.status='ACTIVE';p.current_version_id=v.id;s.add(ContractProductAuditEvent(product_id=p.id,product_version_id=v.id,actor_id=u.id,event_type='PRODUCT_VERSION_PUBLISHED'));s.commit();return version_out(v,s)
  @r.get('/api/v1/contract-product-catalog')
  def catalog(u=Depends(current_dependency),s:DBS=Depends(db)):
-  return [product_out(x,s) for x in s.query(ContractProduct).filter_by(status='ACTIVE').filter(ContractProduct.current_version_id.is_not(None)).order_by(ContractProduct.name)]
+  return [product_out(x,s) for x in s.query(ContractProduct).filter_by(status='ACTIVE').filter(ContractProduct.deleted_at.is_(None),ContractProduct.current_version_id.is_not(None)).order_by(ContractProduct.name)]
  @r.post('/api/v1/contract-product-drafts',status_code=201)
  def create_draft(payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   p=s.get(ContractProduct,payload.get('product_id'))
-  if not p or p.status!='ACTIVE' or not p.current_version_id:raise HTTPException(404,detail='Опубликованный договорный продукт не найден')
+  if not p or p.deleted_at or p.status!='ACTIVE' or not p.current_version_id:raise HTTPException(404,detail='Опубликованный договорный продукт не найден')
   d=ContractProductDraft(owner_id=u.id,product_version_id=p.current_version_id);s.add(d);s.commit();return draft_out(d,s)
  @r.get('/api/v1/contract-product-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
-  for d in s.query(ContractProductDraft).filter_by(owner_id=u.id).order_by(ContractProductDraft.updated_at.desc()):
+  for d in s.query(ContractProductDraft).filter_by(owner_id=u.id).filter(ContractProductDraft.deleted_at.is_(None)).order_by(ContractProductDraft.updated_at.desc()):
    p=s.get(ContractProduct,s.get(ContractProductVersion,d.product_version_id).product_id)
    generated=s.query(GeneratedDocument).filter_by(product_draft_id=d.id).order_by(GeneratedDocument.created_at.desc()).first()
    out.append({'id':d.id,'title':d.title or p.name,'product_name':p.name,'status':d.status,'decision':d.decision_snapshot,'created_at':d.created_at,'updated_at':d.updated_at,'generated':generated.id if generated else None,'generated_stale':bool(generated and generated.created_at<d.updated_at)})
   return out
  @r.get('/api/v1/contract-product-drafts/{id}')
  def get_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):return draft_out(own_product_draft(id,u,s),s)
+ @r.delete('/api/v1/contract-product-drafts/{id}')
+ def delete_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_product_draft(id,u,s);d.deleted_at=now()
+  for generated in s.query(GeneratedDocument).filter_by(product_draft_id=d.id):
+   child=s.get(DocumentDraft,generated.draft_id)
+   if child:child.deleted_at=d.deleted_at
+  s.commit();return {'ok':True}
  @r.post('/api/v1/contract-product-drafts/{id}/duplicate',status_code=201)
  def duplicate(id:str,payload:dict|None=None,u=Depends(current_dependency),s:DBS=Depends(db)):
   import copy

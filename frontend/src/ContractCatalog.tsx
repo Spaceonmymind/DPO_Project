@@ -45,8 +45,6 @@ function readableApiError(error: any): { message: string; fields: Record<string,
 
 export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (path: string) => void; manager?: boolean }) {
   const [catalog, setCatalog] = useState<any[]>([]),
-    [products, setProducts] = useState<any[]>([]),
-    [productDrafts, setProductDrafts] = useState<any[]>([]),
     [productDraft, setProductDraft] = useState<any>(),
     [drafts, setDrafts] = useState<any[]>([]),
     [draft, setDraft] = useState<any>(),
@@ -63,16 +61,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   const autosaveReady = useRef(false);
   const savedSnapshot = useRef("{}");
   async function load() {
-    let [c, d, p, pd] = await Promise.all([
+    let [c, d] = await Promise.all([
       api("/contract-catalog"),
       api("/contract-drafts"),
-      api("/contract-product-catalog"),
-      api("/contract-product-drafts"),
     ]);
     setCatalog(c);
     setDrafts(d);
-    setProducts(p);
-    setProductDrafts(pd);
   }
   useEffect(() => {
     load()
@@ -136,14 +130,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           body: JSON.stringify({ template_id }),
         }),
       ),
-    );
-  }
-  async function beginProduct(product_id: string) {
-    await run(async () =>
-      setProductDraft(await api("/contract-product-drafts", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product_id }),
-      })),
     );
   }
   async function restoreProduct(id: string) {
@@ -248,12 +234,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   }
   const filtered = useMemo(
     () =>
-      [...products.map((x) => ({ ...x, product: true })), ...catalog].filter((x) =>
+      catalog.filter((x) =>
         (x.name + " " + x.category + " " + x.description)
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
-    [catalog, products, query],
+    [catalog, query],
   );
   const calculated: any = draft
     ? calculateAnswers(draft.schema, answers)
@@ -285,17 +271,17 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         <button className="back-link" onClick={() => setDraft(null)}>
           <ArrowLeft size={16} />К каталогу
         </button>
-        <header className="pagehead">
+        <header className="pagehead" data-tour="q-header">
           <div>
             <p>{draft.template.category}</p>
             <h1>{draft.title || draft.template.name}</h1>
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
-        <section className="questionnaire-progress" aria-label="Прогресс заполнения">
+        <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
-          <nav className="questionnaire-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], answers, draft.schema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
+          <nav className="questionnaire-steps" data-tour="q-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], answers, draft.schema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
         </section>
         {error && (
           <div className="platform-error" role="alert">
@@ -355,9 +341,10 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             </fieldset>}
           {(currentStep?.groups || [])
             .filter(groupActive)
-            .map((g: any) => (
+            .map((g: any, groupIndex: number) => (
               <RepeatingGroupForm
                 key={g.id}
+                tourTarget={groupIndex === 0}
                 group={g}
                 items={answers[g.group_key] || []}
                 calculatedItems={calculated.groups[g.group_key] || []}
@@ -379,7 +366,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
               />
             ))}
           </>}
-          <div className="form-actions">
+          <div className="form-actions" data-tour="q-actions">
             {review && <button type="button" className="secondary" onClick={() => setReview(false)}><ArrowLeft size={16}/>Вернуться к анкете</button>}
             {!review && stepIndex > 0 && <button type="button" className="secondary" onClick={() => { setStepIndex(stepIndex - 1); setErrors({}); setError(""); }}><ArrowLeft size={16}/>Назад</button>}
             <button
@@ -391,12 +378,12 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
               <Save size={16} />
               Сохранить ответы
             </button>
-            <button className="primary" disabled={busy}>
+            <button className="primary" data-tour={review?"q-generate":undefined} disabled={busy}>
               {review ? "Сформировать DOCX" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
             </button>
           </div>
           {document && (
-            <a className="document-ready" href={document.download_url}>
+            <a className="document-ready" data-tour="q-download" href={document.download_url}>
               <CheckCircle2 />
               <span>
                 <b>Договор готов</b>
@@ -422,7 +409,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           {error}
         </div>
       )}
-      <label className="catalog-search">
+      <label className="catalog-search" data-tour="catalog-search">
         <Search size={17} />
         <input
           value={query}
@@ -430,16 +417,16 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           placeholder="Найти договор по названию или категории"
         />
       </label>
-      <section className="contract-cards">
-        {filtered.map((x) => (
-          <article key={x.id}>
+      <section className="contract-cards" data-tour="catalog-cards">
+        {filtered.map((x,index) => (
+          <article data-tour={index===0?"catalog-card":undefined} key={x.id}>
             <FileText />
             <small>{x.category}</small>
             <h2>{x.name}</h2>
             <p>
               {x.description || "Утверждённый корпоративный шаблон договора."}
             </p>
-            <button className="primary" onClick={() => x.product ? beginProduct(x.id) : begin(x.id)}>
+            <button className="primary" onClick={() => begin(x.id)}>
               Заполнить договор
             </button>
           </article>
@@ -455,10 +442,10 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         </section>
       )}
       {drafts.length > 0 && (
-        <section className="saved-drafts">
+        <section className="saved-drafts" data-tour="catalog-drafts">
           <h2>Продолжить заполнение</h2>
           {drafts.filter((x) => !x.generated).map((x) => (
-            <button key={x.id} onClick={() => restore(x.id)}>
+            <button className="draft-continue" key={x.id} onClick={() => restore(x.id)}>
               <span>
                 <b>{x.title || x.template_name}</b>
                 <small>
@@ -469,18 +456,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                       : "Черновик сохранён"}
                 </small>
               </span>
-              <span>Продолжить</span>
-            </button>
-          ))}
-        </section>
-      )}
-      {productDrafts.length > 0 && (
-        <section className="saved-drafts">
-          <h2>Черновики договорных продуктов</h2>
-          {productDrafts.filter((x: any) => !x.generated).map((x: any) => (
-            <button key={x.id} onClick={() => restoreProduct(x.id)}>
-              <span><b>{x.title || x.product_name}</b><small>Единая анкета · {x.decision?.state === "SELECTED" ? "вариант определён" : "продолжите заполнение"}</small></span>
-              <span>Продолжить</span>
+              <span className="primary">Продолжить</span>
             </button>
           ))}
         </section>
@@ -490,6 +466,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
 }
 function RepeatingGroupForm({
   group,
+  tourTarget,
   items,
   calculatedItems,
   calculationErrors,
@@ -562,7 +539,7 @@ function RepeatingGroupForm({
       )}
       <button
         type="button"
-        className="condition-add"
+        className="condition-add" data-tour={tourTarget ? "q-repeat-add" : undefined}
         disabled={items.length >= group.max_items}
         onClick={add}
       >

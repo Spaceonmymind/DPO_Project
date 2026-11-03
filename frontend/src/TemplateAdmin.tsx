@@ -18,7 +18,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { evaluateExpression } from "./calculations";
-import { ProductAdmin } from "./ProductAdmin";
+import { ConfirmAction } from "./ConfirmAction";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
   TEXT: "Короткий текст",
@@ -68,7 +68,6 @@ const blank = (position = 1) => ({
 });
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
 export function TemplateAdmin({ api }: { api: Api }) {
-  const [section, setSection] = useState<"templates" | "products">("templates");
   return <TemplateBuilder api={api} />;
 }
 function TemplateBuilder({ api }: { api: Api }) {
@@ -106,7 +105,10 @@ function TemplateBuilder({ api }: { api: Api }) {
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
+    [pendingAction, setPendingAction] = useState<"delete" | "archive" | "restore" | null>(null),
     [stage, setStage] = useState(1),
+    // The tour changes only the visible editor stage; it never saves a template.
+
     [docQuery, setDocQuery] = useState(""),
     [questionQuery, setQuestionQuery] = useState(""),
     [workspaceTab, setWorkspaceTab] = useState<"questions" | "structure">("questions"),
@@ -218,6 +220,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       setTestDocument(result);setNotice("Тестовый DOCX сформирован и промаркирован.");
     });
   }
+  React.useEffect(() => { const show = (event: Event) => setStage((event as CustomEvent<number>).detail); window.addEventListener("tour-template-stage", show); return () => window.removeEventListener("tour-template-stage", show); }, []);
   async function create(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
@@ -591,7 +594,19 @@ function TemplateBuilder({ api }: { api: Api }) {
       );
       await openVersion(x);
       await load();
+      setSelected({ ...selected, status: "ACTIVE" });
       setNotice("Версия опубликована и доступна сотрудникам.");
+    });
+  }
+  async function manageTemplate() {
+    if (!selected || !pendingAction) return;
+    const action = pendingAction;
+    await run(async () => {
+      await api(`/document-templates/${selected.id}${action === "delete" ? "" : `/${action}`}`, { method: action === "delete" ? "DELETE" : "POST" });
+      if (action === "delete") setSelected(undefined);
+      else setSelected({ ...selected, status: action === "archive" ? "ARCHIVED" : "ACTIVE" });
+      await load(); setPendingAction(null);
+      setNotice(action === "delete" ? "Шаблон удалён." : action === "archive" ? "Шаблон убран из каталога." : "Шаблон восстановлен в каталоге.");
     });
   }
   return (
@@ -618,7 +633,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       )}
       <section className="template-layout">
         <aside className="template-catalog">
-          <form className="template-create" onSubmit={create}>
+          <form className="template-create" data-tour="tpl-create" onSubmit={create}>
             <h2>Новый шаблон</h2>
             <label>
               Название
@@ -650,7 +665,7 @@ function TemplateBuilder({ api }: { api: Api }) {
               Создать
             </button>
           </form>
-          <section className="template-list">
+          <section className="template-list" data-tour="tpl-list">
             <h2>Шаблоны</h2>
             {templates.map((x) => (
               <button
@@ -674,7 +689,7 @@ function TemplateBuilder({ api }: { api: Api }) {
             <Empty />
           ) : (
             <>
-              <header className="template-title">
+              <header className="template-title" data-tour="tpl-title">
                 <div>
                   <button className="back-link" onClick={() => setSelected(undefined)}><ArrowLeft size={15}/>К списку шаблонов</button>
                   <span className="draft-state">
@@ -685,10 +700,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                   <h2>{selected.name}</h2>
                   <p>{selected.category}</p>
                 </div>
+                <div className="template-management-actions">
+                  {selected.status === "ARCHIVED" ? <button type="button" className="secondary" onClick={() => setPendingAction("restore")}>Восстановить</button> : selected.status === "ACTIVE" ? <button type="button" className="secondary" onClick={() => setPendingAction("archive")}>Архивировать</button> : <button type="button" className="secondary document-delete" onClick={() => setPendingAction("delete")}>Удалить шаблон</button>}
+                </div>
                 {version?.status === "PUBLISHED" && (
                   <button
                     type="button"
-                    className="primary"
+                    className="primary" data-tour="tpl-new-version"
                     disabled={busy}
                     onClick={cloneVersion}
                   >
@@ -696,7 +714,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                     Создать новую версию
                   </button>
                 )}
-                <label className="secondary upload-version">
+                <label className="secondary upload-version" data-tour="tpl-upload">
                   <Upload size={16} />
                   Загрузить DOCX
                   <input
@@ -708,7 +726,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                   />
                 </label>
               </header>
-              <nav className="builder-stages" aria-label="Этапы настройки шаблона">
+              <nav className="builder-stages" data-tour="tpl-stages" aria-label="Этапы настройки шаблона">
                 {[
                   { step: 1, label: "Общие сведения" },
                   { step: 2, label: "Исходный документ" },
@@ -728,7 +746,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                 ))}
               </nav>
               <div className="version-grid">
-                <section className="version-list">
+                <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (
                     <button
@@ -748,7 +766,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                     </button>
                   ))}
                 </section>
-                <section className="docx-preview">
+                <section className="docx-preview" data-tour="tpl-source">
                   {version && preview ? (
                     <>
                       <header>
@@ -766,15 +784,15 @@ function TemplateBuilder({ api }: { api: Api }) {
                       </header>
                       <div className="builder-grid">
                         <aside className="document-outline" aria-label="Навигация по шаблону">
-                          <div className="workspace-tabs" role="tablist" aria-label="Навигация">
+                          <div className="workspace-tabs" data-tour="tpl-tabs" role="tablist" aria-label="Навигация">
                             <button role="tab" aria-selected={workspaceTab === "questions"} className={workspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
                             <button role="tab" aria-selected={workspaceTab === "structure"} className={workspaceTab === "structure" ? "active" : ""} onClick={() => setWorkspaceTab("structure")}>Word</button>
                           </div>
                           {workspaceTab === "questions" ? <>
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
-                            {version.status === "DRAFT" && <button className="workspace-add" type="button" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}
-                            <nav className="workspace-question-list" aria-label="Список вопросов">
+                            {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}
+                            <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
                               {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{item.group || "Основные сведения"}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
                               {schema?.fields?.length > 0 && !(schema.fields as any[]).some((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())) && <p className="workspace-empty">По запросу ничего не найдено.</p>}
@@ -785,10 +803,10 @@ function TemplateBuilder({ api }: { api: Api }) {
                             <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => document.querySelector(`[data-locator="${CSS.escape(item.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
                           </>}
                         </aside>
-                        <section className="document-canvas">
+                        <section className="document-canvas" data-tour="tpl-canvas">
                           <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><label>Масштаб <select value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div>
                           {bindingCandidates.length > 0 && (
-                            <details className="selection-card binding-candidate-review" aria-label="Кандидаты структурной разметки">
+                            <details className="selection-card binding-candidate-review" data-tour="tpl-candidates" aria-label="Кандидаты структурной разметки">
                               <summary>Кандидаты структурной разметки · {bindingCandidates.length}</summary>
                               <div className="candidate-review-body">
                               <Link2 />
@@ -1297,7 +1315,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                             </section>
                           </InspectorPortal>}
                         </section>
-                        <aside ref={inspectorRef} className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
+                        <aside ref={inspectorRef} data-tour="tpl-panel" className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
                           <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
                           <div id="workspace-context-inspector" />
                           {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
@@ -1883,6 +1901,7 @@ function TemplateBuilder({ api }: { api: Api }) {
           )}
         </main>
       </section>
+      {pendingAction && selected && <ConfirmAction title={pendingAction === "delete" ? "Удалить шаблон" : pendingAction === "archive" ? "Архивировать шаблон" : "Восстановить шаблон"} body={pendingAction === "delete" ? `Удалить черновой шаблон «${selected.name}»?` : pendingAction === "archive" ? `Убрать шаблон «${selected.name}» из каталога новых договоров? Созданные документы сохранятся.` : `Вернуть шаблон «${selected.name}» в каталог?`} action={pendingAction === "delete" ? "Удалить" : pendingAction === "archive" ? "Архивировать" : "Восстановить"} busy={busy} onConfirm={() => void manageTemplate()} onCancel={() => setPendingAction(null)}/>}
     </div>
   );
 }

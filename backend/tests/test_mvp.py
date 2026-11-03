@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 import fitz
 import openpyxl
 import xlwt
-from app.db import Base, engine, SessionLocal, User, QuestionnaireField, TemplateVersion, DocumentBinding, DocumentDraft
+from app.db import Base, engine, SessionLocal, User, QuestionnaireField, QuestionnaireSchema, TemplateVersion, DocumentBinding, DocumentDraft, DocumentTemplate, GeneratedDocument, ContractProduct, ContractProductVersion, ContractProductDraft, ContractProductVariant, settings
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -45,6 +45,141 @@ def auth(client: TestClient, name: str = 'ivanov') -> dict[str, str]:
     response = client.post('/api/v1/auth/login', json={'external_id': name, 'password': name.capitalize()})
     assert response.status_code == 200
     return {'x-csrf-token': response.json()['csrf_token']}
+
+
+def test_onboarding_progress_is_private_and_csrf_protected():
+    ivan, petrov = TestClient(app), TestClient(app)
+    ivan_headers = auth(ivan)
+    petrov_headers = auth(petrov, 'petrova')
+    path = '/api/v1/auth/me/onboarding/T1'
+    assert ivan.get('/api/v1/auth/me/onboarding').json().get('T1') is None
+    assert ivan.put(path, json={'version': 1, 'status': 'COMPLETED'}).status_code == 403
+    response = ivan.put(path, headers=ivan_headers, json={'version': 1, 'status': 'COMPLETED'})
+    assert response.status_code == 200
+    assert ivan.get('/api/v1/auth/me/onboarding').json()['T1']['status'] == 'COMPLETED'
+    assert 'T1' not in petrov.get('/api/v1/auth/me/onboarding').json()
+    assert petrov.put('/api/v1/auth/me/onboarding/T4', headers=petrov_headers, json={'version': 1, 'status': 'COMPLETED'}).status_code == 403
+    assert ivan.put(path, headers=ivan_headers, json={'version': 2, 'status': 'COMPLETED'}).status_code == 422
+    assert ivan.put(path, headers=ivan_headers, json={'version': 1, 'status': 'SKIPPED'}).json()['status'] == 'SKIPPED'
+
+
+def test_document_soft_delete_and_template_archive_preserve_existing_history():
+    manager, employee = TestClient(app), TestClient(app)
+    mh, eh = auth(manager), auth(employee, 'petrova')
+    template = create_platform_template(manager, mh, 'ARCHIVE_HISTORY_TEST')
+    raw = contract_docx_bytes()
+    upload = manager.post(f"/api/v1/document-templates/{template['id']}/versions", headers=mh,
+        files={'file': ('archive.docx', raw, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert upload.status_code == 201, upload.text
+    version = upload.json()
+    with SessionLocal() as session:
+        t = session.get(DocumentTemplate, template['id']); v = session.get(TemplateVersion, version['id'])
+        t.status = 'ACTIVE'; t.current_version_id = v.id; v.status = 'PUBLISHED'
+        session.query(QuestionnaireSchema).filter_by(template_version_id=v.id).first().status = 'PUBLISHED'
+        session.commit()
+    created = employee.post('/api/v1/contract-drafts', headers=eh, json={'template_id': template['id']})
+    assert created.status_code == 201, created.text
+    draft_id = created.json()['id']
+    with SessionLocal() as session:
+        target = Path(settings.storage)/'generated_contracts'/f'{draft_id}.docx'
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
+        generated = GeneratedDocument(draft_id=draft_id, template_version_id=version['id'], generation_number=1,
+            path=str(target), sha256=hashlib.sha256(raw).hexdigest(), mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            size=len(raw), created_by_id=session.query(User).filter_by(external_id='petrova').first().id)
+        session.add(generated); session.commit(); generated_id = generated.id
+    assert employee.get(f'/api/v1/generated-documents/{generated_id}/download').status_code == 200
+    assert employee.post(f"/api/v1/document-templates/{template['id']}/archive", headers=eh).status_code == 403
+    archived = manager.post(f"/api/v1/document-templates/{template['id']}/archive", headers=mh)
+    assert archived.status_code == 200, archived.text
+    assert template['id'] not in [item['id'] for item in employee.get('/api/v1/contract-catalog').json()]
+    assert employee.get(f'/api/v1/contract-drafts/{draft_id}').status_code == 200
+    assert employee.get(f'/api/v1/generated-documents/{generated_id}/download').status_code == 200
+    assert employee.post(f'/api/v1/contract-drafts/{draft_id}/duplicate', headers=eh).status_code == 201
+    assert manager.delete(f'/api/v1/contract-drafts/{draft_id}', headers=mh).status_code == 404
+    assert employee.delete(f'/api/v1/contract-drafts/{draft_id}', headers=eh).status_code == 200
+    assert employee.get(f'/api/v1/contract-drafts/{draft_id}').status_code == 404
+    assert draft_id not in [item['id'] for item in employee.get('/api/v1/contract-drafts').json()]
+    assert employee.post(f'/api/v1/contract-drafts/{draft_id}/duplicate', headers=eh).status_code == 404
+    assert employee.get(f'/api/v1/generated-documents/{generated_id}/download').status_code == 404
+    assert manager.delete(f"/api/v1/document-templates/{template['id']}", headers=mh).status_code == 409
+    assert manager.post(f"/api/v1/document-templates/{template['id']}/restore", headers=mh).status_code == 200
+    assert template['id'] in [item['id'] for item in employee.get('/api/v1/contract-catalog').json()]
+
+
+def test_unused_draft_template_and_product_can_be_soft_deleted():
+    manager = TestClient(app); headers = auth(manager)
+    template = create_platform_template(manager, headers, 'UNUSED_DELETE_TEST')
+    assert manager.delete(f"/api/v1/document-templates/{template['id']}", headers=headers).status_code == 200
+    assert manager.get(f"/api/v1/document-templates/{template['id']}").status_code == 404
+    product = manager.post('/api/v1/contract-products', headers=headers, json={'code':'UNUSED_PRODUCT_DELETE','name':'Ненужный продукт'}).json()
+    assert manager.delete(f"/api/v1/contract-products/{product['id']}", headers=headers).status_code == 200
+    assert product['id'] not in [item['id'] for item in manager.get('/api/v1/contract-products').json()]
+
+
+def test_docx_catalog_includes_published_template_used_by_legacy_product():
+    manager, employee = TestClient(app), TestClient(app)
+    mh = auth(manager); auth(employee, 'petrova')
+    template = create_platform_template(manager, mh, 'DOCX_FROM_PRODUCT_TEST')
+    uploaded = manager.post(f"/api/v1/document-templates/{template['id']}/versions", headers=mh,
+        files={'file': ('source.docx', contract_docx_bytes(), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code == 201, uploaded.text
+    product = manager.post('/api/v1/contract-products', headers=mh, json={'code':'LEGACY_PRODUCT_CATALOG_TEST','name':'Старый продукт'}).json()
+    with SessionLocal() as session:
+        t = session.get(DocumentTemplate, template['id']); v = session.get(TemplateVersion, uploaded.json()['id'])
+        t.status = 'ACTIVE'; t.current_version_id = v.id; v.status = 'PUBLISHED'
+        p = session.get(ContractProduct, product['id']); pv = session.get(ContractProductVersion, product['version']['id'])
+        p.status = 'ACTIVE'; p.current_version_id = pv.id; pv.status = 'PUBLISHED'
+        session.add(ContractProductVariant(product_version_id=pv.id, code='LEGACY', name='Вариант', template_version_id=v.id, selection_condition={}, position=1))
+        session.commit()
+    catalog = employee.get('/api/v1/contract-catalog')
+    assert catalog.status_code == 200
+    assert template['id'] in [item['id'] for item in catalog.json()]
+    assert product['id'] not in [item['id'] for item in catalog.json()]
+
+
+def test_product_archive_restore_and_product_draft_soft_delete():
+    manager, employee = TestClient(app), TestClient(app)
+    mh, eh = auth(manager), auth(employee, 'petrova')
+    response = manager.post('/api/v1/contract-products', headers=mh, json={'code':'PRODUCT_ARCHIVE_TEST','name':'Продукт для архива'})
+    assert response.status_code == 201, response.text
+    product = response.json()
+    with SessionLocal() as session:
+        p = session.get(ContractProduct, product['id']); v = session.get(ContractProductVersion, product['version']['id'])
+        p.status = 'ACTIVE'; p.current_version_id = v.id; v.status = 'PUBLISHED'; session.commit()
+    created = employee.post('/api/v1/contract-product-drafts', headers=eh, json={'product_id':product['id']})
+    assert created.status_code == 201, created.text
+    draft_id = created.json()['id']
+    template = create_platform_template(manager, mh, 'PRODUCT_ARCHIVE_SOURCE')
+    raw = contract_docx_bytes()
+    uploaded = manager.post(f"/api/v1/document-templates/{template['id']}/versions", headers=mh,
+        files={'file': ('product-source.docx', raw, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    with SessionLocal() as session:
+        owner = session.query(User).filter_by(external_id='petrova').first()
+        child = DocumentDraft(owner_id=owner.id, template_version_id=uploaded['id'])
+        session.add(child); session.flush()
+        target = Path(settings.storage)/'generated_contracts'/f'{draft_id}-product.docx'
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
+        generated = GeneratedDocument(draft_id=child.id, template_version_id=uploaded['id'], product_draft_id=draft_id,
+            product_version_id=product['version']['id'], generation_number=1, path=str(target),
+            sha256=hashlib.sha256(raw).hexdigest(), mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            size=len(raw), created_by_id=owner.id)
+        session.add(generated); session.commit(); generated_id = generated.id; child_id = child.id
+    assert employee.get(f'/api/v1/generated-documents/{generated_id}/download').status_code == 200
+    assert child_id not in [item['id'] for item in employee.get('/api/v1/contract-drafts').json()]
+    assert employee.delete(f'/api/v1/contract-drafts/{child_id}', headers=eh).status_code == 409
+    assert employee.post(f"/api/v1/contract-products/{product['id']}/archive", headers=eh).status_code == 403
+    assert manager.post(f"/api/v1/contract-products/{product['id']}/archive", headers=mh).status_code == 200
+    assert product['id'] not in [item['id'] for item in employee.get('/api/v1/contract-product-catalog').json()]
+    assert employee.get(f'/api/v1/contract-product-drafts/{draft_id}').status_code == 200
+    assert employee.post(f'/api/v1/contract-product-drafts/{draft_id}/duplicate', headers=eh).status_code == 201
+    assert manager.delete(f'/api/v1/contract-product-drafts/{draft_id}', headers=mh).status_code == 404
+    assert employee.delete(f'/api/v1/contract-product-drafts/{draft_id}', headers=eh).status_code == 200
+    assert employee.get(f'/api/v1/contract-product-drafts/{draft_id}').status_code == 404
+    assert draft_id not in [item['id'] for item in employee.get('/api/v1/contract-product-drafts').json()]
+    assert employee.post(f'/api/v1/contract-product-drafts/{draft_id}/duplicate', headers=eh).status_code == 404
+    assert employee.get(f'/api/v1/generated-documents/{generated_id}/download').status_code == 404
+    assert manager.post(f"/api/v1/contract-products/{product['id']}/restore", headers=mh).status_code == 200
+    assert product['id'] in [item['id'] for item in employee.get('/api/v1/contract-product-catalog').json()]
 
 
 def contract_docx_bytes() -> bytes:

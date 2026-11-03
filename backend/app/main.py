@@ -111,6 +111,25 @@ def login(x:Login,req:Request,response:Response,d:DBS=Depends(db)):
 @app.get('/api/v1/auth/me')
 def me(req:Request,u=Depends(current),d:DBS=Depends(db)):
  s=d.get(Session,req.cookies.get('dpo_session','')); return {'user':userout(u),'csrf_token':s.csrf_token}
+class OnboardingUpdate(BaseModel):
+ version:int
+ status:str
+@app.get('/api/v1/auth/me/onboarding')
+def get_onboarding(u=Depends(current),d:DBS=Depends(db)):
+ return {item.tour_id:{'version':item.version,'status':item.status,'completed_at':item.completed_at.isoformat()} for item in d.query(UserOnboarding).filter_by(user_id=u.id).all()}
+@app.put('/api/v1/auth/me/onboarding/{tour_id}')
+def put_onboarding(tour_id:str,payload:OnboardingUpdate,u=Depends(current),d:DBS=Depends(db)):
+ if tour_id not in {'T1','T2','T3','T4'} or payload.version!=1 or payload.status not in {'COMPLETED','SKIPPED'}:
+  raise HTTPException(422,detail='Некорректное состояние обучения')
+ if tour_id in {'T3','T4'} and not any(role in (u.roles or []) for role in ('dpo_specialist','administrator')):
+  raise HTTPException(403,detail='Тур недоступен')
+ item=d.query(UserOnboarding).filter_by(user_id=u.id,tour_id=tour_id).first()
+ if not item:
+  item=UserOnboarding(user_id=u.id,tour_id=tour_id,version=payload.version,status=payload.status,completed_at=now()); d.add(item)
+ else:
+  item.version=payload.version; item.status=payload.status; item.completed_at=now()
+ d.commit()
+ return {'version':item.version,'status':item.status,'completed_at':item.completed_at.isoformat()}
 @app.post('/api/v1/auth/logout')
 def logout(req:Request,response:Response,u=Depends(current),d:DBS=Depends(db)):
  s=d.get(Session,req.cookies.get('dpo_session',''))

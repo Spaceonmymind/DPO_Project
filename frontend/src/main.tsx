@@ -23,7 +23,9 @@ import {
   Trash2,
   FileCheck2,
   Handshake,
+  GraduationCap,
 } from "lucide-react";
+import { OnboardingProvider, useOnboarding } from "./onboarding/OnboardingProvider";
 import "./styles.css";
 import "./enhancements.css";
 import { SupplySpecificationPanel as SupplySpec } from "./SupplySpec";
@@ -212,6 +214,7 @@ function Login({ setUser }: any) {
   );
 }
 function Sidebar({ u, route, go, logout }: any) {
+  const onboarding = useOnboarding();
   let [closed, setClosed] = useState(localStorage.getItem("side") === "1"),
     [profile, setProfile] = useState(false),
     reduce = useReducedMotion();
@@ -220,9 +223,11 @@ function Sidebar({ u, route, go, logout }: any) {
     setClosed(v);
     localStorage.setItem("side", v ? "1" : "");
   }
+  useEffect(() => { const listener = (event: Event) => { const next = (event as CustomEvent).detail.closed; setClosed(next); localStorage.setItem('side', next ? '1' : ''); }; window.addEventListener('tour-sidebar', listener); return () => window.removeEventListener('tour-sidebar', listener); }, []);
   return (
     <motion.aside
       className="side"
+      data-tour="sidebar"
       animate={{ width: closed ? 76 : 268 }}
       transition={
         reduce ? { duration: 0 } : { duration: 0.25, ease: [0.22, 1, 0.36, 1] }
@@ -239,13 +244,14 @@ function Sidebar({ u, route, go, logout }: any) {
       </header>
       <button
         className="new"
+        data-tour="sidebar-create"
         onClick={() => go("/contracts")}
         title={closed ? "Создать договор" : ""}
       >
         <Plus />
         {!closed && "Создать договор"}
       </button>
-      <nav>
+      <nav data-tour="sidebar-nav">
         <button
           className={route === "/" ? "active" : ""}
           title={closed ? "Главная" : ""}
@@ -282,10 +288,12 @@ function Sidebar({ u, route, go, logout }: any) {
             {!closed && "Конструктор шаблонов"}
           </button>
         )}
+        <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && 'Обучение'}</button>
       </nav>
       <footer>
         <button
           className="user"
+          data-tour="profile"
           onClick={() => setProfile(!profile)}
           title={closed ? "Профиль" : ""}
         >
@@ -1011,7 +1019,7 @@ function Shell({ u, logout }: any) {
     });
   }
   return (
-    <div className="shell">
+    <OnboardingProvider user={u} api={api} route={route} navigate={go}><div className="shell">
       <Sidebar
         u={u}
         route={route}
@@ -1021,6 +1029,8 @@ function Shell({ u, logout }: any) {
       <main className="content">
         {route === "/" ? (
           <ContractHome api={api} user={u} go={go} />
+        ) : route === '/learning' ? (
+          <LearningPage />
         ) : route === "/documents" ? (
           <MyDocuments api={api} go={go} />
         ) : route === "/cases" ? (
@@ -1134,9 +1144,10 @@ function Shell({ u, logout }: any) {
           </Icon>
         </div>
       )}
-    </div>
+    </div></OnboardingProvider>
   );
 }
+function LearningPage(){ return <>{useOnboarding().launcher}</>; }
 function App() {
   let [u, setU] = useState<any>(),
     [boot, setBoot] = useState(true);

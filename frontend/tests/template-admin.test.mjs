@@ -18,7 +18,7 @@ test('template manager exposes catalog creation and version upload',()=>{
 });
 
 test('template route opens only the DOCX constructor',()=>{
-  assert.match(component,/return <TemplateBuilder api=\{api\} \/>/);
+  assert.match(component,/return <FormulaStatusProvider><TemplateBuilder api=\{api\} \/><\/FormulaStatusProvider>/);
   assert.doesNotMatch(component,/template-mode-tabs|<ProductAdmin|Договорные продукты/);
   assert.doesNotMatch(catalog,/contract-product-catalog|beginProduct/);
   assert.match(catalog,/restoreProduct/);

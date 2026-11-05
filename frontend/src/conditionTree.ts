@@ -92,3 +92,68 @@ export function moveCondition(root: Condition, path: number[], direction: -1 | 1
   [children[index], children[other]] = [children[other], children[index]];
   return { ...root, conditions: children };
 }
+
+export function conditionAt(root: Condition, path: number[]): Condition | null {
+  let node: Condition | undefined = root;
+  for (const index of path) {
+    if (node?.operator === "NOT") node = node.condition;
+    if (node?.operator !== "AND" && node?.operator !== "OR") return null;
+    node = node.conditions?.[index];
+  }
+  return node || null;
+}
+
+export function canLiftCondition(root: Condition, path: number[]): boolean {
+  if (path.length < 2) return false;
+  const inner = conditionAt(root, path.slice(0, -1));
+  const outer = conditionAt(root, path.slice(0, -2));
+  return !!inner && !!outer && (inner.operator === "AND" || inner.operator === "OR") && inner.operator === outer.operator;
+}
+
+/** Associativity makes lifting safe only when both groups use the same operator. */
+export function liftCondition(root: Condition, path: number[]): Condition {
+  if (!canLiftCondition(root, path)) return root;
+  const outerPath = path.slice(0, -2), outer = conditionAt(root, outerPath)!;
+  const innerIndex = path[path.length - 2], childIndex = path[path.length - 1];
+  const inner = outer.conditions![innerIndex], moving = inner.conditions![childIndex];
+  const remaining = inner.conditions!.filter((_, index) => index !== childIndex);
+  const replacement = remaining.length === 1 ? remaining[0] : { ...inner, conditions: remaining };
+  const siblings = [...outer.conditions!];
+  siblings.splice(innerIndex, 1, replacement, moving);
+  return replaceCondition(root, outerPath, { ...outer, conditions: siblings });
+}
+
+export function canNestCondition(root: Condition, path: number[], direction: -1 | 1): boolean {
+  if (!path.length) return false;
+  const parent = conditionAt(root, path.slice(0, -1));
+  if (!parent || (parent.operator !== "AND" && parent.operator !== "OR")) return false;
+  const sibling = parent.conditions?.[path[path.length - 1] + direction];
+  if (!sibling || sibling.operator !== parent.operator) return false;
+  const moved = nestCondition(root, path, direction);
+  return conditionStats(moved).depth <= MAX_CONDITION_DEPTH;
+}
+
+/** Move into an adjacent group with the same operator; the boolean result is unchanged. */
+export function nestCondition(root: Condition, path: number[], direction: -1 | 1): Condition {
+  if (!path.length) return root;
+  const parentPath = path.slice(0, -1), parent = conditionAt(root, parentPath);
+  if (!parent || (parent.operator !== "AND" && parent.operator !== "OR")) return root;
+  const index = path[path.length - 1], targetIndex = index + direction;
+  const target = parent.conditions?.[targetIndex];
+  if (!target || target.operator !== parent.operator) return root;
+  const children = [...parent.conditions!], moving = children[index];
+  children[targetIndex] = { ...target, conditions: direction === -1 ? [...target.conditions!, moving] : [moving, ...target.conditions!] };
+  children.splice(index, 1);
+  return replaceCondition(root, parentPath, children.length === 1 ? children[0] : { ...parent, conditions: children });
+}
+
+export function insertAdjacentCondition(root: Condition, path: number[], node: Condition, before: boolean): Condition {
+  if (!path.length) return { operator: "AND", conditions: before ? [node, root] : [root, node] };
+  const parentPath = path.slice(0, -1), rawParent = conditionAt(root, parentPath);
+  const parent = rawParent?.operator === "NOT" ? rawParent.condition : rawParent;
+  if (!parent || (parent.operator !== "AND" && parent.operator !== "OR")) return root;
+  const children = [...parent.conditions!];
+  children.splice(path[path.length - 1] + (before ? 0 : 1), 0, node);
+  const updated = { ...parent, conditions: children };
+  return replaceCondition(root, parentPath, rawParent?.operator === "NOT" ? { ...rawParent, condition: updated } : updated);
+}

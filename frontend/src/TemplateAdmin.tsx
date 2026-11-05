@@ -20,7 +20,8 @@ import {
 } from "lucide-react";
 import { evaluateExpression } from "./calculations";
 import type { Condition } from "./conditions";
-import { conditionError, conditionStats, replaceCondition, removeCondition, moveCondition, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES } from "./conditionTree";
+import { conditionError, conditionStats, replaceCondition, removeCondition, moveCondition, canLiftCondition, liftCondition, canNestCondition, nestCondition, insertAdjacentCondition, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES } from "./conditionTree";
+import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type NamedCondition } from "./conditionFormula";
 import { resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
@@ -78,9 +79,21 @@ const blank = (position = 1) => ({
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
 const newOption = () => ({ key: `option_${Math.random().toString(36).slice(2, 10)}`, label: "" });
 export function TemplateAdmin({ api }: { api: Api }) {
-  return <TemplateBuilder api={api} />;
+  return <FormulaStatusProvider><TemplateBuilder api={api} /></FormulaStatusProvider>;
+}
+const FormulaStatusContext = React.createContext({ pending: false, setPending: (_id: string, _value: boolean) => {} });
+function FormulaStatusProvider({ children }: { children: React.ReactNode }) {
+  const [pendingById, setPendingById] = useState<Record<string, boolean>>({});
+  const setPending = React.useCallback((id: string, pending: boolean) => setPendingById(current => {
+    if (current[id] === pending || (!pending && !(id in current))) return current;
+    const next = { ...current };
+    if (pending) next[id] = true; else delete next[id];
+    return next;
+  }), []);
+  return <FormulaStatusContext.Provider value={{ pending: Object.keys(pendingById).length > 0, setPending }}>{children}</FormulaStatusContext.Provider>;
 }
 function TemplateBuilder({ api }: { api: Api }) {
+  const { pending: formulaPending } = React.useContext(FormulaStatusContext);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
@@ -321,6 +334,7 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   async function saveField(e: FormEvent) {
     e.preventDefault();
+    if (formulaPending) return;
     await run(async () => {
       let path = `/document-templates/${selected.id}/versions/${version.id}/fields${editing ? "/" + editing : ""}`;
       const payload = field.field_type === "SINGLE_SELECT" && !field.option_items?.length && !field.allow_other
@@ -491,6 +505,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     if (!resolveBlockRange(blockStart, locator, availableBlockLocators).error) setBlockError("");
   }
   async function saveRegion() {
+    if (formulaPending) return;
     await run(async () => {
       let editingRegion = regionDraft.id,
         path = `/document-templates/${selected.id}/versions/${version.id}/conditional-regions${editingRegion ? "/" + editingRegion : ""}`,
@@ -547,6 +562,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     draftRepeatingGroup(repeatBlockStart, locator); setRepeatBlockStart(undefined);
   }
   async function saveRepeatingGroup() {
+    if (formulaPending) return;
     await run(async () => {
       let editing = groupDraft.id,
         path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups${editing ? "/" + editing : ""}`;
@@ -1234,7 +1250,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   type="button"
                                   className="primary"
                                   disabled={
-                                    busy ||
+                                    busy || formulaPending ||
                                     !regionDraft.region_key ||
                                     !regionDraft.include_when ||
                                     !!conditionError(regionDraft.include_when, schema?.fields || []) ||
@@ -1374,7 +1390,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   type="button"
                                   className="primary"
                                   disabled={
-                                    busy ||
+                                    busy || formulaPending ||
                                     !groupDraft.name ||
                                     !groupDraft.group_key ||
                                     groupDraft.max_items < groupDraft.min_items ||
@@ -1607,7 +1623,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 }
                               />
                               {editing && <div className="workspace-linked-fragments"><b>Связанные фрагменты · {bindings.filter((item:any) => item.field_id === editing).length}</b>{bindings.filter((item:any) => item.field_id === editing).map((item:any) => <button key={item.id} type="button" className="secondary" onClick={() => { setActiveBinding(item); setStage(3); document.querySelector(`[data-locator="${CSS.escape(item.locator.node)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"}); }}>{item.selected_text || "Фрагмент Word"}</button>)}</div>}
-                              <button className="primary" disabled={busy || !!conditionError(field.visible_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key) || !!conditionError(field.required_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key)}>
+                              <button className="primary" disabled={busy || formulaPending || !!conditionError(field.visible_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key) || !!conditionError(field.required_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key)}>
                                 {editing
                                   ? "Сохранить изменения"
                                   : "Добавить вопрос"}
@@ -2079,6 +2095,44 @@ const conditionDescription = (node: Condition, fields: any[]): string => {
 
 export function ConditionEditor({ title, value, fields, change, ownKey }: any) {
   const root = value as Condition | null;
+  const [mode, setMode] = useState<"visual" | "formula">("visual");
+  const [formulaDraft, setFormulaDraft] = useState<{ formula: string; variables: NamedCondition[] }>({ formula: "", variables: [] });
+  const [formulaDirty, setFormulaDirty] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const lastFormulaRoot = useRef<string | null>(null);
+  const editorId = React.useId();
+  const formulaStatus = React.useContext(FormulaStatusContext);
+  useEffect(() => { formulaStatus.setPending(editorId, formulaDirty); }, [editorId, formulaDirty, formulaStatus.setPending]);
+  useEffect(() => () => formulaStatus.setPending(editorId, false), [editorId, formulaStatus.setPending]);
+  const parsedFormula = useMemo(() => {
+    if (mode !== "formula") return { value: null as Condition | null, error: null as string | null };
+    try {
+      const parsed = parseConditionFormula(formulaDraft.formula, formulaDraft.variables);
+      return { value: parsed, error: conditionError(parsed, fields, ownKey) };
+    } catch (error) { return { value: null, error: (error as Error).message }; }
+  }, [mode, formulaDraft, fields, ownKey]);
+  function enterFormula() {
+    const signature = JSON.stringify(root);
+    if (!formulaDirty && lastFormulaRoot.current !== signature) {
+      setFormulaDraft(root ? formulaFromCondition(root) : { formula: "", variables: [] });
+      setFormulaDirty(false);
+    }
+    lastFormulaRoot.current = signature;
+    setPendingDelete(null); setMode("formula");
+  }
+  function applyFormula() {
+    if (!parsedFormula.value || parsedFormula.error) return false;
+    change(parsedFormula.value); lastFormulaRoot.current = JSON.stringify(parsedFormula.value); setFormulaDirty(false); setPendingDelete(null); return true;
+  }
+  function enterVisual() {
+    setMode("visual");
+  }
+  function discardFormulaDraft() {
+    setFormulaDraft(root ? formulaFromCondition(root) : { formula: "", variables: [] });
+    lastFormulaRoot.current = JSON.stringify(root);
+    setFormulaDirty(false); setPendingDelete(null);
+  }
+  function updateFormula(next: { formula: string; variables: NamedCondition[] }) { setFormulaDraft(next); setFormulaDirty(true); }
   const error = conditionError(root, fields, ownKey);
   const stats = conditionStats(root);
   function commit(next: Condition | null) {
@@ -2088,6 +2142,21 @@ export function ConditionEditor({ title, value, fields, change, ownKey }: any) {
   function edit(path: number[], next: Condition) { if (root) commit(replaceCondition(root, path, next)); }
   function remove(path: number[]) { if (root) commit(removeCondition(root, path)); }
   function move(path: number[], direction: -1 | 1) { if (root) commit(moveCondition(root, path, direction)); }
+  function insertBeside(path: number[], before: boolean) { if (root) commit(insertAdjacentCondition(root, path, conditionLeaf(fields), before)); }
+  function lift(path: number[]) { if (root) commit(liftCondition(root, path)); }
+  function nest(path: number[], direction: -1 | 1) { if (root) commit(nestCondition(root, path, direction)); }
+  const usedNames = usedFormulaNames(formulaDraft.formula);
+  if (mode === "formula") return <fieldset className="condition-editor condition-formula-mode"><legend><GitBranch size={14}/>{title}</legend>
+    <div className="condition-mode-tabs"><button type="button" onClick={enterVisual}>Визуальный конструктор</button><button type="button" className="active" aria-current="page">Логическое выражение</button></div>
+    <div className="named-condition-list"><b>Именованные условия</b>{formulaDraft.variables.map(variable => <div className="named-condition" key={variable.name}><div className="named-condition-heading"><strong>{variable.name}</strong><span className={usedNames.has(variable.name) ? "" : "unused"}>{usedNames.has(variable.name) ? "В формуле" : "Не используется"}</span><button type="button" onClick={() => {
+      if (usedNames.has(variable.name)) { setPendingDelete(variable.name); return; }
+      updateFormula({ ...formulaDraft, variables: formulaDraft.variables.filter(item => item.name !== variable.name) });
+    }}>Удалить</button></div><ConditionRow row={variable.condition} fields={fields} change={(condition: Condition) => updateFormula({ ...formulaDraft, variables: formulaDraft.variables.map(item => item.name === variable.name ? { ...item, condition } : item) })}/>{pendingDelete === variable.name && <div className="condition-delete-warning" role="alert">Условие {variable.name} используется в формуле. После удаления выражение станет невалидным.<button type="button" onClick={() => { updateFormula({ ...formulaDraft, variables: formulaDraft.variables.filter(item => item.name !== variable.name) }); setPendingDelete(null); }}>Удалить всё равно</button><button type="button" onClick={() => setPendingDelete(null)}>Отмена</button></div>}</div>)}<button type="button" className="condition-add-variable secondary" disabled={!fields.length || formulaDraft.variables.length >= MAX_CONDITION_NODES} onClick={() => { const names = new Set(formulaDraft.variables.map(item => item.name)); let index = 0, name = ""; do { let value = ++index; name = ""; while (value) { value--; name = String.fromCharCode(65 + value % 26) + name; value = Math.floor(value / 26); } } while (names.has(name)); updateFormula({ ...formulaDraft, variables: [...formulaDraft.variables, { name, condition: conditionLeaf(fields) }] }); }}>+ Добавить условие</button></div>
+    <label className="condition-formula-input">Формула<textarea value={formulaDraft.formula} placeholder="(A ИЛИ B) И НЕ C" onChange={event => updateFormula({ ...formulaDraft, formula: event.target.value })}/></label>
+    <small>Можно использовать AND, OR, NOT или И, ИЛИ, НЕ. Скобки задают уровни.</small>
+    {parsedFormula.error && <p className="condition-error" role="alert">{parsedFormula.error}</p>}
+    <button type="button" className="condition-apply-formula" disabled={!formulaDirty || !!parsedFormula.error} onClick={applyFormula}>Применить выражение</button>
+  </fieldset>;
   function render(node: Condition, path: number[], depth: number, siblings = 1) {
     const core = conditionCore(node);
     const group = core.operator === "AND" || core.operator === "OR";
@@ -2097,15 +2166,15 @@ export function ConditionEditor({ title, value, fields, change, ownKey }: any) {
     const updateCore = (next: Condition) => edit(path, withCore(node, next));
     return <div className={`condition-node ${group ? "condition-group" : "condition-leaf"}`} key={path.join("-") || "root"}>
       <div className="condition-node-header">
-        {group ? <label>Связь внутри группы<select aria-label="Связь внутри группы" value={core.operator} onChange={event => updateCore({ ...core, operator: event.target.value })}><option value="AND">Все условия (И)</option><option value="OR">Любое условие (ИЛИ)</option></select></label> : <strong>Условие</strong>}
+        {group ? <><strong className="condition-level-label">{path.length ? "Вложенная группа" : "Основная группа"}</strong><label>Связь внутри группы<select aria-label="Связь внутри группы" value={core.operator} onChange={event => updateCore({ ...core, operator: event.target.value })}><option value="AND">Все условия (И)</option><option value="OR">Любое условие (ИЛИ)</option></select></label></> : <strong>Условие</strong>}
         <label className="condition-negate"><input type="checkbox" checked={node.operator === "NOT"} disabled={node.operator !== "NOT" && stats.depth >= MAX_CONDITION_DEPTH} onChange={event => edit(path, event.target.checked ? { operator: "NOT", condition: node } : core)}/>Отрицание (НЕ)</label>
       </div>
       {group ? <div className="condition-children">{children.map((child, index) => render(child, [...path, index], depth + 1 + (node.operator === "NOT" ? 1 : 0), children.length))}</div> : <ConditionRow row={core} fields={fields} change={updateCore}/>}
-      {group && <div className="condition-group-actions"><button type="button" disabled={!canLeaf} onClick={() => updateCore({ ...core, conditions: [...children, conditionLeaf(fields)] })}><Plus size={14}/>Добавить условие</button><button type="button" disabled={!canGroup} onClick={() => updateCore({ ...core, conditions: [...children, conditionGroup(fields)] })}><Plus size={14}/>Добавить группу</button></div>}
-      <div className="condition-node-actions"><button type="button" aria-label="Выше" title="Переместить выше" disabled={!path.length || path[path.length - 1] === 0} onClick={() => move(path, -1)}>↑</button><button type="button" aria-label="Ниже" title="Переместить ниже" disabled={!path.length || path[path.length - 1] === siblings - 1} onClick={() => move(path, 1)}>↓</button><button type="button" className="condition-remove" onClick={() => remove(path)}>{group ? "Удалить группу" : "Удалить условие"}</button></div>
+      {group && <div className="condition-group-actions"><button type="button" disabled={!canLeaf} onClick={() => updateCore({ ...core, conditions: [...children, conditionLeaf(fields)] })}><Plus size={14}/>Добавить условие в эту группу</button><button type="button" disabled={!canGroup} onClick={() => updateCore({ ...core, conditions: [...children, conditionGroup(fields)] })}><Plus size={14}/>Добавить группу внутрь</button></div>}
+      <div className="condition-node-actions"><button type="button" aria-label="Выше" title="Переместить выше" disabled={!path.length || path[path.length - 1] === 0} onClick={() => move(path, -1)}>↑</button><button type="button" aria-label="Ниже" title="Переместить ниже" disabled={!path.length || path[path.length - 1] === siblings - 1} onClick={() => move(path, 1)}>↓</button><button type="button" disabled={stats.count + (path.length ? 1 : 2) > MAX_CONDITION_NODES} onClick={() => insertBeside(path, true)}>Добавить условие до</button><button type="button" disabled={stats.count + (path.length ? 1 : 2) > MAX_CONDITION_NODES} onClick={() => insertBeside(path, false)}>Добавить условие после</button>{path.length > 1 && <button type="button" disabled={!root || !canLiftCondition(root, path)} onClick={() => lift(path)}>Переместить в родительскую группу</button>}{path.length > 0 && <><button type="button" disabled={!root || !canNestCondition(root, path, -1)} onClick={() => nest(path, -1)}>Вложить в предыдущую группу</button><button type="button" disabled={!root || !canNestCondition(root, path, 1)} onClick={() => nest(path, 1)}>Вложить в следующую группу</button></>}<button type="button" className="condition-remove" onClick={() => remove(path)}>{group ? "Удалить группу" : "Удалить условие"}</button></div>
     </div>;
   }
-  return <fieldset className="condition-editor"><legend><GitBranch size={14}/>{title}</legend>
+  return <fieldset className="condition-editor"><legend><GitBranch size={14}/>{title}</legend><div className="condition-mode-tabs"><button type="button" className="active" aria-current="page">Визуальный конструктор</button><button type="button" onClick={enterFormula}>Логическое выражение</button></div>{formulaDirty && <div className="condition-draft-note" role="status">Есть неприменённая формула. Для сохранения правила примените её или отмените черновик.<button type="button" onClick={discardFormulaDraft}>Отменить черновик формулы</button></div>}
     {!root ? <button type="button" className="condition-add" disabled={!fields.length} onClick={() => commit(conditionLeaf(fields))}><Plus size={14}/>Добавить условие</button> : <>{render(root, [], 1)}{conditionCore(root).operator !== "AND" && conditionCore(root).operator !== "OR" && <div className="condition-group-actions"><button type="button" disabled={stats.count + 2 > MAX_CONDITION_NODES || stats.depth + 1 > MAX_CONDITION_DEPTH} onClick={() => commit({ operator: "AND", conditions: [root, conditionLeaf(fields)] })}><Plus size={14}/>Добавить условие</button><button type="button" disabled={stats.count + 4 > MAX_CONDITION_NODES || stats.depth + 2 > MAX_CONDITION_DEPTH} onClick={() => commit({ operator: "AND", conditions: [root, conditionGroup(fields)] })}><Plus size={14}/>Добавить группу</button></div>}<div className="condition-preview"><b>Логика условия</b><p>{conditionDescription(root, fields)}</p></div>{error && <p className="condition-error" role="alert">{error}</p>}<small className="condition-limit">{stats.count}/{MAX_CONDITION_NODES} элементов · глубина {stats.depth}/{MAX_CONDITION_DEPTH}</small></>}
   </fieldset>;
 }

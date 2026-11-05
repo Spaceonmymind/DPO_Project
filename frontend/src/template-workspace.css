@@ -152,3 +152,22 @@
 .choice-option-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; min-width: 0; }
 .choice-option-row input { flex: 1; min-width: 0; }
 .choice-option-row button { flex: none; min-width: 32px; }
+.template-open .condition-mode-tabs,.condition-editor .condition-mode-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:3px;border-radius:9px;background:#edf4f1}
+.template-open .condition-mode-tabs button,.condition-editor .condition-mode-tabs button{min-width:0;padding:7px 8px;border:0;border-radius:7px;background:transparent;color:#587067;font-size:11px;font-weight:700}
+.template-open .condition-mode-tabs button.active,.condition-editor .condition-mode-tabs button.active{background:#fff;color:#086c56;box-shadow:0 1px 5px #163d3017}
+.template-open .condition-level-label,.condition-editor .condition-level-label{padding:3px 6px;border-radius:5px;background:#dcefe7;color:#1c6954;font-size:10px}
+.template-open .condition-formula-mode,.condition-editor.condition-formula-mode{display:grid;gap:10px;min-width:0}
+.template-open .named-condition-list,.condition-editor .named-condition-list{display:grid;gap:9px;min-width:0}
+.template-open .named-condition,.condition-editor .named-condition{display:grid;gap:8px;min-width:0;padding:9px;border:1px solid #c9dfd3;border-radius:9px;background:#f8fcfa}
+.template-open .named-condition-heading,.condition-editor .named-condition-heading{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.template-open .named-condition-heading strong,.condition-editor .named-condition-heading strong{display:grid;place-items:center;min-width:25px;height:25px;border-radius:6px;background:#dcefe7;color:#0d6b52}
+.template-open .named-condition-heading span,.condition-editor .named-condition-heading span{font-size:10px;color:#44735f}
+.template-open .named-condition-heading span.unused,.condition-editor .named-condition-heading span.unused{color:#96744c}
+.template-open .named-condition-heading button,.condition-editor .named-condition-heading button{margin-left:auto}
+.template-open .questionnaire-builder .condition-editor .condition-add-variable,.template-open #workspace-context-inspector .condition-editor .condition-add-variable,.condition-editor .condition-add-variable{display:inline-flex;align-items:center;justify-content:center;justify-self:start;width:auto;max-width:100%;min-height:32px;padding:6px 10px;border:1px solid #b9d8c8;border-radius:7px;background:#fff;color:#176552;font-size:11px;font-weight:700;line-height:1.2;white-space:nowrap}
+.template-open .condition-editor .condition-add-variable:hover,.condition-editor .condition-add-variable:hover{background:#eef8f3;border-color:#85bda8}
+.template-open .condition-formula-input,.condition-editor .condition-formula-input{display:grid;gap:5px;font-size:12px;font-weight:700}
+.template-open .condition-formula-input textarea,.condition-editor .condition-formula-input textarea{width:100%;min-height:76px;resize:vertical;font:13px/1.5 ui-monospace,SFMono-Regular,monospace}
+.template-open .condition-delete-warning,.condition-editor .condition-delete-warning{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px;border-radius:7px;background:#fff4e3;color:#85561f;font-size:11px}
+.template-open .condition-draft-note,.condition-editor .condition-draft-note{display:grid;gap:6px;padding:8px;border-radius:7px;background:#fff4e3;color:#85561f;font-size:11px;line-height:1.4}
+.template-open .condition-draft-note button,.condition-editor .condition-draft-note button{justify-self:start;font-size:11px}

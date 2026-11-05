@@ -110,3 +110,49 @@ test("existing IP draft preview preserves sparse paragraph block selection", { s
     assert.equal((await page.evaluate(() => window.fixtureState.writes)).length, 0, "real draft preview check is read only");
   } finally { await page.close(); await browser.close(); await server.close(); }
 });
+
+test("formula editor saves a standard AST and reopens it visually", { skip: !existsSync(chromePath) }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/docx-interactions.html`);
+    await page.getByRole("button", { name: /Черновик договора с ИП/ }).first().click();
+    await page.getByRole("button", { name: /Версия 3/ }).first().click();
+    const first = page.locator('.preview-node:has([data-locator="word/document.xml#/p[1]"])');
+    const end = page.locator('.preview-node:has([data-locator="word/document.xml#/p[3]"])');
+    await first.hover(); await first.getByRole("button", { name: "Начало блока" }).click();
+    await end.hover(); await end.getByRole("button", { name: "Конец блока" }).click();
+    await page.locator(".region-editor input[required]").fill("formula_region");
+    await page.locator(".region-editor").getByRole("button", { name: "Логическое выражение" }).click();
+    const addVariable = page.getByRole("button", { name: "+ Добавить условие" });
+    await addVariable.click();
+    const buttonStyle = await addVariable.evaluate(button => ({ width: button.getBoundingClientRect().width, panelWidth: button.closest(".questionnaire-builder").getBoundingClientRect().width, height: button.getBoundingClientRect().height, whiteSpace: getComputedStyle(button).whiteSpace, fontSize: getComputedStyle(button).fontSize }));
+    assert.ok(buttonStyle.width < buttonStyle.panelWidth * .8 && buttonStyle.height < 40, "add action stays compact in the right panel");
+    assert.equal(buttonStyle.whiteSpace, "nowrap");
+    assert.ok(Number.parseFloat(buttonStyle.fontSize) <= 12);
+    await page.locator(".region-editor").getByRole("button", { name: "Визуальный конструктор" }).click();
+    assert.equal(await page.locator(".region-editor .condition-node").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Сохранить область" }).isDisabled(), true);
+    assert.match(await page.locator(".condition-draft-note").textContent(), /неприменённая формула/);
+    await page.locator(".region-editor").getByRole("button", { name: "Логическое выражение" }).click();
+    assert.equal(await page.locator(".named-condition").count(), 1);
+    assert.equal(await page.locator(".condition-formula-input textarea").inputValue(), "");
+    await page.locator(".named-condition .condition-row input").fill("Подряд");
+    await page.locator(".condition-formula-input textarea").fill("A AND Z");
+    assert.equal(await page.getByRole("button", { name: "Сохранить область" }).isDisabled(), true);
+    await page.locator(".region-editor").getByRole("button", { name: "Визуальный конструктор" }).click();
+    await page.locator(".region-editor").getByRole("button", { name: "Логическое выражение" }).click();
+    assert.equal(await page.locator(".condition-formula-input textarea").inputValue(), "A AND Z");
+    await page.locator(".condition-formula-input textarea").fill("A");
+    await page.getByRole("button", { name: "Применить выражение" }).click();
+    await page.getByRole("button", { name: "Сохранить область" }).click();
+    const write = await page.evaluate(() => window.fixtureState.writes.find(item => item.kind === "region"));
+    assert.deepEqual(write.payload.include_when, { operator: "EQUALS", field_key: "payment", value: "Подряд" });
+    await page.getByRole("button", { name: /Условия и таблицы/ }).first().click();
+    await page.locator('.region-list article').filter({ hasText: "formula_region" }).getByRole("button", { name: "Изменить условную область" }).click();
+    await page.locator(".region-editor .condition-node").waitFor({ timeout: 3000 });
+    assert.equal(await page.locator(".region-editor .condition-formula-mode").count(), 0);
+  } finally { await page.close(); await browser.close(); await server.close(); }
+});

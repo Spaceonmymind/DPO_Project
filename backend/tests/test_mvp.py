@@ -1078,7 +1078,7 @@ def test_contract_platform_conditional_payment_question_end_to_end():
         node=next(x for x in preview['nodes'] if marker in x['text']); start=node['text'].index(marker)
         bound=manager.post(base+'/bindings',headers=manager_headers,json={'field_id':field_id,'locator':node['locator'],'start':start,'end':start+len(marker),'selected_text':marker})
         assert bound.status_code==201,bound.text
-    assert manager.post(base+'/publish',headers=manager_headers).status_code==200
+    published=manager.post(base+'/publish',headers=manager_headers); assert published.status_code==200,published.text
 
     employee=TestClient(app); employee_headers=auth(employee,'petrova')
     draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json(); draft_id=draft['id']
@@ -1097,6 +1097,42 @@ def test_contract_platform_conditional_payment_question_end_to_end():
     assert restored['answers']['payment.advance_percent']==30
     again=employee.patch(f'/api/v1/contract-drafts/{draft_id}',headers=employee_headers,json={'answers':{'payment.model':'Частичная предоплата'}})
     assert again.status_code==200 and again.json()['answers']['payment.advance_percent']==30
+
+
+def test_multiple_choice_other_api_draft_conditions_generation_and_ownership():
+    document=Document(); document.add_paragraph('Услуги: SERVICES'); document.add_paragraph('Питание: CATERING')
+    payload=io.BytesIO(); document.save(payload)
+    manager=TestClient(app); manager_headers=auth(manager); template=create_platform_template(manager,manager_headers,'R_CHOICE_OTHER')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=manager_headers,files={'file':('choices.docx',payload.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    options=[{'key':'catering','label':'Кейтеринг'},{'key':'entertainment','label':'Развлечения'}]
+    source=manager.post(base+'/fields',headers=manager_headers,json={'field_key':'services','label':'Услуги','field_type':'MULTI_SELECT','required':True,'position':1,'option_items':options,'allow_other':True,'other_required':True})
+    assert source.status_code==201,source.text
+    rule={'operator':'CONTAINS_OPTION','field_key':'services','value':'catering'}
+    dependent=manager.post(base+'/fields',headers=manager_headers,json={'field_key':'people','label':'Сколько человек кормить?','field_type':'INTEGER','required':False,'position':2,'visible_when':rule,'required_when':rule})
+    assert dependent.status_code==201,dependent.text
+    preview=manager.get(base+'/preview',headers=manager_headers).json()
+    node=next(x for x in preview['nodes'] if 'SERVICES' in x['text']); start=node['text'].index('SERVICES')
+    binding=manager.post(base+'/bindings',headers=manager_headers,json={'field_id':source.json()['id'],'locator':node['locator'],'start':start,'end':start+8,'selected_text':'SERVICES'})
+    assert binding.status_code==201,binding.text
+    food_node=next(x for x in preview['nodes'] if 'CATERING' in x['text']); food_start=food_node['text'].index('CATERING')
+    assert manager.post(base+'/bindings',headers=manager_headers,json={'field_id':dependent.json()['id'],'locator':food_node['locator'],'start':food_start,'end':food_start+8,'selected_text':'CATERING'}).status_code==201
+    published=manager.post(base+'/publish',headers=manager_headers); assert published.status_code==200,published.text
+    assert manager.patch(base+f"/fields/{source.json()['id']}",headers=manager_headers,json={'field_key':'services','label':'Изменено','field_type':'MULTI_SELECT','position':1,'option_items':options}).status_code==409
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}); assert created.status_code==201,created.text
+    draft_id=created.json()['id']; draft_path=f'/api/v1/contract-drafts/{draft_id}'
+    answer={'selected':['catering','__other__'],'other_text':'Прокат санок'}
+    assert employee.patch(draft_path+'/autosave',headers=employee_headers,json={'answers':{'services':answer}}).status_code==200
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['services']==answer
+    assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'people':12}}).status_code==200
+    generated=employee.post(draft_path+'/generate',headers=employee_headers); assert generated.status_code==201,generated.text
+    rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+    assert 'Кейтеринг, Прокат санок' in rendered.paragraphs[0].text
+    copied=employee.post(draft_path+'/duplicate',headers=employee_headers,json={}); assert copied.status_code==201 and copied.json()['answers']['services']==answer
+    assert manager.get(draft_path,headers=manager_headers).status_code==404
+    assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'services':{'selected':['__other__'],'other_text':''}}}).status_code==422
+    assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'services':{'selected':['entertainment'],'other_text':'stale'}}}).status_code==200
 
 
 def test_contract_platform_rejects_invalid_condition_configuration():
@@ -1140,6 +1176,92 @@ def test_r32_conditional_legal_payment_alternatives_generate_only_selected_branc
         assert present in text and absent not in text
     original=manager.get(base+'/source',headers=manager_headers)
     assert hashlib.sha256(original.content).hexdigest()==digest
+
+
+def test_region_visibility_modes_generate_safe_docx_and_preserve_source():
+    source_doc=Document()
+    for text in ('ALWAYS PARAGRAPH','NEVER PARAGRAPH','GROUP START','GROUP END','CONDITIONAL PARAGRAPH','RESTORED PARAGRAPH','RUN HIDDEN TAIL','NAME_PLACEHOLDER'):
+        source_doc.add_paragraph(text)
+    rows=source_doc.add_table(rows=3,cols=2)
+    for index,(left,right) in enumerate((('ROW HEADER','ROW DETAIL'),('ROW HIDDEN','ROW HIDDEN DETAIL'),('ROW FOOTER','ROW FOOTER DETAIL'))):
+        rows.cell(index,0).text=left;rows.cell(index,1).text=right
+    columns=source_doc.add_table(rows=2,cols=2)
+    columns.cell(0,0).text='KEEP HEADER';columns.cell(0,1).text='HIDE HEADER'
+    columns.cell(1,0).text='KEEP VALUE';columns.cell(1,1).text='HIDE VALUE'
+    buffer=io.BytesIO();source_doc.save(buffer);source=buffer.getvalue();digest=hashlib.sha256(source).hexdigest()
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'REGION_VISIBILITY_MODES')
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('visibility.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    version=uploaded.json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    assert manager.post(base+'/fields',headers=headers,json={'field_key':'flag','label':'Флаг','field_type':'BOOLEAN','position':1}).status_code==201
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']
+    node=lambda text: next(item for item in nodes if item['text']==text)
+    name=manager.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':2}).json()
+    binding=manager.post(base+'/bindings',headers=headers,json={'field_id':name['id'],'locator':node('NAME_PLACEHOLDER')['locator'],'start':0,'end':len('NAME_PLACEHOLDER'),'selected_text':'NAME_PLACEHOLDER'})
+    assert binding.status_code==201,binding.text
+    always={'operator':'ALWAYS'};never={'operator':'NEVER'}
+    conditional={'operator':'NOT','condition':{'operator':'OR','conditions':[{'operator':'EQUALS','field_key':'flag','value':False},{'operator':'IS_EMPTY','field_key':'flag'}]}}
+    cases=[('always','CONDITIONAL_PARAGRAPH','ALWAYS PARAGRAPH',always,{}),('never','CONDITIONAL_PARAGRAPH','NEVER PARAGRAPH',never,{}),('group','CONDITIONAL_PARAGRAPH_GROUP','GROUP START',never,{'end_locator':node('GROUP END')['locator']}),('row','CONDITIONAL_TABLE_ROW','ROW HIDDEN',never,{}),('column','CONDITIONAL_TABLE_COLUMN','HIDE HEADER',never,{}),('conditional','CONDITIONAL_PARAGRAPH','CONDITIONAL PARAGRAPH',conditional,{})]
+    created={}
+    for key,kind,text,condition,extra in cases:
+        response=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':key,'region_type':kind,'start_locator':node(text)['locator'],'include_when':condition,**extra})
+        assert response.status_code==201,(key,response.text)
+        created[key]=response.json()
+    run=node('RUN HIDDEN TAIL');start=run['text'].index('HIDDEN')
+    response=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'run','region_type':'CONDITIONAL_RUN','start_locator':run['locator'],'start':start,'end':start+len('HIDDEN'),'selected_text':'HIDDEN','include_when':never})
+    assert response.status_code==201,response.text
+    restored=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'restored','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node('RESTORED PARAGRAPH')['locator'],'include_when':never})
+    assert restored.status_code==201,restored.text
+    assert manager.delete(base+f"/conditional-regions/{restored.json()['id']}",headers=headers).status_code==204
+    assert manager.patch(base+f"/conditional-regions/{created['never']['id']}",headers=headers,json={'region_key':'never','include_when':always}).json()['include_when']==always
+    assert manager.patch(base+f"/conditional-regions/{created['never']['id']}",headers=headers,json={'region_key':'never','include_when':conditional}).json()['include_when']==conditional
+    saved_never={'operator':'NEVER','previous_condition':conditional}
+    assert manager.patch(base+f"/conditional-regions/{created['never']['id']}",headers=headers,json={'region_key':'never','include_when':saved_never}).json()['include_when']==saved_never
+    assert {item['region_key']:item['include_when'] for item in manager.get(base+'/conditional-regions',headers=headers).json()}['conditional']==conditional
+    invalid=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'invalid','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node('RESTORED PARAGRAPH')['locator'],'include_when':{'operator':'NEVER','field_key':'flag'}})
+    assert invalid.status_code==422
+    published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
+    assert manager.patch(base+f"/conditional-regions/{created['never']['id']}",headers=headers,json={'region_key':'never','include_when':always}).status_code in (403,409)
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    for flag in (True,False):
+        draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json()
+        assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':{'flag':flag,'name':'Имя'}}).status_code==200
+        generated=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers)
+        assert generated.status_code==201,generated.text
+        rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+        text='\n'.join(paragraph.text for paragraph in rendered.paragraphs)
+        assert 'ALWAYS PARAGRAPH' in text and 'RESTORED PARAGRAPH' in text and 'RUN  TAIL' in text
+        assert all(value not in text for value in ('NEVER PARAGRAPH','GROUP START','GROUP END','HIDDEN'))
+        assert ('CONDITIONAL PARAGRAPH' in text)==flag
+        assert len(rendered.tables)==2 and len(rendered.tables[0].rows)==2
+        assert all('ROW HIDDEN' not in cell.text for row in rendered.tables[0].rows for cell in row.cells)
+        assert len(rendered.tables[1].columns)==1
+        assert [row.cells[0].text for row in rendered.tables[1].rows]==['KEEP HEADER','KEEP VALUE']
+    assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==digest
+
+
+@pytest.mark.parametrize('fixture_name',['Шаблон_тренировки_физлицо.docx','Шаблон_тренировки_ИП.docx'])
+def test_never_region_on_real_training_docx_draft_test_drive(fixture_name):
+    source=(template_directory/'training'/fixture_name).read_bytes();digest=hashlib.sha256(source).hexdigest()
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'NEVER_REAL_'+('IP' if 'ИП' in fixture_name else 'PERSON'))
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('real-training.docx',source,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    version=uploaded.json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']
+    paragraphs=[item for item in nodes if item['kind']=='paragraph' and item['locator'].startswith('word/document.xml#/p[') and 10<=len(item['text'].strip())<=200]
+    assert len(paragraphs)>=2
+    hidden=next(item for item in paragraphs if sum(other['text']==item['text'] for other in nodes)==1)
+    bound=next(item for item in paragraphs if item['locator']!=hidden['locator'])
+    field=manager.post(base+'/fields',headers=headers,json={'field_key':'probe','label':'Проверочное поле','field_type':'TEXT','position':1}).json()
+    binding=manager.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':bound['locator'],'start':0,'end':1,'selected_text':bound['text'][0]})
+    assert binding.status_code==201,binding.text
+    region=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'technical_hidden','region_type':'CONDITIONAL_PARAGRAPH','start_locator':hidden['locator'],'include_when':{'operator':'NEVER'}})
+    assert region.status_code==201,region.text
+    tested=manager.post(base+'/test-drive',headers=headers,json={'answers':{'probe':'П'}})
+    assert tested.status_code==201,tested.text
+    rendered=Document(io.BytesIO(manager.get(tested.json()['download_url'],headers=headers).content))
+    assert hidden['text'] not in [paragraph.text for paragraph in rendered.paragraphs]
+    assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==digest
 
 
 def test_r32_supports_all_region_types_and_rejects_overlap_and_stale_locator():

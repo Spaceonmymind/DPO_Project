@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Черновик договора ИП — проверка конструктора</title></head>
+<body><div id="root"></div>
+<script type="module">
+  import React from "react";
+  import { createRoot } from "react-dom/client";
+  import { TemplateAdmin } from "/src/TemplateAdmin.tsx";
+  import "/src/styles.css";
+  import "/src/enhancements.css";
+
+  const template = { id: "template-ip", name: "Черновик договора с ИП", category: "Договоры", version_count: 1 };
+  const version = { id: "version-ip", template_id: template.id, version_number: 3, status: "DRAFT", original_filename: "Шаблон_тренировки_ИП.docx" };
+  const part = "word/document.xml";
+  const nodes = window.__ipNodes || [
+    { locator: `${part}#/p[1]`, kind: "paragraph", text: "Договор на проведение тренировок с индивидуальным предпринимателем" },
+    { locator: `${part}#/p[3]`, kind: "paragraph", text: "Исполнитель проводит занятия по согласованному графику" },
+    { locator: `${part}#/p[7]`, kind: "paragraph", text: "Стоимость услуг определяется приложением к договору" },
+    { locator: `${part}#/p[8]`, kind: "paragraph", text: "Порядок оплаты услуг определяется сторонами" },
+    { locator: `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, kind: "table_cell", text: "График занятий" },
+  ];
+  const fields = [
+    { id: "field-payment", field_key: "payment", label: "Порядок оплаты", field_type: "TEXT", required: false, position: 1, config: { group: "Условия" } },
+    { id: "field-schedule", field_key: "schedule", label: "График тренировок", field_type: "TEXT", required: false, position: 2, config: { group: "Условия" } },
+  ];
+  const bindings = [], regions = [], writes = [];
+  window.fixtureState = { bindings, regions, writes, nodes };
+  const api = async (path, options = {}) => {
+    if (path === "/document-templates") return [template];
+    if (path.endsWith("/versions")) return [version];
+    if (path.endsWith("/preview")) return { nodes };
+    if (path.endsWith("/questionnaire")) return { fields, repeating_groups: [] };
+    if (path.endsWith("/repeating-groups") || path.endsWith("/binding-candidates")) return [];
+    if (path.endsWith("/bindings") && !options.method) return [...bindings];
+    if (path.endsWith("/conditional-regions") && !options.method) return [...regions];
+    if (path.endsWith("/fields") && options.method === "POST") {
+      const payload = JSON.parse(options.body); writes.push({ kind: "field", payload });
+      const field = { id: `field-${fields.length + 1}`, ...payload, config: { group: payload.group, placeholder: payload.placeholder, description: payload.description, options: payload.options || [] } };
+      fields.push(field); return field;
+    }
+    if (path.endsWith("/bindings") && options.method === "POST") {
+      const payload = JSON.parse(options.body); writes.push({ kind: "binding", payload });
+      const binding = { ...payload, id: `binding-${bindings.length + 1}`, binding_key: fields.find(field => field.id === payload.field_id)?.field_key, occurrence_index: 1, locator: { node: payload.locator, text_start: payload.start, text_end: payload.end }, selected_text: payload.selected_text, format_config: { format: payload.output_format || "RAW" } };
+      bindings.push(binding); return binding;
+    }
+    if (path.endsWith("/conditional-regions") && options.method === "POST") {
+      const payload = JSON.parse(options.body); writes.push({ kind: "region", payload });
+      const start = Number(payload.start_locator.match(/\/p\[(\d+)\]$/)[1]);
+      const end = Number(payload.end_locator.match(/\/p\[(\d+)\]$/)[1]);
+      const region = { ...payload, id: `region-${regions.length + 1}`, locator: { part, nodes: Array.from({ length: end - start + 1 }, (_, index) => `${part}#/p[${start + index}]`) } };
+      regions.push(region); return region;
+    }
+    throw new Error(`Unexpected fixture request: ${options.method || "GET"} ${path}`);
+  };
+  createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin, { api }));
+</script></body></html>

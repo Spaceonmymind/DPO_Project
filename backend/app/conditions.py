@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from app import choices
 
 
 class ConditionConfigurationError(ValueError):
@@ -14,6 +15,7 @@ class ConditionEngine:
     COMPARISONS = {
         "EQUALS", "NOT_EQUALS", "IN", "NOT_IN", "IS_EMPTY", "IS_NOT_EMPTY",
         "GREATER_THAN", "LESS_THAN", "GREATER_OR_EQUAL", "LESS_OR_EQUAL",
+        "CONTAINS_OPTION", "NOT_CONTAINS_OPTION", "OTHER_SELECTED", "OTHER_NOT_SELECTED",
     }
     ORDERED_TYPES = {"INTEGER", "DECIMAL", "MONEY", "DATE"}
     MAX_DEPTH = 8
@@ -49,6 +51,10 @@ class ConditionEngine:
         if condition is None:
             return True
         operator = condition["operator"]
+        if operator == "ALWAYS":
+            return True
+        if operator == "NEVER":
+            return False
         if operator == "AND":
             return all(cls.evaluate(item, answers) for item in condition["conditions"])
         if operator == "OR":
@@ -56,6 +62,10 @@ class ConditionEngine:
         if operator == "NOT":
             return not cls.evaluate(condition["condition"], answers)
         actual = answers.get(condition["field_key"])
+        if operator == "CONTAINS_OPTION": return choices.has_option(actual, condition["value"])
+        if operator == "NOT_CONTAINS_OPTION": return not choices.has_option(actual, condition["value"])
+        if operator == "OTHER_SELECTED": return choices.has_option(actual, choices.OTHER)
+        if operator == "OTHER_NOT_SELECTED": return not choices.has_option(actual, choices.OTHER)
         if operator == "IS_EMPTY":
             return cls._empty(actual)
         if operator == "IS_NOT_EMPTY":
@@ -97,6 +107,15 @@ class ConditionEngine:
         if not isinstance(node, dict) or not isinstance(node.get("operator"), str):
             raise ConditionConfigurationError("Каждое условие должно быть объектом с оператором")
         operator = node["operator"]
+        if operator in {"ALWAYS", "NEVER"}:
+            if set(node) not in ({"operator"}, {"operator", "previous_condition"}):
+                raise ConditionConfigurationError("Некорректная структура условия")
+            if "previous_condition" in node:
+                previous = node["previous_condition"]
+                if not isinstance(previous, dict) or previous.get("operator") in {"ALWAYS", "NEVER"}:
+                    raise ConditionConfigurationError("Предыдущее условие некорректно")
+                cls._validate_node(previous, fields, refs, 1, [0])
+            return
         if operator in {"AND", "OR"}:
             cls._keys(node, {"operator", "conditions"})
             children = node.get("conditions")
@@ -111,13 +130,22 @@ class ConditionEngine:
             return
         if operator not in cls.COMPARISONS:
             raise ConditionConfigurationError(f"Оператор {operator} не поддерживается")
-        allowed = {"operator", "field_key"} if operator in {"IS_EMPTY", "IS_NOT_EMPTY"} else {"operator", "field_key", "value"}
+        allowed = {"operator", "field_key"} if operator in {"IS_EMPTY", "IS_NOT_EMPTY", "OTHER_SELECTED", "OTHER_NOT_SELECTED"} else {"operator", "field_key", "value"}
         cls._keys(node, allowed)
         key = node.get("field_key")
         if not isinstance(key, str) or key not in fields:
             raise ConditionConfigurationError(f"Поле зависимости «{key}» не найдено")
         refs.add(key)
         field = fields[key]
+        if operator in {"CONTAINS_OPTION", "NOT_CONTAINS_OPTION", "OTHER_SELECTED", "OTHER_NOT_SELECTED"}:
+            cfg = field.config or {}
+            if field.field_type not in {"SINGLE_SELECT", "MULTI_SELECT"} or not cfg.get("option_items"):
+                raise ConditionConfigurationError("Оператор доступен только для выбора со стабильными вариантами")
+            if operator in {"OTHER_SELECTED", "OTHER_NOT_SELECTED"}:
+                if not cfg.get("allow_other"): raise ConditionConfigurationError("Вариант «Иное» не разрешён")
+            elif not isinstance(node.get("value"), str) or node["value"] not in {item["key"] for item in cfg["option_items"]}:
+                raise ConditionConfigurationError("Вариант условия не найден")
+            return
         if operator in {"GREATER_THAN", "LESS_THAN", "GREATER_OR_EQUAL", "LESS_OR_EQUAL"} and field.field_type not in cls.ORDERED_TYPES:
             raise ConditionConfigurationError(f"Оператор {operator} несовместим с типом {field.field_type}")
         if operator in {"IS_EMPTY", "IS_NOT_EMPTY"}:
@@ -168,6 +196,8 @@ class ConditionEngine:
 
     @staticmethod
     def _empty(value: Any) -> bool:
+        if isinstance(value, dict) and isinstance(value.get('selected'), list):
+            return not value['selected']
         return value is None or value == "" or value == []
 
     @staticmethod

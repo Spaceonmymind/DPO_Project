@@ -58,6 +58,14 @@
   color: #fff;
 }
 
+.contract-choice input[type="checkbox"], .contract-choice input[type="radio"] {
+  width: 19px;
+  height: 19px;
+  margin: 0;
+  accent-color: #008f78;
+  flex: none;
+}
+
 @media (max-width: 600px) {
   .contract-choice-options {
     grid-template-columns: 1fr;

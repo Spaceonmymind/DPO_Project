@@ -18,6 +18,7 @@ import { calculateAnswers } from "./calculations";
 import { ProductQuestionnaire } from "./ProductQuestionnaire";
 import { QuestionHint } from "./QuestionHint";
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
+import { OTHER, choiceAnswer, choiceComplete, choiceText, isStructuredChoice } from "./choices";
 type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
@@ -253,6 +254,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   const completedFields = requiredFields.filter((f: any) => {
     const value = answers[f.field_key];
     if (value === undefined || value === null || value === "") return false;
+    if (isStructuredChoice(f)) return choiceComplete(f, value);
     if (f.field_type === "COMPOSITE") {
       return (f.config?.components || []).every(
         (c: any) => !c.required || String(value?.[c.key] ?? "").trim()
@@ -317,7 +319,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           </div>
         )}
         <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); advance(); }}>
-          {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{String(answers[f.field_key] ?? "—")}</b></div>)}</section>}
+          {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{choiceText(f, answers[f.field_key]) || "—"}</b></div>)}</section>}
           {!review && <>
           {currentStep && <fieldset key={currentStep.name}>
               <legend>{currentStep.name}</legend>
@@ -606,6 +608,12 @@ function Question({ field, value, error, change, required }: any) {
   */
   if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
   if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
+  if (isStructuredChoice(field)) {
+    const answer = choiceAnswer(value);
+    const multiple = field.field_type === "MULTI_SELECT";
+    const options = [...field.config.option_items, ...(field.config.allow_other ? [{ key: OTHER, label: "Иное" }] : [])];
+    return <fieldset className={error ? "invalid" : ""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend><div className="contract-choice-options" role="group" aria-label={field.label}>{options.map((option: any) => <label className={`contract-choice ${answer.selected.includes(option.key) ? "contract-choice-selected" : ""}`} key={option.key}><input type={multiple ? "checkbox" : "radio"} name={id} checked={answer.selected.includes(option.key)} onChange={event => { const selected = multiple ? event.target.checked ? [...answer.selected, option.key] : answer.selected.filter(key => key !== option.key) : [option.key]; change({ selected, other_text: selected.includes(OTHER) ? answer.other_text : "" }); }}/><span>{option.label}</span></label>)}</div>{answer.selected.includes(OTHER) && <input aria-label="Укажите свой вариант" placeholder="Укажите свой вариант" value={answer.other_text} onChange={event => change({ ...answer, other_text: event.target.value })}/ >}{error && <b role="alert">{error}</b>}</fieldset>;
+  }
   return (
     <label className={error ? "invalid" : ""}>
       <span>

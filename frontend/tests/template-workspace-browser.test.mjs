@@ -51,9 +51,25 @@ test("DOCX workspace controls fit their panels at desktop and zoom-equivalent wi
       });
       await page.locator("#workspace-context-inspector .selection-card").waitFor();
       await checkPanel("Word binding");
+      const search = page.getByRole("combobox", { name: "Вопрос анкеты" });
+      await search.click();
+      const list = page.getByRole("listbox", { name: "Вопросы анкеты" });
+      await list.waitFor();
+      assert.equal(await list.getByRole("option").count(), 12, `${width}px: show at most 12 questions at once`);
+      const position = await list.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const panel = element.closest(".questionnaire-builder").getBoundingClientRect();
+        return { left: rect.left, right: rect.right, panelLeft: panel.left, panelRight: panel.right, width: rect.width, scrollWidth: element.scrollWidth, height: rect.height, scrollHeight: element.scrollHeight };
+      });
+      assert.ok(position.left >= position.panelLeft - 2 && position.right <= position.panelRight + 2, `${width}px: question list stays inside the right panel`);
+      assert.ok(position.scrollWidth <= position.width + 2, `${width}px: no horizontal list overflow`);
+      assert.ok(position.height <= 300 && position.scrollHeight > position.height, `${width}px: long result list scrolls inside its own bounds`);
+      await search.fill("вопрос номер 120");
+      assert.match(await list.textContent(), /Вопрос номер 120/, `${width}px: last question remains searchable`);
+      await search.press("Escape");
 
       await page.locator(".preview-node").first().hover();
-      await page.locator(".preview-node").first().getByRole("button", { name: "Абзац" }).click();
+      await page.locator(".preview-node").first().getByRole("button", { name: "Абзац", exact: true }).click();
       await page.locator("#workspace-context-inspector .region-editor").waitFor();
       await page.locator("#workspace-context-inspector .condition-add").first().click();
       await checkPanel("conditional region");

@@ -12,6 +12,7 @@
 
       const longLabel = "Порядок оплаты и подтверждения оказанных услуг по договору с дополнительными условиями и примечаниями для проверки длинного названия вопроса";
       const field = { id: "field-1", field_key: "payment_order", label: longLabel, field_type: "SINGLE_SELECT", required: true, position: 1, config: { group: "Основные сведения", placeholder: "", options: ["100% постоплата", "50% предоплата"] } };
+      const fields = [field, ...Array.from({ length: 119 }, (_, index) => ({ id: `field-${index + 2}`, field_key: `question_${index + 2}`, label: `Вопрос номер ${index + 2}`, field_type: "TEXT", position: index + 2, config: { group: "Дополнительные сведения", options: [] } }))];
       const version = { id: "version-1", template_id: "template-1", version_number: 1, status: "DRAFT", original_filename: "sample.docx" };
       const nodes = [
         { locator: "word/document.xml#/p[1]", kind: "paragraph", text: "Порядок оплаты услуг по договору" },
@@ -22,7 +23,7 @@
         if (path === "/document-templates") return [{ id: "template-1", name: "Тестовый договор", category: "Договоры", version_count: 1 }];
         if (path.endsWith("/versions")) return [version];
         if (path.endsWith("/preview")) return { nodes };
-        if (path.endsWith("/questionnaire")) return { fields: [field] };
+        if (path.endsWith("/questionnaire")) return { fields };
         if (path.endsWith("/repeating-groups")) return [group];
         if (/\/(bindings|conditional-regions|binding-candidates)$/.test(path)) return [];
         throw new Error(`Unexpected fixture request: ${options.method || "GET"} ${path}`);

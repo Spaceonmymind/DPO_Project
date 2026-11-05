@@ -16,9 +16,14 @@ import {
   Search,
   ArrowLeft,
   ChevronRight,
+  EyeOff,
 } from "lucide-react";
 import { evaluateExpression } from "./calculations";
+import type { Condition } from "./conditions";
+import { conditionError, conditionStats, replaceCondition, removeCondition, moveCondition, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES } from "./conditionTree";
+import { resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { ConfirmAction } from "./ConfirmAction";
+import { QuestionCombobox } from "./QuestionCombobox";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
   TEXT: "Короткий текст",
@@ -29,6 +34,7 @@ const TYPES: any = {
   DATE: "Дата",
   BOOLEAN: "Да / нет",
   SINGLE_SELECT: "Выбор из списка",
+  MULTI_SELECT: "Множественный выбор",
   LIST: "Повторяемый список",
   COMPOSITE: "Составное значение",
 };
@@ -59,6 +65,9 @@ const blank = (position = 1) => ({
   placeholder: "",
   validation: {},
   options: [],
+  option_items: [],
+  allow_other: false,
+  other_required: false,
   visible_when: null,
   required_when: null,
   text_expression: null,
@@ -67,6 +76,7 @@ const blank = (position = 1) => ({
   separator: "; ",
 });
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
+const newOption = () => ({ key: `option_${Math.random().toString(36).slice(2, 10)}`, label: "" });
 export function TemplateAdmin({ api }: { api: Api }) {
   return <TemplateBuilder api={api} />;
 }
@@ -91,9 +101,12 @@ function TemplateBuilder({ api }: { api: Api }) {
     [selectionDraft, setSelectionDraft] = useState<any>(),
     [repeatingBinding, setRepeatingBinding] = useState(""),
     [regionDraft, setRegionDraft] = useState<any>(),
+    [regionRuleBackup, setRegionRuleBackup] = useState<any>(null),
     [groupDraft, setGroupDraft] = useState<any>(),
     [groupField, setGroupField] = useState<any>(),
     [blockStart, setBlockStart] = useState<string>(),
+    [blockHover, setBlockHover] = useState<string>(),
+    [blockError, setBlockError] = useState(""),
     [repeatBlockStart, setRepeatBlockStart] = useState<string>(),
     [field, setField] = useState<any>(blank()),
     [fieldOptionsText, setFieldOptionsText] = useState(""),
@@ -125,6 +138,22 @@ function TemplateBuilder({ api }: { api: Api }) {
     const query = docQuery.trim().toLocaleLowerCase("ru");
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
+  const availableBlockLocators = useMemo(() => new Set<string>((preview?.nodes || []).map((node: any) => node.locator)), [preview]);
+  const savedBlockMarkers = useMemo(() => {
+    const markers = new Map<string, { start: boolean; end: boolean }>();
+    for (const region of regions) {
+      const bounds = regionBlockBounds(region);
+      if (!bounds) continue;
+      markers.set(bounds.start, { ...markers.get(bounds.start), start: true, end: markers.get(bounds.start)?.end || bounds.start === bounds.end });
+      markers.set(bounds.end, { ...markers.get(bounds.end), start: markers.get(bounds.end)?.start || bounds.start === bounds.end, end: true });
+    }
+    return markers;
+  }, [regions]);
+  const activeBlockRange = useMemo(() => {
+    if (blockStart) return resolveBlockRange(blockStart, blockHover, availableBlockLocators);
+    const bounds = regionBlockBounds(regionDraft);
+    return bounds ? resolveBlockRange(bounds.start, bounds.end, availableBlockLocators) : null;
+  }, [blockStart, blockHover, regionDraft, availableBlockLocators]);
   useEffect(() => {
     if (showFieldEditor && inspectorRef.current) inspectorRef.current.scrollTop = 0;
   }, [showFieldEditor, editing]);
@@ -167,6 +196,8 @@ function TemplateBuilder({ api }: { api: Api }) {
     setGroupDraft(null);
     setGroupField(null);
     setBlockStart(undefined);
+    setBlockHover(undefined);
+    setBlockError("");
     setRepeatBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
       [p, q, links, areas, repeaters, candidates] = await Promise.all([
@@ -247,8 +278,9 @@ function TemplateBuilder({ api }: { api: Api }) {
       await openVersion(x);
     });
   }
-  function selectRange() {
+  function selectRange(event: React.MouseEvent<HTMLElement>) {
     if (version?.status !== "DRAFT") return;
+    if (blockStart || !(event.target as Element).closest(".docx-page [data-locator]")) return;
     let s = window.getSelection();
     if (!s || s.rangeCount !== 1 || s.isCollapsed) return;
     let r = s.getRangeAt(0),
@@ -262,7 +294,7 @@ function TemplateBuilder({ api }: { api: Api }) {
           ? r.endContainer.parentElement
           : (r.endContainer as HTMLElement)
       )?.closest?.("[data-locator]") as HTMLElement | null;
-    if (!a || a !== z) {
+    if (!a || a !== z || !event.currentTarget.contains(a) || !event.currentTarget.contains(z)) {
       setError(
         "Выделение должно находиться внутри одного абзаца или одной ячейки.",
       );
@@ -285,12 +317,13 @@ function TemplateBuilder({ api }: { api: Api }) {
         selected_text: text,
         field_id: "",
       });
+    if (text.trim()) s.removeAllRanges();
   }
   async function saveField(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       let path = `/document-templates/${selected.id}/versions/${version.id}/fields${editing ? "/" + editing : ""}`;
-      const payload = field.field_type === "SINGLE_SELECT"
+      const payload = field.field_type === "SINGLE_SELECT" && !field.option_items?.length && !field.allow_other
         ? { ...field, options: parseOptionText(fieldOptionsText) }
         : field;
       const saved = await api(path, {
@@ -330,12 +363,15 @@ function TemplateBuilder({ api }: { api: Api }) {
       ...x.config,
       validation: x.config.validation || {},
       options: x.config.options || [],
+      option_items: x.config.option_items || [],
+      allow_other: x.config.allow_other || false,
+      other_required: x.config.other_required || false,
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
     setFieldOptionsText((x.config.options || []).join(", "));
   }
-  function newField() {
+  function newField(initialLabel = "") {
     setSelectionDraft(selection || null);
     setSelection(null);
     setActiveBinding(null);
@@ -344,7 +380,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     setGroupField(null);
     setStage(4);
     setEditing(undefined);
-    setField({ ...blank((schema?.fields?.length || 0) + 1), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
+    setField({ ...blank((schema?.fields?.length || 0) + 1), label: initialLabel.trim(), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
     setFieldOptionsText("");
     setShowFieldEditor(true);
   }
@@ -399,6 +435,10 @@ function TemplateBuilder({ api }: { api: Api }) {
     setSelection(null);
     setActiveBinding(null);
     setGroupDraft(null);
+    setBlockStart(undefined);
+    setBlockHover(undefined);
+    setBlockError("");
+    setRegionRuleBackup(null);
     setRegionDraft({
       region_key: "",
       region_type,
@@ -407,15 +447,48 @@ function TemplateBuilder({ api }: { api: Api }) {
       include_when: null,
     });
   }
+  function editRegion(region: any) {
+    setBlockStart(undefined);
+    setBlockHover(undefined);
+    setBlockError("");
+    setRegionRuleBackup(regionMode(region.include_when) === "CONDITIONAL" ? region.include_when : region.include_when?.previous_condition || null);
+    setRegionDraft({ ...region });
+  }
+  function changeRegionMode(mode: "ALWAYS" | "CONDITIONAL" | "NEVER") {
+    if (mode === "CONDITIONAL") {
+      setRegionDraft({ ...regionDraft, include_when: regionRuleBackup });
+    } else {
+      const previous = regionMode(regionDraft.include_when) === "CONDITIONAL" ? regionDraft.include_when : regionRuleBackup;
+      if (previous) setRegionRuleBackup(previous);
+      setRegionDraft({ ...regionDraft, include_when: previous ? { operator: mode, previous_condition: previous } : { operator: mode } });
+    }
+  }
   function chooseBlock(locator: string) {
+    window.getSelection()?.removeAllRanges();
     if (!blockStart) {
+      const range = resolveBlockRange(locator, undefined, availableBlockLocators);
+      if (range.error) { setBlockError(range.error); return; }
       setBlockStart(locator);
+      setBlockHover(undefined);
+      setBlockError("");
+      if (regionDraft?.id) setRegionDraft(null);
+      else if (regionDraft?.region_type === "CONDITIONAL_PARAGRAPH_GROUP") setRegionDraft({ ...regionDraft, start_locator: locator, end_locator: undefined });
       setNotice("Начало блока отмечено. Теперь выберите его конец.");
     } else {
-      draftRegion("CONDITIONAL_PARAGRAPH_GROUP", blockStart, locator);
+      const range = resolveBlockRange(blockStart, locator, availableBlockLocators);
+      if (range.error) { setBlockError(range.error); return; }
+      if (regionDraft?.region_type === "CONDITIONAL_PARAGRAPH_GROUP" && !regionDraft.id) setRegionDraft({ ...regionDraft, start_locator: blockStart, end_locator: locator });
+      else draftRegion("CONDITIONAL_PARAGRAPH_GROUP", blockStart, locator);
       setBlockStart(undefined);
+      setBlockHover(undefined);
+      setBlockError("");
       setNotice("Границы блока выбраны. Настройте правило включения.");
     }
+  }
+  function previewBlockEnd(locator: string) {
+    if (!blockStart || blockHover === locator) return;
+    setBlockHover(locator);
+    if (!resolveBlockRange(blockStart, locator, availableBlockLocators).error) setBlockError("");
   }
   async function saveRegion() {
     await run(async () => {
@@ -791,7 +864,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                           {workspaceTab === "questions" ? <>
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
-                            {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}
+                            {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
                               {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{item.group || "Основные сведения"}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
@@ -859,18 +932,31 @@ function TemplateBuilder({ api }: { api: Api }) {
                             Выделите текст для привязки или условного фрагмента.
                             Для структурной области используйте действия у
                             абзаца.
+                            {blockStart && <div className="block-selection-status"><span>Начало блока выбрано. Наведите на конечный абзац и нажмите «Конец блока».</span><button type="button" onClick={() => { setBlockStart(undefined); setBlockHover(undefined); setBlockError(""); if (regionDraft?.region_type === "CONDITIONAL_PARAGRAPH_GROUP" && !regionDraft.end_locator && !regionDraft.id) setRegionDraft(null); }}>Отменить выбор блока</button></div>}
+                            {(blockError || (blockStart && blockHover && activeBlockRange?.error)) && <p className="block-selection-error" role="alert">{blockError || activeBlockRange?.error}</p>}
                           </div>
                           <article
-                            className="docx-page"
+                            className={`docx-page ${blockStart ? "block-picking" : ""}`}
                             onMouseUp={selectRange}
                             style={{ zoom: `${zoom}%` }}
                           >
-                            {preview.nodes.map((node: any) => (
+                            {preview.nodes.map((node: any) => {
+                              const active = activeBlockRange?.locators.has(node.locator) || false;
+                              const saved = savedBlockMarkers.get(node.locator);
+                              const startMarker = activeBlockRange?.start === node.locator || saved?.start;
+                              const endMarker = activeBlockRange?.end === node.locator || saved?.end;
+                              return (
                               <div
                                 key={node.locator}
                                 tabIndex={0}
-                                className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""}`}
+                                onMouseEnter={() => previewBlockEnd(node.locator)}
+                                onMouseLeave={() => { if (blockStart) setBlockHover(undefined); }}
+                                onFocus={() => previewBlockEnd(node.locator)}
+                                className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) ? "hidden-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""} ${active ? "block-range-active" : ""} ${blockStart && active && node.locator !== blockStart ? "block-range-preview" : ""} ${(startMarker || endMarker) && !active ? "block-boundary-saved" : ""}`}
                               >
+                                {startMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Начало блока</span>}
+                                {endMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Конец блока</span>}
+                                {regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) && <span className="region-hidden-badge"><EyeOff size={12}/>Скрыт</span>}
                                 <p
                                   data-locator={node.locator}
                                   className={
@@ -909,6 +995,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     >
                                       Абзац
                                     </button>
+                                    {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: node.text.length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
                                     <button
                                       type="button"
                                       onClick={() => chooseBlock(node.locator)}
@@ -975,7 +1062,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   </div>
                                 )}
                               </div>
-                            ))}
+                            );})}
                           </article>
                           {selection && <InspectorPortal>
                             <section className="selection-card selection-card-floating" aria-label="Настройка выбранного фрагмента">
@@ -985,25 +1072,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 <blockquote>
                                   {selection.selected_text || "Пустая ячейка"}
                                 </blockquote>
-                                <label>
-                                  Вопрос анкеты
-                                  <select
-                                    value={selection.field_id}
-                                    onChange={(e) =>
-                                      setSelection({
-                                        ...selection,
-                                        field_id: e.target.value,
-                                      })
-                                    }
-                                  >
-                                    <option value="">Выберите вопрос</option>
-                                    {schema?.fields.map((x: any) => (
-                                      <option key={x.id} value={x.id}>
-                                        {x.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
+                                <QuestionCombobox fields={schema?.fields || []} selectedId={selection.field_id || ""} onSelect={field_id => setSelection((current: any) => current ? { ...current, field_id } : current)} onCreate={label => newField(label)}/>
                                 <label>
                                   Формат в документе
                                   <select
@@ -1047,7 +1116,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     Выберите существующий вопрос или создайте новый для этого фрагмента.
                                   </p>
                                 )}
-                                {version.status === "DRAFT" && <button className="secondary" type="button" onClick={newField}><Plus size={15}/>Создать новый вопрос</button>}
+                                {version.status === "DRAFT" && <button className="secondary" type="button" onClick={() => newField()}><Plus size={15}/>Создать новый вопрос</button>}
                                 <button
                                   className="primary"
                                   type="button"
@@ -1067,7 +1136,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   className="secondary"
                                   type="button"
                                   onClick={() =>
-                                    { setRegionDraft({
+                                    { setRegionRuleBackup(null); setRegionDraft({
                                       region_key: "",
                                       region_type: "CONDITIONAL_RUN",
                                       start_locator: selection.locator,
@@ -1128,6 +1197,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   : "Новая условная область"}
                               </h3>
                               <p>{REGION_LABELS[regionDraft.region_type]}</p>
+                              <label>Отображение в готовом документе
+                                <select aria-label="Отображение в готовом документе" value={regionMode(regionDraft.include_when)} onChange={e => changeRegionMode(e.target.value as "ALWAYS" | "CONDITIONAL" | "NEVER")}>
+                                  <option value="ALWAYS">Всегда показывать</option>
+                                  <option value="CONDITIONAL">Показывать при выполнении условия</option>
+                                  <option value="NEVER">Никогда не показывать</option>
+                                </select>
+                              </label>
                               <label>
                                 Служебный ключ
                                 <input
@@ -1142,7 +1218,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   }
                                 />
                               </label>
-                              <ConditionEditor
+                              {regionMode(regionDraft.include_when) === "CONDITIONAL" && <ConditionEditor
                                 title="Включать область, когда"
                                 value={regionDraft.include_when}
                                 fields={schema?.fields || []}
@@ -1152,7 +1228,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     include_when: value,
                                   })
                                 }
-                              />
+                              />}
                               <div>
                                 <button
                                   type="button"
@@ -1160,7 +1236,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   disabled={
                                     busy ||
                                     !regionDraft.region_key ||
-                                    !regionDraft.include_when
+                                    !regionDraft.include_when ||
+                                    !!conditionError(regionDraft.include_when, schema?.fields || []) ||
+                                    (regionDraft.region_type === "CONDITIONAL_PARAGRAPH_GROUP" && !regionDraft.id && (!regionDraft.end_locator || !!resolveBlockRange(regionDraft.start_locator, regionDraft.end_locator, availableBlockLocators).error))
                                   }
                                   onClick={saveRegion}
                                 >
@@ -1173,6 +1251,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 >
                                   Отмена
                                 </button>
+                                {regionDraft.id && <button type="button" className="secondary" disabled={busy} onClick={async () => { await removeRegion(regionDraft.id); setRegionDraft(null); }}>Вернуть обычное отображение</button>}
                               </div>
                             </section>
                           </InspectorPortal>}
@@ -1298,7 +1377,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     busy ||
                                     !groupDraft.name ||
                                     !groupDraft.group_key ||
-                                    groupDraft.max_items < groupDraft.min_items
+                                    groupDraft.max_items < groupDraft.min_items ||
+                                    !!conditionError(groupDraft.visible_when ?? groupDraft.config?.visible_when, schema?.fields || [])
                                   }
                                   onClick={saveRepeatingGroup}
                                 >
@@ -1476,7 +1556,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   }
                                 />
                               </label>
-                              {field.field_type === "SINGLE_SELECT" && (
+                              {field.field_type === "SINGLE_SELECT" && !field.option_items?.length && !field.allow_other && (
                                 <label>
                                   Варианты через запятую
                                   <input
@@ -1485,6 +1565,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   />
                                 </label>
                               )}
+                              {field.field_type === "SINGLE_SELECT" && !field.option_items?.length && <button type="button" className="secondary" onClick={() => setField({ ...field, option_items: parseOptionText(fieldOptionsText).map(label => ({ key: newOption().key, label })) .concat(!parseOptionText(fieldOptionsText).length ? [newOption()] : []), options: [] })}>Настроить варианты и «Иное»</button>}
+                              {["SINGLE_SELECT", "MULTI_SELECT"].includes(field.field_type) && (field.option_items?.length > 0 || field.field_type === "MULTI_SELECT") && <fieldset className="choice-options-editor"><legend>Варианты ответа</legend>{(field.option_items || []).map((option: any, index: number) => <div className="choice-option-row" key={option.key}><input aria-label={`Вариант ${index + 1}`} required value={option.label} onChange={e => setField({ ...field, option_items: field.option_items.map((item: any, n: number) => n === index ? { ...item, label: e.target.value } : item) })}/><button type="button" disabled={index === 0} onClick={() => { const items = [...field.option_items]; [items[index - 1], items[index]] = [items[index], items[index - 1]]; setField({ ...field, option_items: items }); }}>↑</button><button type="button" disabled={index === field.option_items.length - 1} onClick={() => { const items = [...field.option_items]; [items[index + 1], items[index]] = [items[index], items[index + 1]]; setField({ ...field, option_items: items }); }}>↓</button><button type="button" aria-label={`Удалить вариант ${index + 1}`} onClick={() => setField({ ...field, option_items: field.option_items.filter((_: any, n: number) => n !== index) })}>×</button></div>)}<button type="button" onClick={() => setField({ ...field, option_items: [...(field.option_items || []), newOption()] })}>Добавить вариант</button><label className="check"><input type="checkbox" checked={!!field.allow_other} onChange={e => setField({ ...field, allow_other: e.target.checked, other_required: e.target.checked ? field.other_required : false })}/>Разрешить вариант «Иное»</label>{field.allow_other && <label className="check"><input type="checkbox" checked={!!field.other_required} onChange={e => setField({ ...field, other_required: e.target.checked })}/>Текст для «Иное» обязателен</label>}</fieldset>}
                               {field.field_type === "LIST" && <div className="repeat-limits"><label>Минимум элементов<input type="number" min="0" max="100" value={field.item_config?.min_items ?? 0} onChange={e=>setField({...field,item_config:{...field.item_config,min_items:Number(e.target.value)}})}/></label><label>Максимум элементов<input type="number" min="1" max="100" value={field.item_config?.max_items ?? 20} onChange={e=>setField({...field,item_config:{...field.item_config,max_items:Number(e.target.value)}})}/></label><label>Разделитель в DOCX<input value={field.separator} onChange={e=>setField({...field,separator:e.target.value})}/></label></div>}
                               {field.field_type === "COMPOSITE" && <CompositeEditor components={field.components || []} change={(components:any)=>setField({...field,components})}/>}
                               {!field.calculated && (
@@ -1508,6 +1590,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 fields={(schema?.fields || []).filter(
                                   (x: any) => x.id !== editing,
                                 )}
+                                ownKey={field.field_key}
                                 change={(value: any) =>
                                   setField({ ...field, visible_when: value })
                                 }
@@ -1518,12 +1601,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 fields={(schema?.fields || []).filter(
                                   (x: any) => x.id !== editing,
                                 )}
+                                ownKey={field.field_key}
                                 change={(value: any) =>
                                   setField({ ...field, required_when: value })
                                 }
                               />
                               {editing && <div className="workspace-linked-fragments"><b>Связанные фрагменты · {bindings.filter((item:any) => item.field_id === editing).length}</b>{bindings.filter((item:any) => item.field_id === editing).map((item:any) => <button key={item.id} type="button" className="secondary" onClick={() => { setActiveBinding(item); setStage(3); document.querySelector(`[data-locator="${CSS.escape(item.locator.node)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"}); }}>{item.selected_text || "Фрагмент Word"}</button>)}</div>}
-                              <button className="primary" disabled={busy}>
+                              <button className="primary" disabled={busy || !!conditionError(field.visible_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key) || !!conditionError(field.required_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key)}>
                                 {editing
                                   ? "Сохранить изменения"
                                   : "Добавить вопрос"}
@@ -1531,7 +1615,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                               <button type="button" className="secondary" onClick={() => { setShowFieldEditor(false); setEditing(undefined); if (selectionDraft) { setSelection(selectionDraft); setSelectionDraft(null); setStage(3); } }}>Отмена</button>
                             </form>
                           )}
-                          {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={newField}><Plus size={15}/>Добавить вопрос</button>}</div>}
+                          {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}</div>}
                           <div className="field-list panel-fields">
                             {schema?.fields.map((x: any) => (
                               <article key={x.id}>
@@ -1618,13 +1702,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                               <article key={r.id}>
                                 <span>
                                   <b>{r.region_key}</b>
-                                  <small>{REGION_LABELS[r.region_type]}</small>
+                                  <small>{REGION_LABELS[r.region_type]} · {regionMode(r.include_when) === "NEVER" ? "Скрыт" : regionMode(r.include_when) === "ALWAYS" ? "Всегда" : "По условию"}</small>
                                 </span>
                                 {version.status === "DRAFT" && (
                                   <span>
                                     <button
                                       aria-label="Изменить условную область"
-                                      onClick={() => setRegionDraft({ ...r })}
+                                      onClick={() => editRegion(r)}
                                     >
                                       <Pencil size={14} />
                                     </button>
@@ -1927,6 +2011,10 @@ const OPS: any = {
   NOT_EQUALS: "не равно",
   IN: "входит в список",
   NOT_IN: "не входит в список",
+  CONTAINS_OPTION: "содержит выбранный вариант",
+  NOT_CONTAINS_OPTION: "не содержит выбранный вариант",
+  OTHER_SELECTED: "выбрано «Иное»",
+  OTHER_NOT_SELECTED: "не выбрано «Иное»",
   IS_EMPTY: "не заполнено",
   IS_NOT_EMPTY: "заполнено",
   GREATER_THAN: "больше",
@@ -1942,6 +2030,7 @@ const REGION_LABELS: any = {
   CONDITIONAL_TABLE: "Таблица",
   CONDITIONAL_TABLE_COLUMN: "Колонка таблицы",
 };
+const regionMode = (condition: any): "ALWAYS" | "CONDITIONAL" | "NEVER" => condition?.operator === "ALWAYS" || condition?.operator === "NEVER" ? condition.operator : "CONDITIONAL";
 
 function CompositeEditor({components,change}:any){return <section className="repeat-field-form"><h3>Компоненты</h3>{components.map((x:any,i:number)=><div key={i}><input aria-label="Ключ компонента" placeholder="passport.series" value={x.key} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,key:e.target.value}:v))}/><input aria-label="Название компонента" placeholder="Серия паспорта" value={x.label} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,label:e.target.value}:v))}/><select value={x.type||"TEXT"} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,type:e.target.value,components:e.target.value==="COMPOSITE"?(v.components||[]):undefined}:v))}><option value="TEXT">Текст</option><option value="DATE">Дата</option><option value="INTEGER">Число</option><option value="COMPOSITE">Группа компонентов</option></select><label className="check"><input type="checkbox" checked={!!x.required} onChange={e=>change(components.map((v:any,n:number)=>n===i?{...v,required:e.target.checked}:v))}/>Обязательный</label>{x.type==="COMPOSITE"&&<CompositeEditor components={x.components||[]} change={(nested:any)=>change(components.map((v:any,n:number)=>n===i?{...v,components:nested}:v))}/>}<button type="button" onClick={()=>change(components.filter((_:any,n:number)=>n!==i))}>Удалить</button></div>)}<button type="button" onClick={()=>change([...components,{key:"",label:"",type:"TEXT",required:false,validation:{}}])}>Добавить компонент</button></section>}
 
@@ -1967,148 +2056,81 @@ function repeatingHasNode(group: any, node: string) {
   if(!match)return false;
   let row=Number(match[3]);return (loc.targets||[loc]).some((target:any)=>match![1]===target.part&&Number(match![2])===target.table&&row>=target.row&&row<target.row+(target.source_row_count||target.row_count||1));
 }
-const rowFrom = (x: any) => {
-  let neg = x?.operator === "NOT",
-    n = neg ? x.condition : x;
-  return {
-    field_key: n?.field_key || "",
-    operator: n?.operator || "EQUALS",
-    value: Array.isArray(n?.value) ? n.value.join(", ") : (n?.value ?? ""),
-    negated: neg,
-  };
+const conditionLeaf = (fields: any[]): Condition => fields[0]?.config?.option_items?.length
+  ? { operator: "CONTAINS_OPTION", field_key: fields[0].field_key, value: fields[0].config.option_items[0].key }
+  : { operator: "EQUALS", field_key: fields[0]?.field_key || "", value: "" };
+const conditionGroup = (fields: any[]): Condition => ({ operator: "AND", conditions: [conditionLeaf(fields), conditionLeaf(fields)] });
+const conditionCore = (node: Condition): Condition => node.operator === "NOT" && node.condition ? node.condition : node;
+const withCore = (node: Condition, core: Condition): Condition => node.operator === "NOT" ? { operator: "NOT", condition: core } : core;
+const conditionValue = (raw: string, source: any): any => {
+  if (source?.field_type === "BOOLEAN") return raw === "" ? "" : raw === "true";
+  if (source?.field_type === "INTEGER") return raw === "" ? "" : Number.parseInt(raw, 10);
+  if (["DECIMAL", "MONEY"].includes(source?.field_type)) return raw === "" ? "" : Number(raw);
+  return raw;
 };
-const rowsFrom = (value: any) =>
-  !value
-    ? []
-    : (value.operator === "AND" || value.operator === "OR"
-        ? value.conditions
-        : [value]
-      ).map(rowFrom);
-export function ConditionEditor({ title, value, fields, change }: any) {
-  const rows = rowsFrom(value),
-    join = value?.operator === "OR" ? "OR" : "AND";
-  function emit(next: any[], group = join) {
-    if (!next.length) return change(null);
-    let nodes = next.map((r) => {
-      let source = fields.find((f: any) => f.field_key === r.field_key),
-        raw: any = r.value;
-      if (["INTEGER"].includes(source?.field_type))
-        raw = Number.parseInt(raw, 10);
-      else if (["DECIMAL", "MONEY"].includes(source?.field_type))
-        raw = Number(raw);
-      else if (source?.field_type === "BOOLEAN") raw = raw === "true";
-      if (["IN", "NOT_IN"].includes(r.operator))
-        raw = String(r.value)
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean)
-          .map((x) =>
-            ["INTEGER", "DECIMAL", "MONEY"].includes(source?.field_type)
-              ? Number(x)
-              : source?.field_type === "BOOLEAN"
-                ? x === "true"
-                : x,
-          );
-      let node: any = { operator: r.operator, field_key: r.field_key };
-      if (!["IS_EMPTY", "IS_NOT_EMPTY"].includes(r.operator)) node.value = raw;
-      return r.negated ? { operator: "NOT", condition: node } : node;
-    });
-    change(
-      nodes.length === 1 ? nodes[0] : { operator: group, conditions: nodes },
-    );
+const conditionDescription = (node: Condition, fields: any[]): string => {
+  if (node.operator === "NOT") return `НЕ (${node.condition ? conditionDescription(node.condition, fields) : "?"})`;
+  if (node.operator === "AND" || node.operator === "OR") return `(${(node.conditions || []).map(child => conditionDescription(child, fields)).join(node.operator === "AND" ? " И " : " ИЛИ ")})`;
+  const name = fields.find((field: any) => field.field_key === node.field_key)?.label || node.field_key || "Поле";
+  if (["IS_EMPTY", "IS_NOT_EMPTY", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(node.operator)) return `${name} ${OPS[node.operator]}`;
+  const values = Array.isArray(node.value) ? node.value.join(", ") : String(node.value ?? "");
+  return `${name} ${OPS[node.operator] || node.operator} ${values || "…"}`;
+};
+
+export function ConditionEditor({ title, value, fields, change, ownKey }: any) {
+  const root = value as Condition | null;
+  const error = conditionError(root, fields, ownKey);
+  const stats = conditionStats(root);
+  function commit(next: Condition | null) {
+    if (next && (conditionStats(next).depth > MAX_CONDITION_DEPTH || conditionStats(next).count > MAX_CONDITION_NODES)) return;
+    change(next);
   }
-  return (
-    <fieldset className="condition-editor">
-      <legend>
-        <GitBranch size={14} />
-        {title}
-      </legend>
-      {!rows.length ? (
-        <button
-          type="button"
-          className="condition-add"
-          onClick={() =>
-            emit([
-              {
-                field_key: fields[0]?.field_key || "",
-                operator: "EQUALS",
-                value: "",
-                negated: false,
-              },
-            ])
-          }
-          disabled={!fields.length}
-        >
-          <Plus size={14} />
-          Добавить условие
-        </button>
-      ) : (
-        <>
-          <label>
-            Объединение
-            <select
-              value={join}
-              onChange={(e) => emit(rows, e.target.value)}
-              disabled={rows.length < 2}
-            >
-              <option value="AND">Все условия (И)</option>
-              <option value="OR">Любое условие (ИЛИ)</option>
-            </select>
-          </label>
-          {rows.map((row: any, index: number) => (
-            <ConditionRow
-              key={index}
-              row={row}
-              fields={fields}
-              change={(next: any) => {
-                let copy = [...rows];
-                copy[index] = next;
-                emit(copy);
-              }}
-              remove={() =>
-                emit(rows.filter((_: any, i: number) => i !== index))
-              }
-            />
-          ))}
-          <button
-            type="button"
-            className="condition-add"
-            onClick={() =>
-              emit([
-                ...rows,
-                {
-                  field_key: fields[0]?.field_key || "",
-                  operator: "EQUALS",
-                  value: "",
-                  negated: false,
-                },
-              ])
-            }
-          >
-            <Plus size={14} />
-            Добавить условие
-          </button>
-        </>
-      )}
-    </fieldset>
-  );
+  function edit(path: number[], next: Condition) { if (root) commit(replaceCondition(root, path, next)); }
+  function remove(path: number[]) { if (root) commit(removeCondition(root, path)); }
+  function move(path: number[], direction: -1 | 1) { if (root) commit(moveCondition(root, path, direction)); }
+  function render(node: Condition, path: number[], depth: number, siblings = 1) {
+    const core = conditionCore(node);
+    const group = core.operator === "AND" || core.operator === "OR";
+    const children = core.conditions || [];
+    const canLeaf = stats.count + (group ? 1 : 2) <= MAX_CONDITION_NODES && depth + (node.operator === "NOT" ? 1 : 0) + (group ? 1 : 1) <= MAX_CONDITION_DEPTH;
+    const canGroup = stats.count + (group ? 3 : 4) <= MAX_CONDITION_NODES && depth + (node.operator === "NOT" ? 1 : 0) + (group ? 2 : 3) <= MAX_CONDITION_DEPTH;
+    const updateCore = (next: Condition) => edit(path, withCore(node, next));
+    return <div className={`condition-node ${group ? "condition-group" : "condition-leaf"}`} key={path.join("-") || "root"}>
+      <div className="condition-node-header">
+        {group ? <label>Связь внутри группы<select aria-label="Связь внутри группы" value={core.operator} onChange={event => updateCore({ ...core, operator: event.target.value })}><option value="AND">Все условия (И)</option><option value="OR">Любое условие (ИЛИ)</option></select></label> : <strong>Условие</strong>}
+        <label className="condition-negate"><input type="checkbox" checked={node.operator === "NOT"} disabled={node.operator !== "NOT" && stats.depth >= MAX_CONDITION_DEPTH} onChange={event => edit(path, event.target.checked ? { operator: "NOT", condition: node } : core)}/>Отрицание (НЕ)</label>
+      </div>
+      {group ? <div className="condition-children">{children.map((child, index) => render(child, [...path, index], depth + 1 + (node.operator === "NOT" ? 1 : 0), children.length))}</div> : <ConditionRow row={core} fields={fields} change={updateCore}/>}
+      {group && <div className="condition-group-actions"><button type="button" disabled={!canLeaf} onClick={() => updateCore({ ...core, conditions: [...children, conditionLeaf(fields)] })}><Plus size={14}/>Добавить условие</button><button type="button" disabled={!canGroup} onClick={() => updateCore({ ...core, conditions: [...children, conditionGroup(fields)] })}><Plus size={14}/>Добавить группу</button></div>}
+      <div className="condition-node-actions"><button type="button" aria-label="Выше" title="Переместить выше" disabled={!path.length || path[path.length - 1] === 0} onClick={() => move(path, -1)}>↑</button><button type="button" aria-label="Ниже" title="Переместить ниже" disabled={!path.length || path[path.length - 1] === siblings - 1} onClick={() => move(path, 1)}>↓</button><button type="button" className="condition-remove" onClick={() => remove(path)}>{group ? "Удалить группу" : "Удалить условие"}</button></div>
+    </div>;
+  }
+  return <fieldset className="condition-editor"><legend><GitBranch size={14}/>{title}</legend>
+    {!root ? <button type="button" className="condition-add" disabled={!fields.length} onClick={() => commit(conditionLeaf(fields))}><Plus size={14}/>Добавить условие</button> : <>{render(root, [], 1)}{conditionCore(root).operator !== "AND" && conditionCore(root).operator !== "OR" && <div className="condition-group-actions"><button type="button" disabled={stats.count + 2 > MAX_CONDITION_NODES || stats.depth + 1 > MAX_CONDITION_DEPTH} onClick={() => commit({ operator: "AND", conditions: [root, conditionLeaf(fields)] })}><Plus size={14}/>Добавить условие</button><button type="button" disabled={stats.count + 4 > MAX_CONDITION_NODES || stats.depth + 2 > MAX_CONDITION_DEPTH} onClick={() => commit({ operator: "AND", conditions: [root, conditionGroup(fields)] })}><Plus size={14}/>Добавить группу</button></div>}<div className="condition-preview"><b>Логика условия</b><p>{conditionDescription(root, fields)}</p></div>{error && <p className="condition-error" role="alert">{error}</p>}<small className="condition-limit">{stats.count}/{MAX_CONDITION_NODES} элементов · глубина {stats.depth}/{MAX_CONDITION_DEPTH}</small></>}
+  </fieldset>;
 }
-function ConditionRow({ row, fields, change, remove }: any) {
+function ConditionRow({ row, fields, change }: any) {
+  const [listText, setListText] = useState(() => Array.isArray(row.value) ? row.value.join(", ") : String(row.value ?? ""));
+  const listValues = (text: string, field: any) => text.split(",").map(part => part.trim()).filter(Boolean).map(part => conditionValue(part, field));
   let source = fields.find((x: any) => x.field_key === row.field_key),
     ordered = ["INTEGER", "DECIMAL", "MONEY", "DATE"].includes(
       source?.field_type,
     ),
     ops = Object.entries(OPS).filter(
       ([k]) =>
-        ordered ||
-        ![
+        (source?.config?.option_items?.length ? !["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"].includes(k) : !["CONTAINS_OPTION", "NOT_CONTAINS_OPTION", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(k)) &&
+        (source?.config?.allow_other || !["OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(k)) &&
+        (ordered || ![
           "GREATER_THAN",
           "LESS_THAN",
           "GREATER_OR_EQUAL",
           "LESS_OR_EQUAL",
-        ].includes(k),
+        ].includes(k)),
     ),
-    noValue = ["IS_EMPTY", "IS_NOT_EMPTY"].includes(row.operator);
+    noValue = ["IS_EMPTY", "IS_NOT_EMPTY", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(row.operator);
+  useEffect(() => {
+    if (["IN", "NOT_IN"].includes(row.operator) && JSON.stringify(listValues(listText, source)) !== JSON.stringify(row.value)) setListText(Array.isArray(row.value) ? row.value.join(", ") : String(row.value ?? ""));
+  }, [row.value, row.operator, source?.field_type]);
   return (
     <div className="condition-row">
       <label>
@@ -2116,9 +2138,7 @@ function ConditionRow({ row, fields, change, remove }: any) {
         <select
           required
           value={row.field_key}
-          onChange={(e) =>
-            change({ ...row, field_key: e.target.value, value: "" })
-          }
+          onChange={(e) => { const next = fields.find((field: any) => field.field_key === e.target.value); change(next?.config?.option_items?.length ? { operator: "CONTAINS_OPTION", field_key: e.target.value, value: next.config.option_items[0].key } : { operator: "EQUALS", field_key: e.target.value, value: "" }); }}
         >
           {fields.map((x: any) => (
             <option key={x.id} value={x.field_key}>
@@ -2131,7 +2151,12 @@ function ConditionRow({ row, fields, change, remove }: any) {
         Оператор
         <select
           value={row.operator}
-          onChange={(e) => change({ ...row, operator: e.target.value })}
+          onChange={(e) => {
+            const operator = e.target.value;
+            if (["IS_EMPTY", "IS_NOT_EMPTY", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(operator)) change({ operator, field_key: row.field_key });
+            else if (["CONTAINS_OPTION", "NOT_CONTAINS_OPTION"].includes(operator)) change({ operator, field_key: row.field_key, value: source?.config?.option_items?.[0]?.key || "" });
+            else change({ operator, field_key: row.field_key, value: ["IN", "NOT_IN"].includes(operator) ? (Array.isArray(row.value) ? row.value : row.value === "" || row.value === undefined ? [] : [row.value]) : Array.isArray(row.value) ? (row.value[0] ?? "") : (row.value ?? "") });
+          }}
         >
           {ops.map(([k, v]) => (
             <option key={k} value={k}>
@@ -2143,7 +2168,9 @@ function ConditionRow({ row, fields, change, remove }: any) {
       {!noValue && (
         <label>
           Значение
-          {source?.field_type === "SINGLE_SELECT" ? (
+          {["CONTAINS_OPTION", "NOT_CONTAINS_OPTION"].includes(row.operator) ? <select value={String(row.value || "")} onChange={e => change({ ...row, value: e.target.value })}>{(source?.config?.option_items || []).map((option: any) => <option key={option.key} value={option.key}>{option.label}</option>)}</select> : ["IN", "NOT_IN"].includes(row.operator) ? (
+            <input required type="text" value={listText} placeholder="Значения через запятую" onChange={e => { setListText(e.target.value); change({ ...row, value: listValues(e.target.value, source) }); }}/>
+          ) : source?.field_type === "SINGLE_SELECT" ? (
             <select
               value={row.value}
               onChange={(e) => change({ ...row, value: e.target.value })}
@@ -2155,9 +2182,10 @@ function ConditionRow({ row, fields, change, remove }: any) {
             </select>
           ) : source?.field_type === "BOOLEAN" ? (
             <select
-              value={String(row.value)}
-              onChange={(e) => change({ ...row, value: e.target.value })}
+              value={row.value === "" || row.value === undefined ? "" : String(row.value)}
+              onChange={(e) => change({ ...row, value: conditionValue(e.target.value, source) })}
             >
+              <option value="">Выберите значение</option>
               <option value="true">Да</option>
               <option value="false">Нет</option>
             </select>
@@ -2171,33 +2199,12 @@ function ConditionRow({ row, fields, change, remove }: any) {
                     ? "number"
                     : "text"
               }
-              value={row.value}
-              onChange={(e) => change({ ...row, value: e.target.value })}
-              placeholder={
-                ["IN", "NOT_IN"].includes(row.operator)
-                  ? "Значения через запятую"
-                  : ""
-              }
+              value={row.value ?? ""}
+              onChange={(e) => change({ ...row, value: conditionValue(e.target.value, source) })}
             />
           )}
         </label>
       )}
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={row.negated}
-          onChange={(e) => change({ ...row, negated: e.target.checked })}
-        />
-        Отрицание (НЕ)
-      </label>
-      <button
-        type="button"
-        className="condition-remove"
-        aria-label="Удалить условие"
-        onClick={remove}
-      >
-        <Trash2 size={14} />
-      </button>
     </div>
   );
 }

@@ -14,12 +14,13 @@ from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
 from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
+from app import choices
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
 from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
-WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT','LIST','COMPOSITE'}
+WORD_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main'; NS={'w':WORD_NS}; FIELD_TYPES={'TEXT','MULTILINE_TEXT','INTEGER','DECIMAL','MONEY','DATE','BOOLEAN','SINGLE_SELECT','MULTI_SELECT','LIST','COMPOSITE'}
 REGION_TYPES={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE','CONDITIONAL_TABLE_COLUMN'}
 
 def db():
@@ -132,7 +133,7 @@ def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
@@ -160,7 +161,13 @@ def validate_field_payload(p):
   if len(pattern)>200 or '(?' in pattern or re.search(r'\\[1-9]',pattern): raise HTTPException(422,detail='Регулярное выражение слишком сложное')
   try: re.compile(pattern)
   except re.error: raise HTTPException(422,detail='Некорректное регулярное выражение')
- if p.field_type=='SINGLE_SELECT' and (not p.options or any(not str(x).strip() for x in p.options)): raise HTTPException(422,detail='Добавьте варианты выбора')
+ if p.field_type in {'SINGLE_SELECT','MULTI_SELECT'}:
+  if p.option_items:
+   if not choices.validate_options(p.option_items): raise HTTPException(422,detail='Варианты должны иметь уникальные стабильные ключи и названия')
+  elif p.field_type=='MULTI_SELECT' or not p.options or any(not str(x).strip() for x in p.options):
+   raise HTTPException(422,detail='Добавьте варианты выбора')
+  if p.allow_other and not p.option_items: raise HTTPException(422,detail='Для варианта «Иное» задайте структурированные варианты')
+  if p.other_required and not p.allow_other: raise HTTPException(422,detail='Сначала разрешите вариант «Иное»')
  if p.calculated and p.field_type not in {'INTEGER','DECIMAL','MONEY','TEXT'}: raise HTTPException(422,detail='Этот тип поля нельзя вычислять')
  if p.calculated and p.field_type=='TEXT' and not p.text_expression: raise HTTPException(422,detail='Текстовому вычисляемому полю нужно выражение')
  if p.calculated and p.field_type!='TEXT' and not p.expression: raise HTTPException(422,detail='Вычисляемому полю нужна числовая формула')
@@ -172,7 +179,7 @@ def validate_field_payload(p):
  try: ValueFormatter.validate(p.output_format)
  except CalculationError as exc: raise HTTPException(422,detail=str(exc))
 def calculation_config(p): return {'calculated':p.calculated,'expression':p.expression,'precision':p.precision,'rounding':p.rounding,'output_format':p.output_format}
-def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
 def repeating_field_config(p): return {'description':p.description,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,**calculation_config(p)}
 def _validate_components(components,depth=1):
  if depth>4:raise HTTPException(422,detail='Вложенность составного поля не может превышать 4 уровня')
@@ -234,7 +241,9 @@ def validate_answer(field,value):
   elif kind in {'DECIMAL','MONEY'}: number=Decimal(str(value).replace(',','.'))
   elif kind=='DATE': date.fromisoformat(str(value))
   elif kind=='BOOLEAN' and not isinstance(value,bool): return 'Выберите да или нет'
-  elif kind=='SINGLE_SELECT' and value not in cfg.get('options',[]): return 'Выберите значение из списка'
+  elif kind in {'SINGLE_SELECT','MULTI_SELECT'}:
+   if cfg.get('option_items'): return choices.validate_answer(value,cfg,kind=='MULTI_SELECT')
+   if kind=='SINGLE_SELECT' and value not in cfg.get('options',[]): return 'Выберите значение из списка'
   elif kind=='LIST':
    if not isinstance(value,list) or any(not isinstance(x,str) for x in value):return 'Ожидался список строк'
    item=cfg.get('item_config') or {};minimum=int(item.get('min_items',0));maximum=int(item.get('max_items',20))
@@ -251,6 +260,8 @@ def validate_answer(field,value):
 def render_value(field,value):
  if value in (None,''): return ''
  if field.field_type=='BOOLEAN': return 'Да' if value else 'Нет'
+ if field.field_type in {'SINGLE_SELECT','MULTI_SELECT'} and (field.config or {}).get('option_items'):
+  return choices.render(value,field.config or {})
  if field.field_type=='LIST':
   config=field.config or {};numbering=config.get('numbering')
   if numbering:
@@ -308,7 +319,8 @@ def formatted_bindings(bindings,values,fields=None):
  result={}
  for binding in bindings:
   cfg=binding.format_config or {}; value=values.get(binding.binding_key,''); field=by_id.get(binding.field_id)
-  result[binding.id]=render_value(field,value) if field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list'))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
+  structured_choice=field and field.field_type in {'SINGLE_SELECT','MULTI_SELECT'} and (field.config or {}).get('option_items')
+  result[binding.id]=render_value(field,value) if structured_choice or (field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list')))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
  return result
 def validate_active_answers(fields,answers):
  errors={}
@@ -317,7 +329,7 @@ def validate_active_answers(fields,answers):
   state=ConditionEngine.field_state(field,answers)
   if not state['visible']: continue
   value=answers.get(field.field_key)
-  if state['required'] and value in (None,''): errors[field.field_key]='Обязательное поле'
+  if state['required'] and (value in (None,'') or (field.field_type in {'SINGLE_SELECT','MULTI_SELECT'} and isinstance(value,dict) and not choices.selected(value))): errors[field.field_key]='Обязательное поле'
   elif value not in (None,'') and (error:=validate_answer(field,value)): errors[field.field_key]=error
  return errors
 def condition_answers(fields,answers):
@@ -794,7 +806,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
   for field in fields:
    value=answers.get(field.field_key)
-   if not (field.config or {}).get('calculated') and value not in (None,'') and (message:=validate_answer(field,value)): errors[field.field_key]=message
+   if not (field.config or {}).get('calculated') and value not in (None,'') and (message:=validate_answer(field,value)) and message!='Заполните вариант «Иное»': errors[field.field_key]=message
   if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
   d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.post('/api/v1/contract-drafts/{id}/generate',status_code=201)

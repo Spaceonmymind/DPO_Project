@@ -1,4 +1,5 @@
 import { evaluateCondition, fieldState } from "./conditions";
+import { OTHER, choiceAnswer, isStructuredChoice } from "./choices";
 
 export type QuestionnaireStep = { name: string; fields: any[]; groups: any[] };
 
@@ -25,6 +26,16 @@ function validDate(value: string) {
 function fieldError(field: any, value: any, required: boolean): string | undefined {
   const rules = field.config?.validation || {};
   if (empty(value)) return required ? "Обязательное поле" : undefined;
+  if (isStructuredChoice(field)) {
+    const answer = choiceAnswer(value);
+    const keys = answer.selected;
+    const allowed = new Set((field.config.option_items || []).map((item: any) => item.key));
+    if (field.config.allow_other) allowed.add(OTHER);
+    if (!value || typeof value !== "object" || !Array.isArray(value.selected) || typeof value.other_text !== "string" || keys.some((key: string) => !allowed.has(key)) || new Set(keys).size !== keys.length || (field.field_type === "SINGLE_SELECT" && keys.length > 1)) return "Выберите значение из списка";
+    if (required && !keys.length) return "Обязательное поле";
+    if (keys.includes(OTHER) && field.config.other_required && !answer.other_text.trim()) return "Заполните вариант «Иное»";
+    return undefined;
+  }
   if (["TEXT", "MULTILINE_TEXT"].includes(field.field_type)) {
     if (typeof value !== "string") return "Ожидался текст";
     if (rules.min_length !== undefined && value.length < Number(rules.min_length)) return `Минимум ${rules.min_length} символов`;

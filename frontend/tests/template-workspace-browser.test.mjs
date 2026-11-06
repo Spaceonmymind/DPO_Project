@@ -6,6 +6,64 @@ import { chromium } from "playwright-core";
 
 const chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
+test("DOCX pane widths drag, persist, clamp and reset without changing zoom", { skip: !existsSync(chromePath) }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 900 } });
+    const url = `${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html`;
+    await page.goto(url);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    const left = page.getByRole("separator", { name: "Изменить ширину панели вопросов" });
+    const right = page.getByRole("separator", { name: "Изменить ширину панели настроек" });
+    const widths = () => page.locator(".builder-grid").evaluate(grid => ({
+      left: grid.querySelector(".document-outline").getBoundingClientRect().width,
+      center: grid.querySelector(".document-canvas").getBoundingClientRect().width,
+      right: grid.querySelector(".questionnaire-builder").getBoundingClientRect().width,
+      zoom: grid.querySelector('[aria-label="Масштаб документа"]').value,
+    }));
+    const initial = await widths();
+    const leftBox = await left.boundingBox();
+    await page.mouse.move(leftBox.x + 6, leftBox.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(leftBox.x + 86, leftBox.y + 40, { steps: 5 });
+    await page.mouse.up();
+    const afterLeft = await widths();
+    assert.ok(afterLeft.left > initial.left + 60);
+    assert.ok(afterLeft.center < initial.center - 60);
+    const rightBox = await right.boundingBox();
+    await page.mouse.move(rightBox.x + 6, rightBox.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(rightBox.x - 74, rightBox.y + 40, { steps: 5 });
+    await page.mouse.up();
+    const afterRight = await widths();
+    assert.ok(afterRight.right > afterLeft.right + 55);
+    assert.ok(afterRight.center < afterLeft.center - 55);
+    assert.equal(afterRight.zoom, initial.zoom);
+    await page.reload();
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    const restored = await widths();
+    assert.ok(Math.abs(restored.left - afterRight.left) < 3);
+    assert.ok(Math.abs(restored.right - afterRight.right) < 3);
+    await page.getByRole("button", { name: "Сбросить расположение" }).click();
+    const reset = await widths();
+    assert.ok(Math.abs(reset.left - initial.left) < 3);
+    assert.ok(Math.abs(reset.right - initial.right) < 3);
+    assert.equal(await page.evaluate(() => localStorage.getItem("dpo-template-pane-widths")), null);
+    await left.focus();
+    await left.press("ArrowRight");
+    assert.ok((await widths()).left > reset.left);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    assert.equal(await page.locator("body").evaluate(body => body.scrollWidth <= innerWidth + 2), true);
+  } finally {
+    await browser.close();
+    await server.close();
+  }
+});
+
 test("DOCX workspace controls fit their panels at desktop and zoom-equivalent widths", { skip: !existsSync(chromePath) }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

@@ -7,6 +7,30 @@ const leaf = (key) => ({ operator: "EQUALS", field_key: key, value: true });
 const group = (operator, ...conditions) => ({ operator, conditions });
 const fields = ["A", "B", "C", "D"].map((key) => ({ id: key, field_key: key, label: key, field_type: "BOOLEAN", config: {} }));
 
+test("IN editor keeps commas and spaces until blur and reopens normalized values", async () => {
+  const dom=new JSDOM("<!doctype html><div id='root'></div>",{url:"http://localhost/templates"});
+  const globals={window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,Node:dom.window.Node,IS_REACT_ACT_ENVIRONMENT:true};
+  const previous=Object.fromEntries(Object.keys(globals).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  for(const [key,value] of Object.entries(globals))Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
+  const server=await createServer({server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
+  const {ConditionEditor}=await server.ssrLoadModule("/src/TemplateAdmin.tsx");
+  const React=await import("react");const {act}=React;const {createRoot}=await import("react-dom/client");const root=createRoot(dom.window.document.getElementById("root"));
+  const textFields=[{id:"fruit",field_key:"fruit",label:"Фрукт",field_type:"TEXT",config:{}}];let current={operator:"IN",field_key:"fruit",value:[]};
+  const changed=next=>{current=next;root.render(React.createElement(ConditionEditor,{title:"Условие",value:current,fields:textFields,change:changed}));};
+  try {
+    await act(async()=>root.render(React.createElement(ConditionEditor,{title:"Условие",value:current,fields:textFields,change:changed})));
+    const input=dom.window.document.querySelector('input[placeholder="Значения через запятую"]');const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,"value").set;
+    for(const raw of ["яблоко, груша","яблоко,груша","яблоко,  груша, апельсин","красное яблоко, , груша"]){
+      await act(async()=>{setter.call(input,raw);input.dispatchEvent(new dom.window.Event("input",{bubbles:true}));});
+      assert.equal(input.value,raw);assert.deepEqual(current.value,[]);
+    }
+    await act(async()=>input.dispatchEvent(new dom.window.FocusEvent("focusout",{bubbles:true})));
+    assert.deepEqual(current.value,["красное яблоко","груша"]);
+    await act(async()=>root.render(React.createElement(ConditionEditor,{key:"reopen",title:"Условие",value:current,fields:textFields,change:changed})));
+    assert.equal(dom.window.document.querySelector('input[placeholder="Значения через запятую"]').value,"красное яблоко, груша");
+  } finally {await act(async()=>root.unmount());await server.close();dom.window.close();for(const [key,descriptor] of Object.entries(previous))descriptor?Object.defineProperty(globalThis,key,descriptor):delete globalThis[key];}
+});
+
 test("nested condition editor keeps AST, edits one branch, and evaluates both expressions", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost/templates" });
   const globals = { window: dom.window, document: dom.window.document, navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true };

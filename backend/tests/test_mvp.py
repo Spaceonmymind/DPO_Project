@@ -1099,6 +1099,97 @@ def test_contract_platform_conditional_payment_question_end_to_end():
     assert again.status_code==200 and again.json()['answers']['payment.advance_percent']==30
 
 
+def test_copy_questions_between_versions_keeps_source_and_checks_dependencies():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'COPY_QUESTIONS')
+    document=Document();document.add_paragraph('New contract');data=io.BytesIO();document.save(data)
+    endpoint=f"/api/v1/document-templates/{template['id']}/versions"
+    first=client.post(endpoint,headers=headers,files={'file':('old.docx',data.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    old_base=f"{endpoint}/{first['id']}"
+    field_a=client.post(old_base+'/fields',headers=headers,json={'field_key':'payment','label':'Оплата','field_type':'TEXT','position':1,'group':'Финансы'})
+    assert field_a.status_code==201,field_a.text
+    field_b=client.post(old_base+'/fields',headers=headers,json={'field_key':'advance','label':'Аванс','field_type':'TEXT','position':2,'group':'  финансы  ','visible_when':{'operator':'IS_NOT_EMPTY','field_key':'payment'}})
+    assert field_b.status_code==201,field_b.text
+    assert field_b.json()['config']['group']=='Финансы'
+    second=client.post(endpoint,headers=headers,files={'file':('new.docx',data.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    new_base=f"{endpoint}/{second['id']}"
+    copy_url=new_base+'/copy-questions'
+    missing=client.post(copy_url,headers=headers,json={'source_version_id':first['id'],'field_ids':[field_b.json()['id']]})
+    assert missing.status_code==422 and 'payment' in missing.text
+    all_fields=client.post(copy_url,headers=headers,json={'source_version_id':first['id']})
+    assert all_fields.status_code==200,all_fields.text
+    assert all_fields.json()['count']==2
+    assert {x['field_key'] for x in all_fields.json()['fields']}=={'payment','advance'}
+    assert {x['id'] for x in all_fields.json()['fields']}.isdisjoint({field_a.json()['id'],field_b.json()['id']})
+    assert client.get(old_base+'/questionnaire',headers=headers).json()['fields'][1]['id']==field_b.json()['id']
+    repeated=client.post(copy_url,headers=headers,json={'source_version_id':first['id']})
+    assert repeated.status_code==409
+    third=client.post(endpoint,headers=headers,files={'file':('third.docx',data.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    third_base=f"{endpoint}/{third['id']}"
+    single=client.post(third_base+'/copy-questions',headers=headers,json={'source_version_id':first['id'],'field_ids':[field_a.json()['id']]})
+    assert single.status_code==200 and single.json()['count']==1
+    dependent=client.post(third_base+'/copy-questions',headers=headers,json={'source_version_id':first['id'],'field_ids':[field_b.json()['id']]})
+    assert dependent.status_code==200 and dependent.json()['count']==1
+    assert client.get(third_base+'/questionnaire',headers=headers).json()['fields'][0]['config']['group']=='Финансы'
+
+
+def test_question_defaults_are_pinned_to_new_draft_and_used_for_conditions_and_docx():
+    document=Document();document.add_paragraph('CITY');document.add_paragraph('HIDDEN')
+    raw=io.BytesIO();document.save(raw)
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'QUESTION_DEFAULTS')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('defaults.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    fields=[
+      {'field_key':'city','label':'Город','field_type':'TEXT','default_value':'Москва'},
+      {'field_key':'amount','label':'Сумма','field_type':'DECIMAL','default_value':12.5},
+      {'field_key':'signed','label':'Дата','field_type':'DATE','default_value':'2026-11-06'},
+      {'field_key':'mode','label':'Режим','field_type':'SINGLE_SELECT','option_items':[{'key':'base','label':'Основной'}],'default_value':{'selected':['base'],'other_text':''}},
+      {'field_key':'services','label':'Услуги','field_type':'MULTI_SELECT','option_items':[{'key':'one','label':'Первый'},{'key':'two','label':'Второй'}],'default_value':{'selected':['one','two'],'other_text':''}},
+      {'field_key':'secret','label':'Секрет','field_type':'TEXT','default_value':'Скрытый текст','visible_when':{'operator':'EQUALS','field_key':'city','value':'Казань'}},
+    ]
+    saved=[]
+    for position,payload in enumerate(fields,1):
+        response=manager.post(base+'/fields',headers=headers,json={**payload,'position':position})
+        assert response.status_code==201,response.text
+        saved.append(response.json())
+    invalid=manager.patch(base+f"/fields/{saved[1]['id']}",headers=headers,json={**fields[1],'position':2,'default_value':'не число'})
+    assert invalid.status_code==422
+    invalid_choice=manager.patch(base+f"/fields/{saved[3]['id']}",headers=headers,json={**fields[3],'position':4,'default_value':{'selected':['missing'],'other_text':''}})
+    assert invalid_choice.status_code==422
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']
+    city_node=next(node for node in nodes if node['text']=='CITY')
+    hidden_node=next(node for node in nodes if node['text']=='HIDDEN')
+    assert manager.post(base+'/bindings',headers=headers,json={'field_id':saved[0]['id'],'locator':city_node['locator'],'start':0,'end':4,'selected_text':'CITY'}).status_code==201
+    assert manager.post(base+'/bindings',headers=headers,json={'field_id':saved[-1]['id'],'locator':hidden_node['locator'],'start':0,'end':6,'selected_text':'HIDDEN'}).status_code==201
+    region=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'only_kazan','region_type':'CONDITIONAL_PARAGRAPH','start_locator':hidden_node['locator'],'include_when':{'operator':'EQUALS','field_key':'city','value':'Казань'}})
+    assert region.status_code==201,region.text
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert created.status_code==201,created.text
+    answers=created.json()['answers'];draft_path=f"/api/v1/contract-drafts/{created.json()['id']}"
+    assert answers['city']=='Москва' and answers['amount']==12.5 and answers['signed']=='2026-11-06'
+    assert answers['mode']['selected']==['base'] and answers['services']['selected']==['one','two']
+    assert answers['secret']=='Скрытый текст'
+    first=employee.post(draft_path+'/generate',headers=employee_headers)
+    assert first.status_code==201,first.text
+    first_doc=Document(io.BytesIO(employee.get(first.json()['download_url'],headers=employee_headers).content))
+    assert [p.text for p in first_doc.paragraphs]==['Москва']
+    cleared=employee.patch(draft_path+'/autosave',headers=employee_headers,json={'answers':{'city':''}})
+    assert cleared.status_code==200,cleared.text
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['city']==''
+    second=employee.post(draft_path+'/generate',headers=employee_headers)
+    assert second.status_code==201,second.text
+    changed=employee.patch(draft_path+'/autosave',headers=employee_headers,json={'answers':{'city':'Казань'}})
+    assert changed.status_code==200
+    third=employee.post(draft_path+'/generate',headers=employee_headers)
+    assert third.status_code==201,third.text
+    third_doc=Document(io.BytesIO(employee.get(third.json()['download_url'],headers=employee_headers).content))
+    assert [p.text for p in third_doc.paragraphs]==['Казань','Скрытый текст']
+    another=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert another.json()['answers']['city']=='Москва'
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['city']=='Казань'
+
+
 def test_multiple_choice_other_api_draft_conditions_generation_and_ownership():
     document=Document(); document.add_paragraph('Услуги: SERVICES'); document.add_paragraph('Питание: CATERING')
     payload=io.BytesIO(); document.save(payload)
@@ -1129,6 +1220,14 @@ def test_multiple_choice_other_api_draft_conditions_generation_and_ownership():
     generated=employee.post(draft_path+'/generate',headers=employee_headers); assert generated.status_code==201,generated.text
     rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
     assert 'Кейтеринг, Прокат санок' in rendered.paragraphs[0].text
+    multiple={'selected':['catering','__other__'],'other_text':'Аренда помещения','other_texts':['Аренда помещения','Доставка оборудования']}
+    assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'services':multiple}}).status_code==200
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['services']==multiple
+    generated_multiple=employee.post(draft_path+'/generate',headers=employee_headers)
+    assert generated_multiple.status_code==201,generated_multiple.text
+    document_multiple=Document(io.BytesIO(employee.get(generated_multiple.json()['download_url'],headers=employee_headers).content))
+    assert 'Кейтеринг, Аренда помещения, Доставка оборудования' in document_multiple.paragraphs[0].text
+    assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'services':answer}}).status_code==200
     copied=employee.post(draft_path+'/duplicate',headers=employee_headers,json={}); assert copied.status_code==201 and copied.json()['answers']['services']==answer
     assert manager.get(draft_path,headers=manager_headers).status_code==404
     assert employee.patch(draft_path,headers=employee_headers,json={'answers':{'services':{'selected':['__other__'],'other_text':''}}}).status_code==422
@@ -1278,12 +1377,45 @@ def test_r32_supports_all_region_types_and_rejects_overlap_and_stale_locator():
     for body in requests:
         response=client.post(base+'/conditional-regions',headers=headers,json={**body,'include_when':condition}); assert response.status_code==201,response.text
         assert response.json()['locator']['structure_fingerprint']==version['structure_fingerprint']
-    overlap=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'overlap','region_type':'CONDITIONAL_PARAGRAPH','start_locator':run['locator'],'include_when':condition})
-    assert overlap.status_code==422 and 'пересекаются' in overlap.text
+    nested=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'nested','region_type':'CONDITIONAL_PARAGRAPH','start_locator':run['locator'],'include_when':condition})
+    assert nested.status_code==201,nested.text
     listed=client.get(base+'/conditional-regions',headers=headers).json(); assert {x['region_type'] for x in listed}=={'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE'}
     database=SessionLocal(); from app.db import ConditionalDocumentRegion
     stale=database.query(ConditionalDocumentRegion).filter_by(region_key='table',template_version_id=version['id']).one(); stale.locator={**stale.locator,'structure_fingerprint':'0'*64}; database.commit(); database.close()
     rejected=client.post(base+'/publish',headers=headers); assert rejected.status_code==422 and 'устарел' in rejected.text
+
+
+def test_nested_conditional_regions_generate_for_each_parent_child_state():
+    document=Document()
+    for text in ('OUTER START','INNER CLAUSE','NAME'):document.add_paragraph(text)
+    raw=io.BytesIO();document.save(raw)
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'R_NESTED_REGIONS')
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('nested.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    for position,key in enumerate(('show_outer','show_inner','name'),1):
+        response=manager.post(base+'/fields',headers=headers,json={'field_key':key,'label':key,'field_type':'BOOLEAN' if key!='name' else 'TEXT','position':position,'required':True})
+        assert response.status_code==201,response.text
+        if key=='name':name_id=response.json()['id']
+    nodes=manager.get(base+'/preview',headers=headers).json()['nodes']
+    first=next(node for node in nodes if node['text']=='OUTER START')
+    inner=next(node for node in nodes if node['text']=='INNER CLAUSE')
+    marker=next(node for node in nodes if node['text']=='NAME')
+    binding=manager.post(base+'/bindings',headers=headers,json={'field_id':name_id,'locator':marker['locator'],'start':0,'end':4,'selected_text':'NAME'})
+    assert binding.status_code==201,binding.text
+    parent=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'outer','region_type':'CONDITIONAL_PARAGRAPH_GROUP','start_locator':first['locator'],'end_locator':inner['locator'],'include_when':{'operator':'EQUALS','field_key':'show_outer','value':True}})
+    child=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'inner','region_type':'CONDITIONAL_PARAGRAPH','start_locator':inner['locator'],'include_when':{'operator':'EQUALS','field_key':'show_inner','value':True}})
+    assert parent.status_code==201 and child.status_code==201,(parent.text,child.text)
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    for show_outer,show_inner,expected in ((False,True,[]),(True,False,['OUTER START']),(True,True,['OUTER START','INNER CLAUSE']),(False,False,[])):
+        draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json()
+        draft_path=f"/api/v1/contract-drafts/{draft['id']}"
+        answers={'show_outer':show_outer,'show_inner':show_inner,'name':'Иванов'}
+        assert employee.patch(draft_path,headers=employee_headers,json={'answers':answers}).status_code==200
+        generated=employee.post(draft_path+'/generate',headers=employee_headers)
+        assert generated.status_code==201,generated.text
+        output=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+        assert [paragraph.text for paragraph in output.paragraphs]==expected+['Иванов']
 
 
 def test_r33_full_repeating_table_flow_preserves_order_static_rows_and_source():

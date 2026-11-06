@@ -25,6 +25,8 @@ import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type Nam
 import { resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
+import { DefaultValueEditor } from "./DefaultValueEditor";
+import { DEFAULT_PANES, fitPaneWidths, PANE_STORAGE_KEY, readPaneWidths, type PaneWidths } from "./paneLayout";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
   TEXT: "Короткий текст",
@@ -69,6 +71,7 @@ const blank = (position = 1) => ({
   option_items: [],
   allow_other: false,
   other_required: false,
+  default_value: null,
   visible_when: null,
   required_when: null,
   text_expression: null,
@@ -78,6 +81,10 @@ const blank = (position = 1) => ({
 });
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
 const newOption = () => ({ key: `option_${Math.random().toString(36).slice(2, 10)}`, label: "" });
+function conditionFieldKeys(node: any): string[] {
+  if (!node || typeof node !== "object") return [];
+  return [...(typeof node.field_key === "string" ? [node.field_key] : []), ...conditionFieldKeys(node.condition), ...conditionFieldKeys(node.previous_condition), ...(Array.isArray(node.conditions) ? node.conditions.flatMap(conditionFieldKeys) : [])];
+}
 export function TemplateAdmin({ api }: { api: Api }) {
   return <FormulaStatusProvider><TemplateBuilder api={api} /></FormulaStatusProvider>;
 }
@@ -95,12 +102,20 @@ function FormulaStatusProvider({ children }: { children: React.ReactNode }) {
 function TemplateBuilder({ api }: { api: Api }) {
   const { pending: formulaPending } = React.useContext(FormulaStatusContext);
   const inspectorRef = useRef<HTMLElement | null>(null);
+  const builderGridRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ side: "questions" | "settings"; x: number; widths: PaneWidths } | null>(null);
+  const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
+  const [paneAvailable, setPaneAvailable] = useState(0);
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
     [versions, setVersions] = useState<any[]>([]),
     [version, setVersion] = useState<any>(),
     [preview, setPreview] = useState<any>(),
     [schema, setSchema] = useState<any>(),
+    [copySourceId, setCopySourceId] = useState(""),
+    [copyFields, setCopyFields] = useState<any[]>([]),
+    [copySelected, setCopySelected] = useState<string[]>([]),
+    [copyOpen, setCopyOpen] = useState(false),
     [bindings, setBindings] = useState<any[]>([]),
     [regions, setRegions] = useState<any[]>([]),
     [repeatingGroups, setRepeatingGroups] = useState<any[]>([]),
@@ -151,6 +166,54 @@ function TemplateBuilder({ api }: { api: Api }) {
     const query = docQuery.trim().toLocaleLowerCase("ru");
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
+  useEffect(() => {
+    const grid = builderGridRef.current;
+    if (!grid) return;
+    const measure = () => setPaneAvailable(grid.clientWidth);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(grid);
+    if (!observer) window.addEventListener("resize", measure);
+    setPaneAvailable(grid.clientWidth);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", measure); };
+  }, [version?.id, preview]);
+  const fittedPanes = fitPaneWidths(paneWidths, paneAvailable || 2000);
+  function changePane(side: "questions" | "settings", next: number) {
+    const width = builderGridRef.current?.clientWidth || paneAvailable || 2000;
+    setPaneWidths(current => {
+      const result = fitPaneWidths({ ...current, [side]: next }, width);
+      window.localStorage.setItem(PANE_STORAGE_KEY, JSON.stringify(result));
+      return result;
+    });
+  }
+  function resetPanes() {
+    setPaneWidths(DEFAULT_PANES);
+    window.localStorage.removeItem(PANE_STORAGE_KEY);
+  }
+  function panePointerDown(event: React.PointerEvent<HTMLDivElement>, side: "questions" | "settings") {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { side, x: event.clientX, widths: fittedPanes };
+    document.body.classList.add("workspace-resizing");
+  }
+  function panePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const delta = event.clientX - drag.x;
+    changePane(drag.side, drag.widths[drag.side] + (drag.side === "questions" ? delta : -delta));
+  }
+  function panePointerEnd() {
+    dragRef.current = null;
+    document.body.classList.remove("workspace-resizing");
+  }
+  function paneKeyDown(event: React.KeyboardEvent<HTMLDivElement>, side: "questions" | "settings") {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    changePane(side, fittedPanes[side] + (event.key === "ArrowRight" ? 16 : -16) * (side === "questions" ? 1 : -1));
+  }
+  function paneDivider(side: "questions" | "settings") {
+    return <div className="workspace-pane-divider" role="separator" tabIndex={0} aria-label={side === "questions" ? "Изменить ширину панели вопросов" : "Изменить ширину панели настроек"} aria-orientation="vertical" aria-valuenow={fittedPanes[side]} aria-valuemin={side === "questions" ? 180 : 260} aria-valuemax={side === "questions" ? 420 : 520} onPointerDown={event => panePointerDown(event, side)} onPointerMove={panePointerMove} onPointerUp={panePointerEnd} onPointerCancel={panePointerEnd} onLostPointerCapture={panePointerEnd} onKeyDown={event => paneKeyDown(event, side)} onDoubleClick={() => changePane(side, DEFAULT_PANES[side])} title="Перетащите для изменения ширины. Двойной щелчок — стандартная ширина." />;
+  }
   const availableBlockLocators = useMemo(() => new Set<string>((preview?.nodes || []).map((node: any) => node.locator)), [preview]);
   const savedBlockMarkers = useMemo(() => {
     const markers = new Map<string, { start: boolean; end: boolean }>();
@@ -199,6 +262,7 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   async function openVersion(x: any) {
     setVersion(x);
+    setCopyOpen(false);setCopySourceId("");setCopyFields([]);setCopySelected([]);
     setStage(2);
     setSelection(null);
     setActiveBinding(null);
@@ -347,7 +411,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       });
       await openVersion(version);
       setFieldOptionsText((payload.options || []).join(", "));
-      setField(payload);
+      setField({ ...payload, group: saved?.config?.group || payload.group });
       if (selectionDraft && saved?.id) {
         setSelection({ ...selectionDraft, field_id: saved.id });
         setStage(3);
@@ -380,6 +444,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       option_items: x.config.option_items || [],
       allow_other: x.config.allow_other || false,
       other_required: x.config.other_required || false,
+      default_value: x.config.default_value ?? null,
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
@@ -674,6 +739,21 @@ function TemplateBuilder({ api }: { api: Api }) {
       setNotice(`Версия ${created.version_number} создана. Можно редактировать.`);
     });
   }
+  async function chooseCopySource(sourceId: string) {
+    setCopySourceId(sourceId);setCopyFields([]);setCopySelected([]);
+    if (!sourceId || !selected) return;
+    await run(async () => {
+      const source = await api(`/document-templates/${selected.id}/versions/${sourceId}/questionnaire`);
+      setCopyFields(source.fields || []);setCopySelected((source.fields || []).map((item:any) => item.id));
+    });
+  }
+  async function copyQuestions() {
+    if (!selected || !version || !copySourceId) return;
+    await run(async () => {
+      const result = await api(`/document-templates/${selected.id}/versions/${version.id}/copy-questions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source_version_id:copySourceId,field_ids:copySelected})});
+      await openVersion(version);setStage(4);setNotice(`Скопировано вопросов: ${result.count}. Привязки к Word настройте заново.`);
+    });
+  }
 
   async function publish() {
     await run(async () => {
@@ -698,6 +778,11 @@ function TemplateBuilder({ api }: { api: Api }) {
       setNotice(action === "delete" ? "Шаблон удалён." : action === "archive" ? "Шаблон убран из каталога." : "Шаблон восстановлен в каталоге.");
     });
   }
+  const selectedCopyFields=copyFields.filter(item=>copySelected.includes(item.id));
+  const questionGroup=(item:any)=>editing===item.id&&showFieldEditor ? field.group : item.config?.group || "Основные сведения";
+  const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
+  const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
+  const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
   return (
     <div className={`page template-admin ${selected ? "template-open" : ""}`}>
       <header className="pagehead">
@@ -871,7 +956,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                           Исходник
                         </a>
                       </header>
-                      <div className="builder-grid">
+                      <div ref={builderGridRef} className="builder-grid" style={{ "--questions-pane-width": `${fittedPanes.questions}px`, "--settings-pane-width": `${fittedPanes.settings}px` } as React.CSSProperties}>
                         <aside className="document-outline" aria-label="Навигация по шаблону">
                           <div className="workspace-tabs" data-tour="tpl-tabs" role="tablist" aria-label="Навигация">
                             <button role="tab" aria-selected={workspaceTab === "questions"} className={workspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
@@ -882,9 +967,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
-                              {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{item.group || "Основные сведения"}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
+                              {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${questionGroup(item)}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
-                              {schema?.fields?.length > 0 && !(schema.fields as any[]).some((item:any) => `${item.label} ${item.field_key} ${item.group}`.toLowerCase().includes(questionQuery.toLowerCase())) && <p className="workspace-empty">По запросу ничего не найдено.</p>}
+                              {schema?.fields?.length > 0 && !(schema.fields as any[]).some((item:any) => `${item.label} ${item.field_key} ${questionGroup(item)}`.toLowerCase().includes(questionQuery.toLowerCase())) && <p className="workspace-empty">По запросу ничего не найдено.</p>}
                             </nav>
                           </> : <>
                             <div className="workspace-panel-heading"><h3>Структура Word</h3><span>{preview.nodes.length}</span></div>
@@ -892,8 +977,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                             <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => document.querySelector(`[data-locator="${CSS.escape(item.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
                           </>}
                         </aside>
+                        {paneDivider("questions")}
                         <section className="document-canvas" data-tour="tpl-canvas">
-                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><label>Масштаб <select value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div>
+                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><div className="workspace-toolbar-actions"><button type="button" className="secondary workspace-reset-layout" onClick={resetPanes}>Сбросить расположение</button><label>Масштаб <select value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div></div>
                           {bindingCandidates.length > 0 && (
                             <details className="selection-card binding-candidate-review" data-tour="tpl-candidates" aria-label="Кандидаты структурной разметки">
                               <summary>Кандидаты структурной разметки · {bindingCandidates.length}</summary>
@@ -1411,6 +1497,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                             </section>
                           </InspectorPortal>}
                         </section>
+                        {paneDivider("settings")}
                         <aside ref={inspectorRef} data-tour="tpl-panel" className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
                           <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
                           <div id="workspace-context-inspector" />
@@ -1418,11 +1505,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                           {(stage === 3 || stage === 5) && !selection && !activeBinding && !regionDraft && !groupDraft && <p className="workspace-inspector-tip">Создайте вопрос анкеты или выделите фрагмент Word для привязки. Для условий и таблиц используйте действия у фрагментов документа.</p>}
                           {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
                           <h3 className="panel-questionnaire">Вопросы анкеты</h3>
+                          {version.status === "DRAFT" && stage === 4 && versions.some(item=>item.id!==version.id) && <section className="copy-questions-panel"><button type="button" className="secondary" onClick={()=>setCopyOpen(!copyOpen)}>Скопировать вопросы из другой версии</button>{copyOpen && <div className="copy-questions-options"><label>Исходная версия<select value={copySourceId} onChange={event=>chooseCopySource(event.target.value)}><option value="">Выберите версию</option>{versions.filter(item=>item.id!==version.id).map(item=><option key={item.id} value={item.id}>Версия {item.version_number}</option>)}</select></label>{copySourceId && <><p>Выбрано вопросов: {copySelected.length} из {copyFields.length}</p><div className="copy-questions-list">{copyFields.map(item=><label key={item.id}><input type="checkbox" checked={copySelected.includes(item.id)} onChange={event=>setCopySelected(current=>event.target.checked?[...current,item.id]:current.filter(id=>id!==item.id))}/>{item.label}</label>)}</div>{missingCopyFields.length>0 && <div role="alert">Для условий также нужны: {missingCopyFields.map(item=>item.label).join(", ")}. <button type="button" onClick={()=>setCopySelected(current=>[...new Set([...current,...missingCopyFields.map(item=>item.id)])])}>Добавить зависимости</button></div>}<button type="button" className="primary" disabled={busy||!copySelected.length||!!missingCopyFields.length} onClick={copyQuestions}>Скопировать выбранные вопросы</button></>}</div>}</section>}
                           {version.status === "DRAFT" && showFieldEditor && !selection && !activeBinding && !regionDraft && !groupDraft && (
                             <form className="field-editor" onSubmit={saveField}>
                               <label>
                                 Раздел
                                 <input
+                                  list="questionnaire-existing-groups"
                                   value={field.group}
                                   onChange={(e) =>
                                     setField({
@@ -1431,6 +1520,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     })
                                   }
                                 />
+                                <datalist id="questionnaire-existing-groups">{existingGroups.map(group=><option key={group} value={group}/>)}</datalist>
                               </label>
                               <label>
                                 Вопрос
@@ -1467,6 +1557,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     setField({
                                       ...field,
                                       field_type: e.target.value,
+                                      default_value: null,
                                     })
                                   }
                                 >
@@ -1485,6 +1576,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     setField({
                                       ...field,
                                       calculated: e.target.checked,
+                                      default_value: e.target.checked ? null : field.default_value,
                                       required: e.target.checked
                                         ? false
                                         : field.required,
@@ -1585,6 +1677,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                               {["SINGLE_SELECT", "MULTI_SELECT"].includes(field.field_type) && (field.option_items?.length > 0 || field.field_type === "MULTI_SELECT") && <fieldset className="choice-options-editor"><legend>Варианты ответа</legend>{(field.option_items || []).map((option: any, index: number) => <div className="choice-option-row" key={option.key}><input aria-label={`Вариант ${index + 1}`} required value={option.label} onChange={e => setField({ ...field, option_items: field.option_items.map((item: any, n: number) => n === index ? { ...item, label: e.target.value } : item) })}/><button type="button" disabled={index === 0} onClick={() => { const items = [...field.option_items]; [items[index - 1], items[index]] = [items[index], items[index - 1]]; setField({ ...field, option_items: items }); }}>↑</button><button type="button" disabled={index === field.option_items.length - 1} onClick={() => { const items = [...field.option_items]; [items[index + 1], items[index]] = [items[index], items[index + 1]]; setField({ ...field, option_items: items }); }}>↓</button><button type="button" aria-label={`Удалить вариант ${index + 1}`} onClick={() => setField({ ...field, option_items: field.option_items.filter((_: any, n: number) => n !== index) })}>×</button></div>)}<button type="button" onClick={() => setField({ ...field, option_items: [...(field.option_items || []), newOption()] })}>Добавить вариант</button><label className="check"><input type="checkbox" checked={!!field.allow_other} onChange={e => setField({ ...field, allow_other: e.target.checked, other_required: e.target.checked ? field.other_required : false })}/>Разрешить вариант «Иное»</label>{field.allow_other && <label className="check"><input type="checkbox" checked={!!field.other_required} onChange={e => setField({ ...field, other_required: e.target.checked })}/>Текст для «Иное» обязателен</label>}</fieldset>}
                               {field.field_type === "LIST" && <div className="repeat-limits"><label>Минимум элементов<input type="number" min="0" max="100" value={field.item_config?.min_items ?? 0} onChange={e=>setField({...field,item_config:{...field.item_config,min_items:Number(e.target.value)}})}/></label><label>Максимум элементов<input type="number" min="1" max="100" value={field.item_config?.max_items ?? 20} onChange={e=>setField({...field,item_config:{...field.item_config,max_items:Number(e.target.value)}})}/></label><label>Разделитель в DOCX<input value={field.separator} onChange={e=>setField({...field,separator:e.target.value})}/></label></div>}
                               {field.field_type === "COMPOSITE" && <CompositeEditor components={field.components || []} change={(components:any)=>setField({...field,components})}/>}
+                              <DefaultValueEditor field={field} optionText={fieldOptionsText} change={value => setField((current:any) => ({ ...current, default_value: value }))}/>
                               {!field.calculated && (
                                 <label className="check">
                                   <input
@@ -2187,7 +2280,7 @@ function ConditionRow({ row, fields, change }: any) {
     ),
     ops = Object.entries(OPS).filter(
       ([k]) =>
-        (source?.config?.option_items?.length ? !["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"].includes(k) : !["CONTAINS_OPTION", "NOT_CONTAINS_OPTION", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(k)) &&
+        (source?.config?.option_items?.length ? !["EQUALS", "NOT_EQUALS", ...(source.field_type === "MULTI_SELECT" ? [] : ["IN", "NOT_IN"])].includes(k) : !["CONTAINS_OPTION", "NOT_CONTAINS_OPTION", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(k)) &&
         (source?.config?.allow_other || !["OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(k)) &&
         (ordered || ![
           "GREATER_THAN",
@@ -2198,8 +2291,8 @@ function ConditionRow({ row, fields, change }: any) {
     ),
     noValue = ["IS_EMPTY", "IS_NOT_EMPTY", "OTHER_SELECTED", "OTHER_NOT_SELECTED"].includes(row.operator);
   useEffect(() => {
-    if (["IN", "NOT_IN"].includes(row.operator) && JSON.stringify(listValues(listText, source)) !== JSON.stringify(row.value)) setListText(Array.isArray(row.value) ? row.value.join(", ") : String(row.value ?? ""));
-  }, [row.value, row.operator, source?.field_type]);
+    setListText(Array.isArray(row.value) ? row.value.join(", ") : String(row.value ?? ""));
+  }, [row.field_key, row.operator]);
   return (
     <div className="condition-row">
       <label>
@@ -2237,8 +2330,8 @@ function ConditionRow({ row, fields, change }: any) {
       {!noValue && (
         <label>
           Значение
-          {["CONTAINS_OPTION", "NOT_CONTAINS_OPTION"].includes(row.operator) ? <select value={String(row.value || "")} onChange={e => change({ ...row, value: e.target.value })}>{(source?.config?.option_items || []).map((option: any) => <option key={option.key} value={option.key}>{option.label}</option>)}</select> : ["IN", "NOT_IN"].includes(row.operator) ? (
-            <input required type="text" value={listText} placeholder="Значения через запятую" onChange={e => { setListText(e.target.value); change({ ...row, value: listValues(e.target.value, source) }); }}/>
+          {["CONTAINS_OPTION", "NOT_CONTAINS_OPTION"].includes(row.operator) ? <select value={String(row.value || "")} onChange={e => change({ ...row, value: e.target.value })}>{(source?.config?.option_items || []).map((option: any) => <option key={option.key} value={option.key}>{option.label}</option>)}</select> : source?.field_type === "MULTI_SELECT" && ["IN", "NOT_IN"].includes(row.operator) ? <div className="condition-option-list">{[...(source.config.option_items||[]),...(source.config.allow_other?[{key:"__other__",label:"Иное"}]:[])].map((option:any)=><label key={option.key}><input type="checkbox" checked={Array.isArray(row.value)&&row.value.includes(option.key)} onChange={event=>{const current=Array.isArray(row.value)?row.value:[];change({...row,value:event.target.checked?[...current,option.key]:current.filter((key:string)=>key!==option.key)});}}/>{option.label}</label>)}</div> : ["IN", "NOT_IN"].includes(row.operator) ? (
+            <input required type="text" value={listText} placeholder="Значения через запятую" onChange={e => setListText(e.target.value)} onBlur={() => change({ ...row, value: listValues(listText, source) })}/>
           ) : source?.field_type === "SINGLE_SELECT" ? (
             <select
               value={row.value}

@@ -40,12 +40,14 @@ export function conditionError(node: Condition | null | undefined, fields: any[]
     }
     if (["GREATER_THAN", "LESS_THAN", "GREATER_OR_EQUAL", "LESS_OR_EQUAL"].includes(item.operator) && !["INTEGER", "DECIMAL", "MONEY", "DATE"].includes(field.field_type)) return `Оператор не подходит для поля «${field.label}».`;
     if (["IS_EMPTY", "IS_NOT_EMPTY"].includes(item.operator)) return null;
+    if (field.field_type === "MULTI_SELECT" && !["IN", "NOT_IN"].includes(item.operator)) return "Для множественного выбора используйте «содержит вариант» или «входит в список».";
     const validValue = (value: unknown) => {
       if (field.field_type === "BOOLEAN") return typeof value === "boolean";
       if (field.field_type === "INTEGER") return typeof value === "number" && Number.isInteger(value);
       if (["DECIMAL", "MONEY"].includes(field.field_type)) return typeof value === "number" && Number.isFinite(value);
       if (field.field_type === "DATE") return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
       if (field.field_type === "SINGLE_SELECT") return typeof value === "string" && (field.config?.options || []).includes(value);
+      if (field.field_type === "MULTI_SELECT") return typeof value === "string" && [...(field.config?.option_items || []).map((option: any) => option.key), ...(field.config?.allow_other ? ["__other__"] : [])].includes(value);
       return typeof value === "string";
     };
     if (["IN", "NOT_IN"].includes(item.operator)) return !Array.isArray(item.value) || !item.value.length || item.value.length > 100 || !item.value.every(validValue) ? "Укажите корректные значения списка (не больше 100)." : null;

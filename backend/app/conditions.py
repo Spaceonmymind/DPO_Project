@@ -73,6 +73,9 @@ class ConditionEngine:
         expected = condition["value"]
         if operator == "EQUALS": return cls._equal(actual, expected)
         if operator == "NOT_EQUALS": return not cls._equal(actual, expected)
+        if operator in {"IN", "NOT_IN"} and isinstance(actual, dict) and isinstance(actual.get('selected'), list):
+            matched=any(item in choices.selected(actual) for item in expected)
+            return matched if operator=="IN" else not matched
         if operator == "IN": return any(cls._equal(actual, item) for item in expected)
         if operator == "NOT_IN": return not any(cls._equal(actual, item) for item in expected)
         if cls._empty(actual): return False
@@ -150,6 +153,8 @@ class ConditionEngine:
             raise ConditionConfigurationError(f"Оператор {operator} несовместим с типом {field.field_type}")
         if operator in {"IS_EMPTY", "IS_NOT_EMPTY"}:
             return
+        if field.field_type == 'MULTI_SELECT' and operator not in {'IN','NOT_IN'}:
+            raise ConditionConfigurationError('Для множественного выбора используйте «содержит вариант» или «входит в список»')
         value = node.get("value")
         if operator in {"IN", "NOT_IN"}:
             if not isinstance(value, list) or not value or len(value) > cls.MAX_LIST_VALUES:
@@ -169,7 +174,12 @@ class ConditionEngine:
     def _validate_value(cls, field: Any, value: Any) -> None:
         kind = field.field_type
         valid = False
-        if kind in {"TEXT", "MULTILINE_TEXT", "DATE", "SINGLE_SELECT"}:
+        if kind == "MULTI_SELECT":
+            cfg=field.config or {}
+            allowed={item['key'] for item in cfg.get('option_items',[])}
+            if cfg.get('allow_other'): allowed.add(choices.OTHER)
+            valid=isinstance(value,str) and value in allowed
+        elif kind in {"TEXT", "MULTILINE_TEXT", "DATE", "SINGLE_SELECT"}:
             valid = isinstance(value, str)
             if valid and kind == "DATE":
                 try: date.fromisoformat(value)

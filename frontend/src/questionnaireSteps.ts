@@ -1,5 +1,5 @@
 import { evaluateCondition, fieldState } from "./conditions";
-import { OTHER, choiceAnswer, isStructuredChoice } from "./choices";
+import { OTHER, choiceAnswer, choiceOtherValues, isStructuredChoice } from "./choices";
 
 export type QuestionnaireStep = { name: string; fields: any[]; groups: any[] };
 
@@ -33,7 +33,11 @@ function fieldError(field: any, value: any, required: boolean): string | undefin
     if (field.config.allow_other) allowed.add(OTHER);
     if (!value || typeof value !== "object" || !Array.isArray(value.selected) || typeof value.other_text !== "string" || keys.some((key: string) => !allowed.has(key)) || new Set(keys).size !== keys.length || (field.field_type === "SINGLE_SELECT" && keys.length > 1)) return "Выберите значение из списка";
     if (required && !keys.length) return "Обязательное поле";
-    if (keys.includes(OTHER) && field.config.other_required && !answer.other_text.trim()) return "Заполните вариант «Иное»";
+    const own=choiceOtherValues(answer);
+    if (answer.other_texts && (field.field_type!=="MULTI_SELECT" || own.length>20 || own.some(text=>typeof text!=="string" || text.length>1000) || own.join("").length>3000)) return "Проверьте собственные варианты";
+    const names=own.map(text=>text.trim().toLocaleLowerCase("ru")).filter(Boolean);
+    if (keys.includes(OTHER) && new Set(names).size!==names.length) return "Собственные варианты не должны повторяться";
+    if (keys.includes(OTHER) && field.config.other_required && !names.length) return "Заполните вариант «Иное»";
     return undefined;
   }
   if (["TEXT", "MULTILINE_TEXT"].includes(field.field_type)) {

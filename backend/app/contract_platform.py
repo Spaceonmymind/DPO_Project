@@ -133,7 +133,7 @@ def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; default_value:Any=None; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
@@ -148,6 +148,9 @@ class RepeatingFieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
 class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
 class AnswersPayload(BaseModel): answers:dict[str,Any]
+class CopyQuestionsPayload(BaseModel):
+ source_version_id:str
+ field_ids:list[str]|None=None
 class CandidateDecisionPayload(BaseModel):
  decision:str=Field(pattern=r'^(CONFIRMED|REJECTED)$')
 class CandidateBatchPayload(BaseModel):
@@ -178,8 +181,27 @@ def validate_field_payload(p):
   _validate_components(p.components)
  try: ValueFormatter.validate(p.output_format)
  except CalculationError as exc: raise HTTPException(422,detail=str(exc))
+ validate_default_value(p)
+def validate_default_value(p):
+ value=p.default_value
+ if value is None:return
+ if p.calculated:raise HTTPException(422,detail='Вычисляемому вопросу нельзя задать значение по умолчанию')
+ kind=p.field_type
+ if kind in {'TEXT','MULTILINE_TEXT','DATE'} and not isinstance(value,str):raise HTTPException(422,detail='Значение по умолчанию должно быть текстом')
+ if kind=='INTEGER' and (not isinstance(value,int) or isinstance(value,bool)):raise HTTPException(422,detail='Значение по умолчанию должно быть целым числом')
+ if kind in {'DECIMAL','MONEY'} and (not isinstance(value,(int,float)) or isinstance(value,bool)):raise HTTPException(422,detail='Значение по умолчанию должно быть числом')
+ if kind=='BOOLEAN' and not isinstance(value,bool):raise HTTPException(422,detail='Значение по умолчанию должно быть «Да» или «Нет»')
+ if kind=='SINGLE_SELECT' and not isinstance(value,dict) and not isinstance(value,str):raise HTTPException(422,detail='Выберите допустимый вариант по умолчанию')
+ if kind=='MULTI_SELECT' and not isinstance(value,dict):raise HTTPException(422,detail='Выберите допустимые варианты по умолчанию')
+ if kind=='LIST' and not isinstance(value,list):raise HTTPException(422,detail='Значение по умолчанию должно быть списком')
+ if kind=='COMPOSITE' and not isinstance(value,dict):raise HTTPException(422,detail='Значение по умолчанию должно быть составным объектом')
+ if message:=validate_answer(type('DefaultField',(),{'field_type':kind,'required':p.required,'config':field_config(p)})(),value):
+  raise HTTPException(422,detail=f'Значение по умолчанию: {message}')
 def calculation_config(p): return {'calculated':p.calculated,'expression':p.expression,'precision':p.precision,'rounding':p.rounding,'output_format':p.output_format}
-def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'default_value':p.default_value,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
+def canonical_group(name,fields):
+ clean=' '.join(name.split()) or 'Основные сведения'
+ return next((item.config['group'] for item in fields if ' '.join((item.config or {}).get('group','').split()).casefold()==clean.casefold()),clean)
 def repeating_field_config(p): return {'description':p.description,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,**calculation_config(p)}
 def _validate_components(components,depth=1):
  if depth>4:raise HTTPException(422,detail='Вложенность составного поля не может превышать 4 уровня')
@@ -520,7 +542,7 @@ def validate_regions(v,s,bindings=None):
   hashes=loc.get('element_hashes') or [loc.get('element_hash')]
   if [_element_hash(x) for x in actual]!=hashes: raise HTTPException(422,detail=f'Locator области «{region.region_key}» устарел')
   for old in seen:
-   if _regions_overlap(old,region): raise HTTPException(422,detail=f'Условные области «{old.region_key}» и «{region.region_key}» пересекаются или вложены')
+   if _regions_overlap(old,region): raise HTTPException(422,detail=f'Условные области «{old.region_key}» и «{region.region_key}» частично пересекаются либо имеют одинаковые границы')
   seen.append(region)
  if bindings:
   for b in bindings:
@@ -529,29 +551,46 @@ def validate_regions(v,s,bindings=None):
      a,z=b.locator['text_start'],b.locator['text_end']; c,d=r.locator['text_start'],r.locator['text_end']
      if a<d and z>c and not (a>=c and z<=d): raise HTTPException(422,detail='Обычная привязка частично пересекает условный фрагмент')
  return regions
+def _region_contains(parent,child):
+ """Strict OOXML containment; equal targets and crossing ranges are conflicts."""
+ p,c=parent.locator,child.locator
+ if p.get('part')!=c.get('part'): return False
+ pt,ct=parent.region_type,child.region_type
+ if pt=='CONDITIONAL_RUN':
+  return ct=='CONDITIONAL_RUN' and p['node']==c['node'] and p['text_start']<=c['text_start'] and c['text_end']<=p['text_end'] and (p['text_start'],p['text_end'])!=(c['text_start'],c['text_end'])
+ if pt=='CONDITIONAL_TABLE':
+  prefix=f"{p['part']}#/tbl[{p['table']}]"
+  return ct!='CONDITIONAL_TABLE' and (c.get('table')==p.get('table') or c.get('node','').startswith(prefix+'/'))
+ if pt=='CONDITIONAL_TABLE_ROW':
+  prefix=f"{p['part']}#/tbl[{p['table']}]/tr[{p['row']}]"
+  return ct not in {'CONDITIONAL_TABLE','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE_COLUMN'} and c.get('node','').startswith(prefix+'/')
+ if pt=='CONDITIONAL_TABLE_COLUMN':
+  return ct not in {'CONDITIONAL_TABLE','CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE_COLUMN'} and any(c.get('node','').startswith(node+'/') for node in p.get('cell_nodes',[]))
+ if pt=='CONDITIONAL_PARAGRAPH_GROUP':
+  own=set(p.get('nodes',[])); other=set(c.get('nodes',[]))
+  if ct=='CONDITIONAL_PARAGRAPH_GROUP': return bool(other) and other<own
+  return ct in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_RUN'} and c.get('node') in own
+ if pt=='CONDITIONAL_PARAGRAPH':
+  return ct=='CONDITIONAL_RUN' and c.get('node')==p.get('node')
+ return False
 def _regions_overlap(a,b):
  la,lb=a.locator,b.locator
  if la.get('part')!=lb.get('part'): return False
- # A run can be removed before its containing conditional paragraph/group.
- # Keep run/run overlap checks below; only this exact parent relationship is safe.
- if {a.region_type,b.region_type} & {'CONDITIONAL_RUN'}:
-  run,parent=(a,b) if a.region_type=='CONDITIONAL_RUN' else (b,a)
-  if parent.region_type=='CONDITIONAL_PARAGRAPH_GROUP' and run.locator.get('node') in parent.locator.get('nodes',[]):
-   return False
- def paragraphs(region):
-  loc=region.locator
-  if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: return {loc['node']}
-  if region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': return set(loc['nodes'])
+ if _region_contains(a,b) or _region_contains(b,a): return False
+ ta,tb=a.region_type,b.region_type
+ if ta==tb=='CONDITIONAL_RUN' and la.get('node')==lb.get('node'):
+  return la['text_start']<lb['text_end'] and lb['text_start']<la['text_end']
+ if 'CONDITIONAL_TABLE_COLUMN' in {ta,tb}:
+  col,other=(a,b) if ta=='CONDITIONAL_TABLE_COLUMN' else (b,a)
+  if other.region_type=='CONDITIONAL_TABLE': return col.locator.get('table')==other.locator.get('table')
+  if other.region_type=='CONDITIONAL_TABLE_ROW': return col.locator.get('table')==other.locator.get('table')
+  return any(other.locator.get('node','').startswith(node+'/') for node in col.locator.get('cell_nodes',[]))
+ def scope(region):
+  loc=region.locator;kind=region.region_type
+  if kind in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: return loc.get('nodes',[loc.get('node')])
   prefix=f"{loc['part']}#/tbl[{loc['table']}]"
-  if region.region_type=='CONDITIONAL_TABLE_COLUMN': return {prefix+f"/column[{loc['column']}]"}
-  return {prefix+(f"/tr[{loc['row']}]" if region.region_type=='CONDITIONAL_TABLE_ROW' else '')}
- pa,pb=paragraphs(a),paragraphs(b)
- for x in pa:
-  for y in pb:
-   if x==y or x.startswith(y+'/') or y.startswith(x+'/'):
-    if a.region_type==b.region_type=='CONDITIONAL_RUN': return la['text_start']<lb['text_end'] and la['text_end']>lb['text_start']
-    return True
- return False
+  return [prefix+(f"/tr[{loc['row']}]" if kind=='CONDITIONAL_TABLE_ROW' else '')]
+ return any(x==y or x.startswith(y+'/') or y.startswith(x+'/') for x in scope(a) for y in scope(b))
 def _row_layout(row,grid_count):
  cells=[];cursor=1
  for physical,cell in enumerate(row.findall('./w:tc',NS),1):
@@ -655,6 +694,7 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
   for binding in bindings or []:
    if _field_in_group_row(binding.locator.get('node',''),group): raise HTTPException(422,detail=f'Обычная привязка пересекает строку-образец группы «{group.name}»')
   for region in regions or []:
+   if region.region_type=='CONDITIONAL_TABLE_COLUMN': continue
    for target in _group_targets(loc):
     for row_number in range(target['row'],target['row']+int(target.get('source_row_count',target.get('row_count',1)))):
      fake=type('RowRegion',(),{'region_type':'CONDITIONAL_TABLE_ROW','locator':{**target,'row':row_number}})()
@@ -691,7 +731,8 @@ def _parent_of(root,node):
 def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,repeating_groups=None,repeating_values=None,repeating_fields=None):
  regions=regions or []; included_region_ids=set(included_region_ids or [])
  repeating_groups=repeating_groups or []; repeating_values=repeating_values or {}; repeating_fields=repeating_fields or {}
- excluded=[x for x in regions if x.id not in included_region_ids]
+ excluded_all=[x for x in regions if x.id not in included_region_ids]
+ excluded=[x for x in excluded_all if not any(y.id!=x.id and _region_contains(y,x) for y in excluded_all)]
  bindings=[b for b in bindings if not any(_binding_inside_region(b,r) for r in excluded)]
  grouped={}
  for b in bindings: grouped.setdefault(b.locator['part'],{'bindings':[],'regions':[]})['bindings'].append(b)
@@ -761,7 +802,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not t or t.deleted_at or t.status!='ACTIVE' or not t.current_version_id: raise HTTPException(404,detail='Опубликованный шаблон не найден')
   v=s.get(TemplateVersion,t.current_version_id); schema=schema_for(v.id,s)
   if not schema or schema.status!='PUBLISHED': raise HTTPException(409,detail='Анкета шаблона не опубликована')
-  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'schema':schema_out(schema,s)}
+  defaults={field.field_key:copy.deepcopy(field.config['default_value']) for field in s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if (field.config or {}).get('default_value') is not None}
+  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'schema':schema_out(schema,s)}
  @r.get('/api/v1/contract-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
@@ -977,12 +1019,56 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u); v,t=owned_version(vid,u,s)
   if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
   return schema_out(schema_for(v.id,s,True,u),s)
+ @r.post(prefix+'/{tid}/versions/{vid}/copy-questions')
+ def copy_questions(tid:str,vid:str,p:CopyQuestionsPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u); target,t=owned_version(vid,u,s); require_draft(target)
+  if t.id!=tid or p.source_version_id==vid: raise HTTPException(422,detail='Выберите другую версию того же шаблона')
+  source=s.get(TemplateVersion,p.source_version_id)
+  if not source or source.template_id!=tid: raise HTTPException(404,detail='Исходная версия не найдена')
+  source_schema=schema_for(source.id,s)
+  if not source_schema: raise HTTPException(422,detail='В исходной версии нет анкеты')
+  source_fields=s.query(QuestionnaireField).filter_by(schema_id=source_schema.id).order_by(QuestionnaireField.position).all()
+  ids=set(p.field_ids) if p.field_ids is not None else {x.id for x in source_fields}
+  if not ids or len(ids)!=(len(p.field_ids) if p.field_ids is not None else len(ids)) or ids-{x.id for x in source_fields}:
+   raise HTTPException(422,detail='Выберите существующие вопросы без повторов')
+  selected=[x for x in source_fields if x.id in ids]
+  target_schema=schema_for(target.id,s,True,u)
+  existing=s.query(QuestionnaireField).filter_by(schema_id=target_schema.id).all()
+  occupied={x.field_key for x in existing}; collisions=occupied & {x.field_key for x in selected}
+  if collisions: raise HTTPException(409,detail={'message':'В целевой версии уже есть вопросы с такими ключами','field_keys':sorted(collisions)})
+  available=occupied|{x.field_key for x in selected}
+  dependencies=set()
+  def condition_keys(node):
+   if not isinstance(node,dict): return set()
+   return ({node['field_key']} if isinstance(node.get('field_key'),str) else set())|set().union(*(condition_keys(child) for child in node.get('conditions',[]) if isinstance(child,dict)))|condition_keys(node.get('condition'))|condition_keys(node.get('previous_condition'))
+  for x in selected:
+   cfg=x.config or {}
+   for condition in (cfg.get('visible_when'),cfg.get('required_when')):
+    if condition: dependencies|=condition_keys(condition)
+  missing=dependencies-available
+  if missing: raise HTTPException(422,detail={'message':'Добавьте зависимые вопросы к выбору','field_keys':sorted(missing)})
+  position=max((x.position for x in existing),default=0)
+  created=[]
+  for x in selected:
+   position+=1
+   item=QuestionnaireField(schema_id=target_schema.id,field_key=x.field_key,label=x.label,field_type=x.field_type,required=x.required,position=position,config=copy.deepcopy(x.config))
+   s.add(item);created.append(item)
+  s.flush()
+  try:
+   fields=s.query(QuestionnaireField).filter_by(schema_id=target_schema.id).all()
+   validate_condition_schema(fields);validate_calculations(target.id,s)
+  except HTTPException: s.rollback();raise
+  s.add(TemplateAuditEvent(template_id=t.id,template_version_id=target.id,actor_id=u.id,event_type='QUESTIONS_COPIED',metadata_json={'source_version_id':source.id,'count':len(created)}))
+  s.commit()
+  return {'count':len(created),'fields':[field_out(x) for x in created]}
  @r.post(prefix+'/{tid}/versions/{vid}/fields',status_code=201)
  def create_field(tid:str,vid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); schema=schema_for(v.id,s,True,u)
+  existing_fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all()
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
-  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config=field_config(p)); s.add(x); s.flush()
+  config=field_config(p);config['group']=canonical_group(p.group,existing_fields)
+  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config=config); s.add(x); s.flush()
   try:
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
    validate_regions(v,s)
@@ -999,7 +1085,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if occupied: raise HTTPException(409,detail='Позиция уже занята')
   if x.field_key!=p.field_key:
    for binding in s.query(DocumentBinding).filter_by(field_id=x.id): binding.binding_key=p.field_key
-  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=field_config(p); s.flush()
+  config=field_config(p);config['group']=canonical_group(p.group,s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.id!=x.id).all())
+  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=config; s.flush()
   try:
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
    validate_regions(v,s)

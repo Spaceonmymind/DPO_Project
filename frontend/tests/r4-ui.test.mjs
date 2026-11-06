@@ -43,7 +43,7 @@ test('builder exposes staged wide structural workspace',()=>{
   assert.match(builder,/data-locator/);
   assert.match(builder,/workspace-context-inspector/);
   assert.match(builder,/workspace-question-list/);
-  assert.match(readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8'),/grid-template-columns:minmax\(210px,240px\) minmax\(400px,1fr\) minmax\(300px,340px\)/);
+  assert.match(readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8'),/grid-template-columns:var\(--questions-pane-width,240px\) 12px minmax\(0,1fr\) 12px var\(--settings-pane-width,340px\)/);
   assert.match(styles,/preview-node:hover>.region-actions/);
 });
 

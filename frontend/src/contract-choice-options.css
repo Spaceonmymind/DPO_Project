@@ -66,6 +66,13 @@
   flex: none;
 }
 
+.contract-other-values { display: grid; gap: 8px; margin-top: 10px; }
+.contract-other-row { display: flex; align-items: center; gap: 8px; }
+.contract-other-row input { flex: 1; min-width: 0; }
+.contract-other-row button { flex: none; }
+.contract-other-values > button { justify-self: start; }
+@media (max-width: 480px) { .contract-other-row { flex-wrap: wrap; } }
+
 @media (max-width: 600px) {
   .contract-choice-options {
     grid-template-columns: 1fr;

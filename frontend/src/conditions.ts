@@ -22,8 +22,8 @@ export function evaluateCondition(condition:Condition|undefined|null,answers:Rec
  const equal=(a:any,b:any)=>typeof b==='number'?Number(a)===b:a===b;
  if(op==='EQUALS')return equal(actual,condition.value);
  if(op==='NOT_EQUALS')return !equal(actual,condition.value);
- if(op==='IN')return Array.isArray(condition.value)&&condition.value.some(x=>equal(actual,x));
- if(op==='NOT_IN')return Array.isArray(condition.value)&&!condition.value.some(x=>equal(actual,x));
+ if(op==='IN')return Array.isArray(condition.value)&&condition.value.some(x=>actual&&typeof actual==='object'&&Array.isArray((actual as any).selected)?(actual as any).selected.includes(x):equal(actual,x));
+ if(op==='NOT_IN')return Array.isArray(condition.value)&&!condition.value.some(x=>actual&&typeof actual==='object'&&Array.isArray((actual as any).selected)?(actual as any).selected.includes(x):equal(actual,x));
  if(empty(actual))return false;
  const left=ordered(actual),right=ordered(condition.value);
  if(op==='GREATER_THAN')return left>right;

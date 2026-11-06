@@ -1,7 +1,11 @@
 /* The three panes share the existing template builder and its API state. */
 .template-open .version-grid{grid-template-columns:132px minmax(0,1fr);gap:16px}
 .template-open .docx-preview,.template-open .document-canvas,.template-open .questionnaire-builder{min-width:0}
-.template-open .builder-grid{grid-template-columns:minmax(210px,240px) minmax(400px,1fr) minmax(300px,340px);gap:14px;align-items:start}
+.template-open .builder-grid{grid-template-columns:var(--questions-pane-width,240px) 12px minmax(0,1fr) 12px var(--settings-pane-width,340px);gap:0;align-items:start;min-width:0}
+.template-open .workspace-pane-divider{position:relative;align-self:stretch;min-height:440px;cursor:col-resize;touch-action:none;outline:none}
+.template-open .workspace-pane-divider::before{content:"";position:absolute;top:12px;bottom:12px;left:5px;width:2px;border-radius:2px;background:#dce9e3;transition:background .15s,width .15s}
+.template-open .workspace-pane-divider:hover::before,.template-open .workspace-pane-divider:focus-visible::before,.workspace-resizing .workspace-pane-divider::before{width:3px;background:#0d8168}
+.workspace-resizing,.workspace-resizing *{cursor:col-resize!important;user-select:none!important}
 .template-open .document-outline,.template-open .questionnaire-builder{position:sticky;top:12px;height:clamp(440px,calc(100vh - 270px),760px);max-height:none;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .template-open .document-outline{display:flex;flex-direction:column;padding:12px;background:#fff}
 .template-open .workspace-tabs{display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:3px;margin-bottom:16px;border-radius:9px;background:#edf4f1}
@@ -32,6 +36,8 @@
 .template-open .workspace-canvas-toolbar span{margin-top:2px;color:#71847c;font-size:11px}
 .template-open .workspace-canvas-toolbar label{display:flex;align-items:center;gap:6px;white-space:nowrap;color:#587067;font-size:11px}
 .template-open .workspace-canvas-toolbar select{height:30px;border:1px solid #c9dcd3;border-radius:7px;background:#fff;color:#254a3e}
+.template-open .workspace-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}
+.template-open .workspace-reset-layout{min-height:28px;padding:4px 7px;font-size:10px;line-height:1.2;white-space:nowrap}
 .template-open .document-canvas{height:clamp(440px,calc(100vh - 270px),760px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:10px;background:#f7faf8}
 .template-open .workspace-canvas-toolbar{position:sticky;top:0;z-index:3}
 .template-open .docx-page{width:min(860px,100%);min-width:0;box-sizing:border-box}
@@ -144,8 +150,8 @@
 .template-open #workspace-context-inspector>.region-editor>div:last-child{position:sticky;bottom:0;padding:8px 0;background:#fffaf0}
 .template-open .questionnaire-builder button:focus-visible,.template-open .document-outline button:focus-visible,.template-open .workspace-canvas-toolbar select:focus-visible{outline:2px solid #08755b;outline-offset:2px}
 @media(max-width:1450px){.template-open .version-grid{grid-template-columns:1fr}.template-open .version-list{display:flex;gap:8px;overflow:auto}.template-open .version-list h3{display:none}.template-open .version-list button{width:170px;flex:none}}
-@media(max-width:1180px){.template-open .builder-grid{grid-template-columns:minmax(200px,230px) minmax(0,1fr);gap:12px}.template-open .document-outline{display:flex}.template-open .questionnaire-builder{position:relative;grid-column:1/-1;width:100%;height:auto;max-height:none}.template-open .questionnaire-builder>.field-editor{max-width:680px}}
-@media(max-width:760px){.template-open .builder-grid{display:flex;flex-direction:column}.template-open .document-outline,.template-open .document-canvas,.template-open .questionnaire-builder{width:100%;box-sizing:border-box}.template-open .document-outline{position:relative;height:auto;max-height:340px}.template-open .document-canvas{height:min(65vh,620px)}.template-open .questionnaire-builder{margin-top:0}.template-open .docx-page{padding:30px 20px}.template-open .workspace-canvas-toolbar span{display:none}}
+@media(max-width:1180px){.template-open .builder-grid{grid-template-columns:minmax(200px,230px) minmax(0,1fr);gap:12px}.template-open .workspace-pane-divider{display:none}.template-open .document-outline{display:flex}.template-open .questionnaire-builder{position:relative;grid-column:1/-1;width:100%;height:auto;max-height:none}.template-open .questionnaire-builder>.field-editor{max-width:680px}}
+@media(max-width:760px){.template-open .builder-grid{display:flex;flex-direction:column}.template-open .document-outline,.template-open .document-canvas,.template-open .questionnaire-builder{width:100%;box-sizing:border-box}.template-open .document-outline{position:relative;height:auto;max-height:340px}.template-open .document-canvas{height:min(65vh,620px)}.template-open .questionnaire-builder{margin-top:0}.template-open .docx-page{padding:30px 20px}.template-open .workspace-canvas-toolbar span{display:none}.template-open .workspace-reset-layout{display:none}}
 @media(prefers-reduced-motion:reduce){.template-open .document-outline button{scroll-behavior:auto}}
 .choice-options-editor { min-width: 0; border: 1px solid #d7e5df; border-radius: 12px; padding: 12px; }
 .choice-options-editor legend { padding: 0 6px; font-weight: 600; }
@@ -171,3 +177,21 @@
 .template-open .condition-delete-warning,.condition-editor .condition-delete-warning{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px;border-radius:7px;background:#fff4e3;color:#85561f;font-size:11px}
 .template-open .condition-draft-note,.condition-editor .condition-draft-note{display:grid;gap:6px;padding:8px;border-radius:7px;background:#fff4e3;color:#85561f;font-size:11px;line-height:1.4}
 .template-open .condition-draft-note button,.condition-editor .condition-draft-note button{justify-self:start;font-size:11px}
+.copy-questions-panel{display:grid;gap:9px;margin:10px 0;padding:10px;border:1px solid #d8e6e1;border-radius:9px;background:#f8fcfa}
+.copy-questions-panel>button,.copy-questions-options>button{justify-self:start}
+.copy-questions-options{display:grid;gap:9px;min-width:0}
+.copy-questions-options>p{margin:0;color:#527066;font-size:12px}
+.copy-questions-list{display:grid;gap:6px;max-height:220px;overflow-y:auto}
+.copy-questions-list label{display:flex;align-items:flex-start;gap:7px;font-size:12px}
+.copy-questions-list input{flex:none}
+.condition-option-list{display:grid;gap:5px;max-height:180px;overflow-y:auto}
+.condition-option-list label{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500}
+.condition-option-list input{flex:none}
+.template-open .default-value-editor{display:block;padding:10px;border:1px solid #d8e6e1;border-radius:9px;background:#f8fcfa}
+.template-open .default-value-editor summary{cursor:pointer;color:#245648;font-size:12px;font-weight:750}
+.template-open .default-value-editor>label,.template-open .default-value-editor>div{margin-top:9px}
+.template-open .default-choice-values,.template-open .default-other-values,.template-open .default-list-values,.template-open .default-composite-values{display:grid;gap:8px;min-width:0}
+.template-open .default-other-values>div,.template-open .default-list-values>div{display:flex;gap:6px;min-width:0}
+.template-open .default-other-values input,.template-open .default-list-values input{flex:1;min-width:0}
+.template-open .default-other-values button,.template-open .default-list-values button{flex:none}
+.template-open .default-value-editor button{justify-self:start}

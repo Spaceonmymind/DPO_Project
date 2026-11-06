@@ -31,7 +31,7 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     if ((path.endsWith("/fields") && options.method === "POST") || (path.endsWith("/fields/field-1") && options.method === "PATCH")) {
       const payload = JSON.parse(options.body);
       writes.push(payload);
-      const created = { ...payload, id: "field-1", config: { group: payload.group, placeholder: payload.placeholder, options: payload.options || [] } };
+      const created = { ...payload, id: "field-1", config: { group: payload.group, placeholder: payload.placeholder, options: payload.options || [], default_value: payload.default_value } };
       if (options.method === "PATCH") fields[0] = created;
       else fields.push(created);
       return created;
@@ -57,10 +57,19 @@ test("empty draft: add question, fill form, save, and select it", async () => {
       setter.call(question, "Порядок оплаты");
       question.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     });
+    const groupInput=[...form.querySelectorAll("label")].find(label=>label.textContent.includes("Раздел"))?.querySelector("input");
+    await act(async()=>{const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,"value").set;setter.call(groupInput,"Сведения о Заказчике");groupInput.dispatchEvent(new dom.window.Event("input",{bubbles:true}));});
+    const defaultDetails = form.querySelector(".default-value-editor");
+    assert.ok(defaultDetails, "default value is available in the question editor");
+    await act(async () => defaultDetails.querySelector('input[type="checkbox"]').click());
+    const defaultInput = defaultDetails.querySelector('input[type="text"]');
+    await act(async () => { const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set; setter.call(defaultInput, "Москва"); defaultInput.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
     await act(async () => { form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })); });
     assert.equal(writes.length, 1);
     assert.equal(writes[0].label, "Порядок оплаты");
+    assert.equal(writes[0].default_value, "Москва");
     assert.match(dom.window.document.querySelector(".workspace-question-list").textContent, /Порядок оплаты/);
+    assert.match(dom.window.document.querySelector(".workspace-question-list").textContent,/Сведения о Заказчике/);
     form = dom.window.document.querySelector(".questionnaire-builder .field-editor");
     assert.ok(form, "the saved question remains selected for editing");
     assert.match(dom.window.document.querySelector(".workspace-inspector-header").textContent, /Редактирование вопроса/);
@@ -68,6 +77,7 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     assert.equal(dom.window.document.querySelector(".questionnaire-builder .field-editor"), null, "cancel closes the editor");
     await click(dom.window.document.querySelector(".workspace-inspector-empty button"));
     assert.ok(dom.window.document.querySelector(".questionnaire-builder .field-editor"), "the right Add button opens the same editor");
+    assert.equal(dom.window.document.querySelector('#questionnaire-existing-groups option[value="Сведения о Заказчике"]')?.value,"Сведения о Заказчике");
     await click(buttonWithText("Привязки к Word"));
     assert.notEqual(dom.window.getComputedStyle(dom.window.document.querySelector(".questionnaire-builder .field-editor")).display, "none", "form remains visible on the binding stage");
     await click(buttonWithText("Условия и таблицы"));
@@ -114,4 +124,48 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     dom.window.close();
     for (const [key, descriptor] of Object.entries(previous)) descriptor ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key];
   }
+});
+
+test("copy questions from another version selects dependencies and refreshes the draft", async () => {
+  const dom=new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",{url:"http://localhost/templates"});
+  const globals={window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,Node:dom.window.Node,IS_REACT_ACT_ENVIRONMENT:true,crypto:dom.window.crypto};
+  const previous=Object.fromEntries(Object.keys(globals).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  for(const [key,value] of Object.entries(globals))Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
+  const server=await createServer({server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
+  const {TemplateAdmin}=await server.ssrLoadModule("/src/TemplateAdmin.tsx");
+  const React=await import("react");const {act}=React;const {createRoot}=await import("react-dom/client");const root=createRoot(dom.window.document.getElementById("root"));
+  const older={id:"old",template_id:"template-1",version_number:1,status:"PUBLISHED",original_filename:"old.docx"};
+  const newer={id:"new",template_id:"template-1",version_number:2,status:"DRAFT",original_filename:"new.docx"};
+  const source=[{id:"a",field_key:"payment",label:"Оплата",field_type:"TEXT",config:{group:"Финансы"}},{id:"b",field_key:"advance",label:"Аванс",field_type:"TEXT",config:{group:"Финансы",visible_when:{operator:"IS_NOT_EMPTY",field_key:"payment"}}}];
+  const target=[];const writes=[];
+  const api=async(path,options={})=>{
+    if(path==="/document-templates")return[{id:"template-1",name:"Договор",category:"Договоры",version_count:2}];
+    if(path.endsWith("/versions"))return[newer,older];
+    if(path.endsWith("/preview"))return{nodes:[{locator:"word/document.xml#/p[1]",kind:"paragraph",text:"Текст"}]};
+    if(path.endsWith("/questionnaire"))return{fields:path.includes("/old/")?source:[...target]};
+    if(/\/(bindings|conditional-regions|repeating-groups|binding-candidates)$/.test(path))return[];
+    if(path.endsWith("/copy-questions")&&options.method==="POST"){
+      const request=JSON.parse(options.body);writes.push(request);
+      target.push(...source.filter(field=>request.field_ids.includes(field.id)));
+      return{count:target.length,fields:target};
+    }
+    throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
+  };
+  const button=text=>[...dom.window.document.querySelectorAll("button")].find(item=>item.textContent.includes(text));
+  const click=async item=>{assert.ok(item);await act(async()=>item.click());};
+  try{
+    await act(async()=>root.render(React.createElement(TemplateAdmin,{api})));
+    await click(button("Договор"));await click(button("Версия 2"));await click(button("Вопросы анкеты"));
+    await click(button("Скопировать вопросы из другой версии"));
+    const selector=dom.window.document.querySelector(".copy-questions-panel select");
+    await act(async()=>{selector.value="old";selector.dispatchEvent(new dom.window.Event("change",{bubbles:true}));});
+    assert.match(dom.window.document.querySelector(".copy-questions-panel").textContent,/Выбрано вопросов: 2/);
+    const boxes=dom.window.document.querySelectorAll(".copy-questions-list input");
+    await click(boxes[0]);
+    assert.match(dom.window.document.querySelector(".copy-questions-panel [role=alert]").textContent,/Оплата/);
+    await click(button("Добавить зависимости"));
+    await click(button("Скопировать выбранные вопросы"));
+    assert.equal(writes.length,1);assert.deepEqual(new Set(writes[0].field_ids),new Set(["a","b"]));
+    assert.match(dom.window.document.querySelector(".workspace-question-list").textContent,/Аванс/);
+  }finally{await act(async()=>root.unmount());await server.close();dom.window.close();for(const [key,descriptor] of Object.entries(previous))descriptor?Object.defineProperty(globalThis,key,descriptor):delete globalThis[key];}
 });

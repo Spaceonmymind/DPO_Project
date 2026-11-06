@@ -32,6 +32,22 @@ def test_choices_validation_and_legacy():
     assert validate_active_answers([old], {'services': 'Старый вариант'}) == {}
 
 
+def test_multiple_custom_values_and_inactive_other():
+    answer={'selected':['catering',choices.OTHER],'other_text':'Аренда помещения','other_texts':['Аренда помещения','Доставка оборудования']}
+    assert choices.validate_answer(answer,CONFIG,True,required=True) is None
+    assert choices.render(answer,CONFIG)=='Кейтеринг, Аренда помещения, Доставка оборудования'
+    assert choices.validate_answer({**answer,'other_texts':['Аренда',' аренда ']},CONFIG,True)=='Собственные варианты не должны повторяться'
+    assert choices.validate_answer({**answer,'other_texts':['','']},CONFIG,True)=='Заполните вариант «Иное»'
+    assert choices.render({**answer,'selected':['catering']},CONFIG)=='Кейтеринг'
+    assert ConditionEngine.evaluate({'operator':'CONTAINS_OPTION','field_key':'services','value':'catering'},{'services':answer})
+    list_rule={'operator':'IN','field_key':'services','value':['catering','entertainment']}
+    ConditionEngine.validate_condition(list_rule,[field()])
+    assert ConditionEngine.evaluate(list_rule,{'services':answer})
+    assert not ConditionEngine.evaluate({'operator':'NOT_IN','field_key':'services','value':['catering']},{'services':answer})
+    assert ConditionEngine.evaluate({'operator':'NOT_IN','field_key':'services','value':['entertainment']},{'services':answer})
+    assert not ConditionEngine.evaluate({'operator':'OTHER_SELECTED','field_key':'services'},{'services':{**answer,'selected':['catering']}})
+
+
 def test_choice_conditions_nested_and_schema():
     source = field()
     leaf = {'operator': 'CONTAINS_OPTION', 'field_key': 'services', 'value': 'catering'}

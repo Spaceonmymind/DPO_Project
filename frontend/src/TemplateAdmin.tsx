@@ -25,13 +25,15 @@ import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type Nam
 import { blockUnitLocator, resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { layoutPreviewNodes } from "./docxPreviewLayout";
 import { useDocxVirtualPreview } from "./docxVirtualPreview";
+import { TemplateQuestionnairePreview } from "./TemplateQuestionnairePreview";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
-import { OTHER, choiceAnswer, choiceOtherValues, isStructuredChoice } from "./choices";
+import { OTHER, choiceAnswer, isStructuredChoice } from "./choices";
 import { CHARACTER_SETS } from "./textRules";
 import { DEFAULT_PANES, fitPaneWidths, PANE_STORAGE_KEY, readPaneWidths, type PaneWidths } from "./paneLayout";
 type Api = (path: string, options?: any) => Promise<any>;
+const EMPTY_PREVIEW_BLOCKS: any[] = [];
 const TYPES: any = {
   TEXT: "Короткий текст",
   MULTILINE_TEXT: "Многострочный текст",
@@ -118,8 +120,9 @@ function TemplateBuilder({ api }: { api: Api }) {
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
   const [paneAvailable, setPaneAvailable] = useState(0);
   const [requisiteSets, setRequisiteSets] = useState<any[]>([]);
+  const [requisiteSetsReady, setRequisiteSetsReady] = useState(false);
   const testAnswerVersionRef = useRef<string | undefined>(undefined);
-  useEffect(() => { api("/requisite-sets?include_archived=true").then(setRequisiteSets).catch(() => setRequisiteSets([])); }, [api]);
+  useEffect(() => { api("/requisite-sets?include_archived=true").then(setRequisiteSets).catch(() => setRequisiteSets([])).finally(() => setRequisiteSetsReady(true)); }, [api]);
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
     [versions, setVersions] = useState<any[]>([]),
@@ -182,7 +185,27 @@ function TemplateBuilder({ api }: { api: Api }) {
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
   const previewBlocks = useMemo(() => layoutPreviewNodes(preview?.nodes || []), [preview]);
-  const virtualPreview = useDocxVirtualPreview(previewBlocks, canvasRef, pageRef, zoom);
+  const virtualPreview = useDocxVirtualPreview(stage === 6 ? EMPTY_PREVIEW_BLOCKS : previewBlocks, canvasRef, pageRef, zoom);
+  useEffect(() => {
+    if (!schema || !requisiteSetsReady) return;
+    setTestAnswers((current:any) => {
+      const next = { ...current };
+      let changed = false;
+      for (const item of schema.fields || []) {
+        if (next[item.field_key] !== undefined) continue;
+        const config = item.config || {};
+        let value = config.default_value;
+        const source = config.default_source;
+        if (source) {
+          const set = requisiteSets.find((entry:any) => entry.id === source.set_id && entry.status === "ACTIVE");
+          const entry = set?.entries?.find((candidate:any) => candidate.key === source.field_key);
+          value = entry?.value !== undefined && entry?.value !== null && entry?.value !== "" ? entry.value : source.fallback === "FIXED" ? value : null;
+        }
+        if (value !== undefined && value !== null) { next[item.field_key] = value; changed = true; }
+      }
+      return changed ? next : current;
+    });
+  }, [schema, requisiteSets, requisiteSetsReady]);
   useEffect(() => {
     const grid = builderGridRef.current;
     if (!grid) return;
@@ -321,11 +344,11 @@ function TemplateBuilder({ api }: { api: Api }) {
     setStage(1);
     setVersions(await api(`/document-templates/${x.id}/versions`));
   }
-  async function openVersion(x: any) {
+  async function openVersion(x: any, options: { stage?: number; skipPreview?: boolean } = {}) {
     setVersion(x);
     setPendingFieldDelete(null);
     setCopyOpen(false);setCopySourceId("");setCopyFields([]);setCopySelected([]);
-    setStage(2);
+    setStage(options.stage ?? 2);
     setSelection(null);
     setActiveBinding(null);
     setSelectionDraft(null);
@@ -340,7 +363,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     setRepeatBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
       [p, q, links, areas, repeaters, candidates] = await Promise.all([
-        api(b + "/preview"),
+        options.skipPreview ? Promise.resolve(null) : api(b + "/preview"),
         api(b + "/questionnaire"),
         api(b + "/bindings"),
         api(b + "/conditional-regions"),
@@ -352,8 +375,11 @@ function TemplateBuilder({ api }: { api: Api }) {
     setTestAnswers((current:any) => {
       const previous = testAnswerVersionRef.current === x.id ? current : {};
       testAnswerVersionRef.current = x.id;
-      return Object.fromEntries((q.fields || []).map((item:any) => {
+      return {
+        ...Object.fromEntries((q.repeating_groups || []).filter((group:any) => previous[group.group_key] !== undefined).map((group:any) => [group.group_key, previous[group.group_key]])),
+        ...Object.fromEntries((q.fields || []).map((item:any) => {
         const value = previous[item.field_key];
+        if (value === undefined) return [item.field_key, undefined];
         if (isStructuredChoice(item)) {
           const answer = choiceAnswer(value);
           const allowed = new Set([...(item.config?.option_items || []).map((option:any) => option.key), ...(item.config?.allow_other ? [OTHER] : [])]);
@@ -361,7 +387,8 @@ function TemplateBuilder({ api }: { api: Api }) {
         }
         if (item.field_type === "SINGLE_SELECT" && value && !(item.config?.options || []).includes(value)) return [item.field_key, ""];
         return [item.field_key, value];
-      }));
+        })),
+      };
     });
     setTestDocument(null);
     setBindings(links);
@@ -856,7 +883,7 @@ function TemplateBuilder({ api }: { api: Api }) {
         `/document-templates/${selected.id}/versions/${version.id}/publish`,
         { method: "POST" },
       );
-      await openVersion(x);
+      await openVersion(x, { stage: 6, skipPreview: true });
       await load();
       setSelected({ ...selected, status: "ACTIVE" });
       setNotice("Версия опубликована и доступна сотрудникам.");
@@ -872,6 +899,13 @@ function TemplateBuilder({ api }: { api: Api }) {
       await load(); setPendingAction(null);
       setNotice(action === "delete" ? "Шаблон удалён." : action === "archive" ? "Шаблон убран из каталога." : "Шаблон восстановлен в каталоге.");
     });
+  }
+  async function showStage(next: number) {
+    if (next !== 6 && version && !preview) {
+      try { setPreview(await api(`/document-templates/${version.template_id}/versions/${version.id}/preview`)); }
+      catch (e:any) { setError(e.message || "Не удалось открыть исходный DOCX"); return; }
+    }
+    setStage(next);
   }
   const selectedCopyFields=copyFields.filter(item=>copySelected.includes(item.id));
   const questionGroup=(item:any)=>editing===item.id&&showFieldEditor ? field.group : item.config?.group || "Основные сведения";
@@ -896,6 +930,7 @@ function TemplateBuilder({ api }: { api: Api }) {
   const previewActions = useRef({ previewBlockEnd, draftRegion, chooseBlock, draftRepeatingGroup, chooseRepeatingBlock });
   previewActions.current = { previewBlockEnd, draftRegion, chooseBlock, draftRepeatingGroup, chooseRepeatingBlock };
   const previewContent = useMemo(() => {
+  if (stage === 6) return null;
   const renderPreviewNode = (node: any) => {
                               const active = activeBlockRange?.locators.has(node.locator) || false;
                               const unit=blockUnitLocator(node.locator) || node.locator;
@@ -1039,7 +1074,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       })}
       <div className="docx-virtual-spacer" style={{ height: virtualPreview.bottom }} aria-hidden="true" />
     </>;
-  }, [previewBlocks, virtualPreview.range, virtualPreview.top, virtualPreview.bottom, virtualPreview.measure, activeBlockRange, savedBlockMarkers, firstBlockUnitNode, regions, repeatingGroups, bindings, schema?.fields, version?.status, blockStart, repeatBlockStart]);
+  }, [stage, previewBlocks, virtualPreview.range, virtualPreview.top, virtualPreview.bottom, virtualPreview.measure, activeBlockRange, savedBlockMarkers, firstBlockUnitNode, regions, repeatingGroups, bindings, schema?.fields, version?.status, blockStart, repeatBlockStart]);
   return (
     <div className={`page template-admin ${selected ? "template-open" : ""}`}>
       <header className="pagehead">
@@ -1052,12 +1087,12 @@ function TemplateBuilder({ api }: { api: Api }) {
           </span>
         </div>
       </header>
-      {error && (
+      {error && stage !== 6 && (
         <div className="platform-error" role="alert">
           {error}
         </div>
       )}
-      {notice && (
+      {notice && stage !== 6 && (
         <div className="platform-success" role="status">
           {notice}
         </div>
@@ -1170,13 +1205,13 @@ function TemplateBuilder({ api }: { api: Api }) {
                     key={step}
                     className={stage === step ? "active" : ""}
                     aria-current={stage === step ? "step" : undefined}
-                    onClick={() => setStage(step)}
+                    onClick={() => void showStage(step)}
                   >
                     <span>{index + 1}</span>{label}
                   </button>
                 ))}
               </nav>
-              <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (
@@ -1270,23 +1305,6 @@ function TemplateBuilder({ api }: { api: Api }) {
                               </div>
                               </div>
                             </details>
-                          )}
-                          {stage===6&&version.status==="DRAFT"&&(
-                            <section className="selection-card draft-test-drive" aria-label="Тестовая генерация черновика">
-                              <FileText/><div><h3>Проверка документа</h3><p>Проверьте заполнение настроенных полей перед публикацией. Остальные фрагменты Word останутся без изменений.</p>
-                              <div className="scenario-facts">{(schema?.fields||[]).map((item:any)=><TestDriveField key={item.id} field={item} value={testAnswers[item.field_key]} change={(value:any)=>setTestAnswers({...testAnswers,[item.field_key]:value})}/>)}</div>
-                              <button type="button" disabled={busy} onClick={generateTestDocument}>Сформировать тестовый DOCX</button>
-                              {testDocument&&<a className="primary" href={testDocument.download_url}><Download size={15}/>Скачать тестовый DOCX</a>}
-                              <button
-                                type="button"
-                                className="primary"
-                                disabled={busy}
-                                onClick={publish}
-                              >
-                                {busy ? "Публикация..." : "Опубликовать"}
-                              </button>
-                              </div>
-                            </section>
                           )}
                           <div className="preview-notice">
                             Выделите текст для привязки или условного фрагмента.
@@ -2230,7 +2248,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                     <Empty upload />
                   )}
                 </section>
-              </div>
+              </div>}
             </>
           )}
         </main>
@@ -2247,19 +2265,6 @@ function InspectorPortal({ children }: { children: React.ReactNode }) {
     setTarget(document.getElementById("workspace-context-inspector"));
   }, []);
   return target ? createPortal(children, target) : null;
-}
-
-export function TestDriveField({field,value,change}:any){
-  if(field.field_type==="BOOLEAN")return <label>{field.label}<select value={String(value??"")} onChange={e=>change(e.target.value===""?null:e.target.value==="true")}><option value="">Не выбрано</option><option value="true">Да</option><option value="false">Нет</option></select></label>;
-  if(isStructuredChoice(field)){
-    const answer=choiceAnswer(value),multiple=field.field_type==="MULTI_SELECT";
-    const options=[...field.config.option_items,...(field.config.allow_other?[{key:OTHER,label:"Иное"}]:[])];
-    return <fieldset className="test-drive-choice"><legend>{field.label}</legend><div className="test-drive-options">{options.map((option:any)=><label key={option.key}><input type={multiple?"checkbox":"radio"} name={`test-${field.id}`} checked={answer.selected.includes(option.key)} onChange={event=>change({...answer,selected:multiple?event.target.checked?[...answer.selected,option.key]:answer.selected.filter(key=>key!==option.key):[option.key]})}/><span>{option.label}</span></label>)}</div>{answer.selected.includes(OTHER)&&(multiple?<div className="test-drive-other">{choiceOtherValues(answer).map((text,index)=><div key={index}><input aria-label={`Свой вариант ${index+1}`} value={text} onChange={event=>{const other_texts=[...choiceOtherValues(answer)];other_texts[index]=event.target.value;change({...answer,other_text:other_texts[0]||"",other_texts});}}/><button type="button" onClick={()=>{const other_texts=choiceOtherValues(answer).filter((_,position)=>position!==index);change({...answer,other_text:other_texts[0]||"",other_texts});}}>Удалить</button></div>)}<button type="button" onClick={()=>change({...answer,other_texts:[...choiceOtherValues(answer),""]})}>Добавить свой вариант</button></div>:<input aria-label="Свой вариант" value={answer.other_text} onChange={event=>change({...answer,other_text:event.target.value})}/>)}</fieldset>;
-  }
-  if(field.field_type==="SINGLE_SELECT")return <label>{field.label}<select value={value??""} onChange={e=>change(e.target.value)}><option value="">Не выбрано</option>{(field.config?.options||[]).map((option:string)=><option key={option}>{option}</option>)}</select></label>;
-  if(field.field_type==="LIST")return <label>{field.label}<textarea value={(value||[]).join("\n")} onChange={e=>change(e.target.value.split("\n").filter(Boolean))}/></label>;
-  if(field.field_type==="COMPOSITE")return <fieldset><legend>{field.label}</legend>{(field.config?.components||[]).map((part:any)=><label key={part.key}>{part.label}<input value={(value||{})[part.key]||""} onChange={e=>change({...value,[part.key]:e.target.value})}/></label>)}</fieldset>;
-  return <label>{field.label}<input type={field.field_type==="DATE"?"date":field.field_type==="INTEGER"||field.field_type==="DECIMAL"?"number":"text"} value={value??""} onChange={e=>change(field.field_type==="INTEGER"||field.field_type==="DECIMAL"?Number(e.target.value):e.target.value)}/></label>;
 }
 
 const OPS: any = {

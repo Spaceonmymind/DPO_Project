@@ -1,0 +1,32 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Template questionnaire preview</title></head><body><div id="root"></div><script type="module">
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { TemplateAdmin } from "/src/TemplateAdmin.tsx";
+import "/src/styles.css";
+import "/src/enhancements.css";
+const template={id:"template-1",name:"Тестовый договор",category:"Договоры",status:"DRAFT",version_count:1};
+let version={id:"version-1",template_id:template.id,version_number:1,status:"DRAFT",original_filename:"test.docx"};
+const fields=[
+  {id:"payment",field_key:"payment",label:"Порядок оплаты",field_type:"SINGLE_SELECT",required:true,position:1,config:{group:"Оплата",options:["POST","PARTIAL"],default_value:"POST"}},
+  {id:"percent",field_key:"percent",label:"Процент предоплаты",field_type:"INTEGER",required:false,position:2,config:{group:"Оплата",default_value:30,visible_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"},required_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"}}},
+  {id:"services",field_key:"services",label:"Услуги",field_type:"MULTI_SELECT",required:false,position:3,config:{group:"Дополнительно",option_items:[{key:"food",label:"Кейтеринг"}],allow_other:true,other_required:true}},
+  {id:"calculated",field_key:"calculated",label:"Расчёт",field_type:"INTEGER",required:false,position:4,config:{group:"Оплата",calculated:true,expression:{operation:"MULTIPLY",operands:[{source:"FIELD",field_key:"percent"},{source:"CONSTANT",value:2}]}}},
+  ...Array.from({length:156},(_,index)=>({id:`extra-${index}`,field_key:`extra_${index}`,label:`Дополнительный вопрос ${index+1}`,field_type:"TEXT",required:false,position:index+5,config:{group:"Дополнительно"}})),
+];
+const group={id:"group-1",group_key:"extras",name:"Иные услуги",required:false,min_items:0,max_items:5,position:1,config:{group:"Дополнительно"},fields:[{id:"row-description",field_key:"description",label:"Описание услуги",field_type:"TEXT",required:true,position:1,config:{}}]};
+const nodes=Array.from({length:3500},(_,index)=>({locator:`word/document.xml#/p[${index+1}]`,kind:"paragraph",text:`Фрагмент ${index+1}`}));
+window.__previewRequests=0;window.__testAnswers=null;window.__publishes=0;
+const api=async(path,options={})=>{
+  if(path==="/requisite-sets?include_archived=true")return [];
+  if(path==="/document-templates")return [template];
+  if(path.endsWith("/versions"))return [version];
+  if(path.endsWith("/preview")){window.__previewRequests++;return{nodes};}
+  if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group]};
+  if(path.endsWith("/repeating-groups"))return[group];
+  if(/\/(bindings|conditional-regions|binding-candidates)$/.test(path))return[];
+  if(path.endsWith("/test-drive")&&options.method==="POST"){window.__testAnswers=JSON.parse(options.body).answers;return{download_url:"/test.docx"};}
+  if(path.endsWith("/publish")&&options.method==="POST"){window.__publishes++;version={...version,status:"PUBLISHED"};return version;}
+  throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
+};
+createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin,{api}));
+</script></body></html>

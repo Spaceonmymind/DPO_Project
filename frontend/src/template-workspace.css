@@ -45,6 +45,20 @@
 .template-open .docx-page{width:min(860px,100%);min-width:0;box-sizing:border-box}
 .template-open .docx-virtual-block{display:flow-root}
 .template-open .docx-virtual-spacer{height:0;pointer-events:none}
+.template-open .template-questionnaire-preview{max-width:none;margin:20px 0 0;padding:32px clamp(18px,4vw,52px);border:1px solid #dce9e3;border-radius:16px;background:#f7faf8}
+.template-open .template-questionnaire-content{max-width:780px;margin:0 auto}
+.template-open .template-questionnaire-heading{margin-bottom:22px}
+.template-open .template-questionnaire-heading>span{color:#087d64;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.template-open .template-questionnaire-heading h2{margin:8px 0 5px;color:#18382e;font-size:clamp(24px,3vw,32px);letter-spacing:-.03em}
+.template-open .template-questionnaire-heading p{margin:0;color:#60776d;font-size:14px;line-height:1.5}
+.template-open .template-questionnaire-preview .questionnaire-steps{margin:0 0 22px}
+.template-open .template-questionnaire-preview .dynamic-form{max-width:none;margin:0}
+.template-open .template-questionnaire-preview .dynamic-form input:not([type="checkbox"]):not([type="radio"]),.template-open .template-questionnaire-preview .dynamic-form textarea,.template-open .template-questionnaire-preview .dynamic-form select{box-sizing:border-box;max-width:100%;width:100%}
+.template-open .template-questionnaire-empty{padding:22px;border:1px dashed #b8d5c9;border-radius:12px;background:#fff;color:#5e746b}
+.template-open .template-questionnaire-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:22px;padding-top:20px;border-top:1px solid #dce9e3}
+.template-open .template-questionnaire-actions button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:9px 16px}
+.template-open .template-questionnaire-actions p{width:100%;margin:0;color:#08755b;font-size:13px;font-weight:700}
+@media(max-width:760px){.template-open .template-questionnaire-preview{padding:22px 16px}.template-open .template-questionnaire-actions button{width:100%}}
 .template-open .docx-table-scroll{max-width:100%;overflow-x:auto;margin:0 0 11px}
 .template-open .docx-table{width:100%;border-collapse:collapse;table-layout:auto;font-family:Georgia,serif;color:#1e2925}
 .template-open .docx-table td{min-width:0;padding:4px 7px;border:1px solid #d5dcda;vertical-align:top}

@@ -445,6 +445,27 @@ def test_question_delete_keeps_conditional_region_and_always_includes_it():
     assert [paragraph.text for paragraph in rendered.paragraphs]==['VALUE','HELLO']
 
 
+def test_question_delete_ignores_preexisting_region_overlap_but_publish_detects_it():
+    from app.db import ConditionalDocumentRegion
+    client,headers,base,original=deletion_test_template('DELETE_OVERLAP')
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'unrelated','label':'Другой вопрос','field_type':'TEXT','position':1}).json()
+    locator=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='VALUE')
+    created=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'first','region_type':'CONDITIONAL_PARAGRAPH','start_locator':locator,'include_when':{'operator':'ALWAYS'}})
+    assert created.status_code==201,created.text
+    with SessionLocal() as session:
+        first=session.get(ConditionalDocumentRegion,created.json()['id'])
+        second=ConditionalDocumentRegion(template_version_id=first.template_version_id,region_key='conflicting',region_type=first.region_type,locator=first.locator.copy(),include_when={'operator':'ALWAYS'},original_text=first.original_text,created_by_id=first.created_by_id)
+        session.add(second);session.commit()
+        original_locator=first.locator.copy()
+    deleted=client.delete(base+f"/fields/{field['id']}",headers=headers)
+    assert deleted.status_code==204,deleted.text
+    regions=client.get(base+'/conditional-regions',headers=headers).json()
+    assert len(regions)==2 and all(region['locator']==original_locator for region in regions)
+    assert client.get(base+'/source',headers=headers).content==original
+    published=client.post(base+'/publish',headers=headers)
+    assert published.status_code==422 and 'пересекаются' in published.text
+
+
 def test_question_delete_prunes_nested_conditions_without_empty_groups():
     client,headers,base,_=deletion_test_template('DELETE_NESTED')
     fields={}

@@ -1318,7 +1318,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     s.delete(mapping)
    s.delete(x);s.flush()
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
-   bindings=validate_bindings(v,s);regions=validate_regions(v,s,bindings)
+   # Deletion changes conditions and bindings, but never region boundaries.
+   bindings=validate_bindings(v,s);regions=s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id,status='ACTIVE').all()
    validate_repeating_groups(v,s,bindings,regions)
    validate_calculations(v.id,s)
    s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='QUESTION_DELETED',metadata_json={'field_key':key,'dependency_count':len(dependencies)}))

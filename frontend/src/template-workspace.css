@@ -43,6 +43,8 @@
 .template-open .document-canvas{height:clamp(440px,calc(100vh - 270px),760px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:10px;background:#f7faf8}
 .template-open .workspace-canvas-toolbar{position:sticky;top:0;z-index:3}
 .template-open .docx-page{width:min(860px,100%);min-width:0;box-sizing:border-box}
+.template-open .docx-virtual-block{display:flow-root}
+.template-open .docx-virtual-spacer{height:0;pointer-events:none}
 .template-open .docx-table-scroll{max-width:100%;overflow-x:auto;margin:0 0 11px}
 .template-open .docx-table{width:100%;border-collapse:collapse;table-layout:auto;font-family:Georgia,serif;color:#1e2925}
 .template-open .docx-table td{min-width:0;padding:4px 7px;border:1px solid #d5dcda;vertical-align:top}

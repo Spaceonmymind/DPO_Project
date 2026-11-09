@@ -24,6 +24,7 @@ import { conditionError, conditionStats, replaceCondition, removeCondition, move
 import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type NamedCondition } from "./conditionFormula";
 import { blockUnitLocator, resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { layoutPreviewNodes } from "./docxPreviewLayout";
+import { useDocxVirtualPreview } from "./docxVirtualPreview";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
@@ -110,6 +111,8 @@ function TemplateBuilder({ api }: { api: Api }) {
   const { pending: formulaPending } = React.useContext(FormulaStatusContext);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const builderGridRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLElement | null>(null);
+  const pageRef = useRef<HTMLElement | null>(null);
   const dragRef = useRef<{ side: "questions" | "settings"; x: number; lastX: number; lineX: number; widths: PaneWidths; available: number; frame: number | null } | null>(null);
   const dragLineRef = useRef<HTMLDivElement | null>(null);
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
@@ -179,6 +182,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
   const previewBlocks = useMemo(() => layoutPreviewNodes(preview?.nodes || []), [preview]);
+  const virtualPreview = useDocxVirtualPreview(previewBlocks, canvasRef, pageRef, zoom);
   useEffect(() => {
     const grid = builderGridRef.current;
     if (!grid) return;
@@ -191,16 +195,20 @@ function TemplateBuilder({ api }: { api: Api }) {
   }, [version?.id, preview]);
   const fittedPanes = fitPaneWidths(paneWidths, paneAvailable || 2000);
   function applyPaneWidths(result: PaneWidths) {
+    virtualPreview.captureAnchor();
     setPaneWidths(result);
     window.localStorage.setItem(PANE_STORAGE_KEY, JSON.stringify(result));
+    window.requestAnimationFrame(() => virtualPreview.restoreAnchor());
   }
   function changePane(side: "questions" | "settings", next: number) {
     const width = builderGridRef.current?.clientWidth || paneAvailable || 2000;
     applyPaneWidths(fitPaneWidths({ ...fittedPanes, [side]: next }, width));
   }
   function resetPanes() {
+    virtualPreview.captureAnchor();
     setPaneWidths(DEFAULT_PANES);
     window.localStorage.removeItem(PANE_STORAGE_KEY);
+    window.requestAnimationFrame(() => virtualPreview.restoreAnchor());
   }
   function panePointerDown(event: React.PointerEvent<HTMLDivElement>, side: "questions" | "settings") {
     if (event.button !== 0 || dragRef.current) return;
@@ -867,9 +875,27 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   const selectedCopyFields=copyFields.filter(item=>copySelected.includes(item.id));
   const questionGroup=(item:any)=>editing===item.id&&showFieldEditor ? field.group : item.config?.group || "Основные сведения";
+  const questionActions = useRef({ editField });
+  questionActions.current = { editField };
+  const filteredQuestions = useMemo(() => {
+    const query = questionQuery.toLowerCase();
+    return (schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${questionGroup(item)}`.toLowerCase().includes(query));
+  }, [schema?.fields, questionQuery, editing, showFieldEditor, field.group]);
+  const bindingCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const binding of bindings) if (binding.field_id) counts.set(binding.field_id, (counts.get(binding.field_id) || 0) + 1);
+    return counts;
+  }, [bindings]);
+  const questionCards = useMemo(() => filteredQuestions.map((item:any) => {
+    const count = bindingCounts.get(item.id) || 0;
+    return <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>;
+  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group]);
   const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
   const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
   const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
+  const previewActions = useRef({ previewBlockEnd, draftRegion, chooseBlock, draftRepeatingGroup, chooseRepeatingBlock });
+  previewActions.current = { previewBlockEnd, draftRegion, chooseBlock, draftRepeatingGroup, chooseRepeatingBlock };
+  const previewContent = useMemo(() => {
   const renderPreviewNode = (node: any) => {
                               const active = activeBlockRange?.locators.has(node.locator) || false;
                               const unit=blockUnitLocator(node.locator) || node.locator;
@@ -881,9 +907,9 @@ function TemplateBuilder({ api }: { api: Api }) {
                               <div
                                 key={node.locator}
                                 tabIndex={0}
-                                onMouseEnter={() => previewBlockEnd(node.locator)}
+                                onMouseEnter={() => previewActions.current.previewBlockEnd(node.locator)}
                                 onMouseLeave={() => { if (blockStart) setBlockHover(undefined); }}
-                                onFocus={() => previewBlockEnd(node.locator)}
+                                onFocus={() => previewActions.current.previewBlockEnd(node.locator)}
                                 className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) ? "hidden-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""} ${active ? "block-range-active" : ""} ${blockStart && active && node.locator !== blockStart ? "block-range-preview" : ""} ${(startMarker || endMarker) && !active ? "block-boundary-saved" : ""}`}
                               >
                                 {startMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Начало блока</span>}
@@ -919,7 +945,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        draftRegion(
+                                        previewActions.current.draftRegion(
                                           "CONDITIONAL_PARAGRAPH",
                                           node.locator,
                                         )
@@ -930,7 +956,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: node.text.length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
                                     <button
                                       type="button"
-                                      onClick={() => chooseBlock(node.locator)}
+                                      onClick={() => previewActions.current.chooseBlock(node.locator)}
                                     >
                                       {blockStart
                                         ? "Конец блока"
@@ -955,7 +981,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         <button
                                           type="button"
                                           onClick={() =>
-                                            draftRegion(
+                                            previewActions.current.draftRegion(
                                               "CONDITIONAL_TABLE_ROW",
                                               node.locator,
                                             )
@@ -966,7 +992,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         <button
                                           type="button"
                                           onClick={() =>
-                                            draftRegion(
+                                            previewActions.current.draftRegion(
                                               "CONDITIONAL_TABLE",
                                               node.locator,
                                             )
@@ -974,18 +1000,18 @@ function TemplateBuilder({ api }: { api: Api }) {
                                         >
                                           Таблица
                                         </button>
-                                        <button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE_COLUMN", node.locator)}>Колонка</button>
+                                        <button type="button" onClick={() => previewActions.current.draftRegion("CONDITIONAL_TABLE_COLUMN", node.locator)}>Колонка</button>
                                         <button
                                           type="button"
                                           onClick={() =>
-                                            draftRepeatingGroup(node.locator)
+                                            previewActions.current.draftRepeatingGroup(node.locator)
                                           }
                                         >
                                           Сделать строку повторяемой
                                         </button>
                                         <button
                                           type="button"
-                                          onClick={() => chooseRepeatingBlock(node.locator)}
+                                          onClick={() => previewActions.current.chooseRepeatingBlock(node.locator)}
                                         >
                                           {repeatBlockStart ? "Завершить блок строк" : "Начать блок строк"}
                                         </button>
@@ -996,6 +1022,24 @@ function TemplateBuilder({ api }: { api: Api }) {
                               </div>
                             );
   };
+    return <>
+      <div className="docx-virtual-spacer" style={{ height: virtualPreview.top }} aria-hidden="true" />
+      {previewBlocks.slice(virtualPreview.range.start, virtualPreview.range.end).map((block, offset) => {
+        const index = virtualPreview.range.start + offset;
+        return <div className="docx-virtual-block" key={index} data-block-index={index} ref={element => virtualPreview.measure(index, element)}>
+          {block.kind === "paragraph" ? renderPreviewNode(block.node)
+                              : <div className="docx-table-scroll"><table className="docx-table"><tbody>
+                                  {block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) =>
+                                    <td key={cellIndex} colSpan={cell.colSpan} rowSpan={cell.rowSpan} className={cell.continuation ? "docx-merge-continuation" : undefined}>
+                                      {cell.nodes.map(renderPreviewNode)}
+                                    </td>
+                                  )}</tr>)}
+                                </tbody></table></div>}
+        </div>;
+      })}
+      <div className="docx-virtual-spacer" style={{ height: virtualPreview.bottom }} aria-hidden="true" />
+    </>;
+  }, [previewBlocks, virtualPreview.range, virtualPreview.top, virtualPreview.bottom, virtualPreview.measure, activeBlockRange, savedBlockMarkers, firstBlockUnitNode, regions, repeatingGroups, bindings, schema?.fields, version?.status, blockStart, repeatBlockStart]);
   return (
     <div className={`page template-admin ${selected ? "template-open" : ""}`}>
       <header className="pagehead">
@@ -1181,19 +1225,19 @@ function TemplateBuilder({ api }: { api: Api }) {
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
-                              {(schema?.fields || []).filter((item:any) => `${item.label} ${item.field_key} ${questionGroup(item)}`.toLowerCase().includes(questionQuery.toLowerCase())).map((item:any) => <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {bindings.filter((binding:any) => binding.field_id === item.id).length} привязок</small><em className={bindings.some((binding:any) => binding.field_id === item.id) ? "linked" : "unlinked"}>{bindings.some((binding:any) => binding.field_id === item.id) ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>)}
+                              {questionCards}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
-                              {schema?.fields?.length > 0 && !(schema.fields as any[]).some((item:any) => `${item.label} ${item.field_key} ${questionGroup(item)}`.toLowerCase().includes(questionQuery.toLowerCase())) && <p className="workspace-empty">По запросу ничего не найдено.</p>}
+                              {schema?.fields?.length > 0 && filteredQuestions.length === 0 && <p className="workspace-empty">По запросу ничего не найдено.</p>}
                             </nav>
                           </> : <>
                             <div className="workspace-panel-heading"><h3>Структура Word</h3><span>{preview.nodes.length}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label>
-                            <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => document.querySelector(`[data-locator="${CSS.escape(item.locator)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
+                            <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => virtualPreview.scrollToLocator(item.locator)} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
                           </>}
                         </aside>
                         {paneDivider("questions")}
-                        <section className="document-canvas" data-tour="tpl-canvas">
-                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><div className="workspace-toolbar-actions"><button type="button" className="secondary workspace-reset-layout" onClick={resetPanes}>Сбросить расположение</button><label>Масштаб <select value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div></div>
+                        <section ref={canvasRef} className="document-canvas" data-tour="tpl-canvas">
+                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><div className="workspace-toolbar-actions"><button type="button" className="secondary workspace-reset-layout" onClick={resetPanes}>Сбросить расположение</button><label>Масштаб <select value={zoom} onChange={(event) => { virtualPreview.captureAnchor(); setZoom(Number(event.target.value)); }} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div></div>
                           {bindingCandidates.length > 0 && (
                             <details className="selection-card binding-candidate-review" data-tour="tpl-candidates" aria-label="Кандидаты структурной разметки">
                               <summary>Кандидаты структурной разметки · {bindingCandidates.length}</summary>
@@ -1210,7 +1254,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 {bindingCandidates.filter((x:any)=>(!candidateFilter.rf_id||x.rf_id===candidateFilter.rf_id)&&(!candidateFilter.status||x.status===candidateFilter.status)&&(!candidateFilter.operation||x.operation===candidateFilter.operation)).map((candidate: any) => (
                                   <article key={candidate.candidate_id} className="candidate-row">
                                     <input aria-label={`Выбрать ${candidate.candidate_id}`} type="checkbox" checked={selectedCandidates.includes(candidate.candidate_id)} disabled={candidate.review_decision!=="CONFIRMED"||candidate.status==="CONFIGURED"} onChange={e=>setSelectedCandidates(e.target.checked?[...selectedCandidates,candidate.candidate_id]:selectedCandidates.filter(x=>x!==candidate.candidate_id))}/>
-                                    <button type="button" className="back-link" onClick={() => document.querySelector(`[data-locator="${CSS.escape(candidate.locator || "")}"]`)?.scrollIntoView({behavior:"smooth", block:"center"})}>{candidate.rf_id} · {candidate.matrix_location}</button>
+                                    <button type="button" className="back-link" onClick={() => virtualPreview.scrollToLocator(candidate.locator || "")}>{candidate.rf_id} · {candidate.matrix_location}</button>
                                     <small>{candidate.operation} · {candidate.status}</small>
                                     <p>{candidate.context || "Структурный узел не найден"}</p>
                                     {candidate.review_reason&&<p><b>Причина:</b> {candidate.review_reason}<br/><b>Действие специалиста:</b> {candidate.required_specialist_action}</p>}
@@ -1252,19 +1296,12 @@ function TemplateBuilder({ api }: { api: Api }) {
                             {(blockError || (blockStart && blockHover && activeBlockRange?.error)) && <p className="block-selection-error" role="alert">{blockError || activeBlockRange?.error}</p>}
                           </div>
                           <article
+                            ref={pageRef}
                             className={`docx-page ${blockStart ? "block-picking" : ""}`}
                             onMouseUp={selectRange}
                             style={{ zoom: `${zoom}%` }}
                           >
-                            {previewBlocks.map((block, index) => block.kind === "paragraph"
-                              ? renderPreviewNode(block.node)
-                              : <div className="docx-table-scroll" key={`table-${index}`}><table className="docx-table"><tbody>
-                                  {block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) =>
-                                    <td key={cellIndex} colSpan={cell.colSpan} rowSpan={cell.rowSpan} className={cell.continuation ? "docx-merge-continuation" : undefined}>
-                                      {cell.nodes.map(renderPreviewNode)}
-                                    </td>
-                                  )}</tr>)}
-                                </tbody></table></div>)}
+                            {previewContent}
                           </article>
                           {selection && <InspectorPortal>
                             <section className="selection-card selection-card-floating" aria-label="Настройка выбранного фрагмента">
@@ -1818,7 +1855,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   setField({ ...field, required_when: value })
                                 }
                               />
-                              {editing && <div className="workspace-linked-fragments"><b>Связанные фрагменты · {bindings.filter((item:any) => item.field_id === editing).length}</b>{bindings.filter((item:any) => item.field_id === editing).map((item:any) => <button key={item.id} type="button" className="secondary" onClick={() => { setActiveBinding(item); setStage(3); document.querySelector(`[data-locator="${CSS.escape(item.locator.node)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"}); }}>{item.selected_text || "Фрагмент Word"}</button>)}</div>}
+                              {editing && <div className="workspace-linked-fragments"><b>Связанные фрагменты · {bindings.filter((item:any) => item.field_id === editing).length}</b>{bindings.filter((item:any) => item.field_id === editing).map((item:any) => <button key={item.id} type="button" className="secondary" onClick={() => { setActiveBinding(item); setStage(3); virtualPreview.scrollToLocator(item.locator.node); }}>{item.selected_text || "Фрагмент Word"}</button>)}</div>}
                               <button className="primary" disabled={busy || formulaPending || !!conditionError(field.visible_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key) || !!conditionError(field.required_when, (schema?.fields || []).filter((x:any) => x.id !== editing), field.field_key)}>
                                 {editing
                                   ? "Сохранить изменения"

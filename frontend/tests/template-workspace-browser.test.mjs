@@ -167,7 +167,8 @@ test("3500 Word fragments keep their layout during drag and apply each resize on
     await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html?large=1`);
     await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
-    await page.locator(".preview-node").nth(3499).waitFor();
+    await page.locator(".preview-node").first().waitFor();
+    assert.ok(await page.locator(".preview-node").count() < 150, "large document mounts only visible Word blocks");
     await page.locator(".workspace-question-list button").first().click();
     await page.locator(".docx-page [data-locator]").first().evaluate((node) => {
       window.__firstPreviewNode = node;

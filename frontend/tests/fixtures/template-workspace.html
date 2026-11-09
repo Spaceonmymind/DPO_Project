@@ -12,14 +12,17 @@
 
       const longLabel = "Порядок оплаты и подтверждения оказанных услуг по договору с дополнительными условиями и примечаниями для проверки длинного названия вопроса";
       const field = { id: "field-1", field_key: "payment_order", label: longLabel, field_type: "SINGLE_SELECT", required: true, position: 1, config: { group: "Основные сведения", placeholder: "", options: ["100% постоплата", "50% предоплата"] } };
-      const fields = [field, ...Array.from({ length: 119 }, (_, index) => ({ id: `field-${index + 2}`, field_key: `question_${index + 2}`, label: `Вопрос номер ${index + 2}`, field_type: "TEXT", position: index + 2, config: { group: "Дополнительные сведения", options: [] } }))];
+      const fields = [field, ...Array.from({ length: 159 }, (_, index) => ({ id: `field-${index + 2}`, field_key: `question_${index + 2}`, label: `Вопрос номер ${index + 2}`, field_type: "TEXT", position: index + 2, config: { group: "Дополнительные сведения", options: [] } }))];
       const version = { id: "version-1", template_id: "template-1", version_number: 1, status: "DRAFT", original_filename: "sample.docx" };
       const smallNodes = [
         { locator: "word/document.xml#/p[1]", kind: "paragraph", text: "Порядок оплаты услуг по договору" },
         { locator: "word/document.xml#/tbl[1]/tr[1]/tc[1]", kind: "table_cell", text: "Строка графика тренировок" },
       ];
-      const nodes = new URLSearchParams(location.search).has("large")
-        ? Array.from({ length: 3500 }, (_, index) => ({ locator: `word/document.xml#/p[${index + 1}]`, kind: "paragraph", text: `Фрагмент договора ${index + 1}` }))
+      const tableCell = (row, cell, text, grid_span = 1, vertical_merge = null) => ({ locator: `word/document.xml#/tbl[1]/tr[${row}]/tc[${cell}]/p[1]`, kind: "table_cell", text, metadata: { table: 1, row, cell, grid_span, vertical_merge } });
+      const nodes = new URLSearchParams(location.search).has("hugeTable")
+        ? Array.from({ length: 1000 }, (_, row) => Array.from({ length: 3 }, (_, column) => tableCell(row + 1, column + 1, `Ячейка ${row + 1}.${column + 1}`))).flat()
+        : new URLSearchParams(location.search).has("large")
+        ? [...Array.from({ length: 3500 }, (_, index) => ({ locator: `word/document.xml#/p[${index + 1}]`, kind: "paragraph", text: `Фрагмент договора ${index + 1}` })), tableCell(1, 1, "Объединённая ячейка", 2, "restart"), tableCell(1, 2, "Правая ячейка"), tableCell(2, 1, "", 2, "continue"), tableCell(2, 2, "Нижняя ячейка")]
         : smallNodes;
       window.__previewRequests = 0;
       const group = { id: "group-1", group_key: "schedule", name: "График тренировок", description: "", required: false, min_items: 0, max_items: 10, position: 1, status: "ACTIVE", config: {}, locator: { part: "word/document.xml", table: 1, row: 1, row_count: 1 }, fields: [{ id: "group-field-1", group_id: "group-1", field_key: "session", label: "Название занятия", field_type: "TEXT", required: true, position: 1, config: { options: [] } }] };

@@ -466,6 +466,29 @@ def test_question_delete_ignores_preexisting_region_overlap_but_publish_detects_
     assert published.status_code==422 and 'пересекаются' in published.text
 
 
+def test_question_delete_ignores_unrelated_unbound_repeating_group_field():
+    client=TestClient(app);headers=auth(client)
+    template=create_platform_template(client,headers,'DELETE_UNBOUND_GROUP_'+uuid.uuid4().hex[:8])
+    original=repeating_contract_docx_bytes()
+    upload=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('repeating.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert upload.status_code==201,upload.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{upload.json()['id']}"
+    question=client.post(base+'/fields',headers=headers,json={'field_key':'unrelated','label':'Несвязанный вопрос','field_type':'TEXT','position':1})
+    assert question.status_code==201,question.text
+    node=next(item for item in client.get(base+'/preview',headers=headers).json()['nodes'] if item['text']=='DATE')
+    group=client.post(base+'/repeating-groups',headers=headers,json={'group_key':'schedule','name':'График','position':1,'row_locator':node['locator']})
+    assert group.status_code==201,group.text
+    row_field=client.post(base+f"/repeating-groups/{group.json()['id']}/fields",headers=headers,json={'field_key':'date','label':'Для удаления','field_type':'TEXT','position':1})
+    assert row_field.status_code==201,row_field.text
+    deleted=client.delete(base+f"/fields/{question.json()['id']}",headers=headers)
+    assert deleted.status_code==204,deleted.text
+    assert client.get(base+'/questionnaire',headers=headers).json()['fields']==[]
+    groups=client.get(base+'/repeating-groups',headers=headers).json()
+    assert len(groups)==1 and groups[0]['id']==group.json()['id']
+    assert client.get(base+'/source',headers=headers).content==original
+    assert client.post(base+'/publish',headers=headers).status_code==422
+
+
 def test_question_delete_prunes_nested_conditions_without_empty_groups():
     client,headers,base,_=deletion_test_template('DELETE_NESTED')
     fields={}

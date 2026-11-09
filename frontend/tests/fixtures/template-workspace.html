@@ -25,14 +25,52 @@
         ? [...Array.from({ length: 3500 }, (_, index) => ({ locator: `word/document.xml#/p[${index + 1}]`, kind: "paragraph", text: `Фрагмент договора ${index + 1}` })), tableCell(1, 1, "Объединённая ячейка", 2, "restart"), tableCell(1, 2, "Правая ячейка"), tableCell(2, 1, "", 2, "continue"), tableCell(2, 2, "Нижняя ячейка")]
         : smallNodes;
       window.__previewRequests = 0;
+      window.__writes = [];
+      const bindings = [];
+      const regions = new URLSearchParams(location.search).has("scrollRegression") ? [{ id: "region-1", region_key: "sample_region", region_type: "CONDITIONAL_PARAGRAPH", locator: { node: "word/document.xml#/p[2490]" }, include_when: { operator: "ALWAYS" } }] : [];
       const group = { id: "group-1", group_key: "schedule", name: "График тренировок", description: "", required: false, min_items: 0, max_items: 10, position: 1, status: "ACTIVE", config: {}, locator: { part: "word/document.xml", table: 1, row: 1, row_count: 1 }, fields: [{ id: "group-field-1", group_id: "group-1", field_key: "session", label: "Название занятия", field_type: "TEXT", required: true, position: 1, config: { options: [] } }] };
       const api = async (path, options = {}) => {
         if (path === "/document-templates") return [{ id: "template-1", name: "Тестовый договор", category: "Договоры", version_count: 1 }];
         if (path.endsWith("/versions")) return [version];
         if (path.endsWith("/preview")) { window.__previewRequests++; return { nodes }; }
-        if (path.endsWith("/questionnaire")) return { fields };
-        if (path.endsWith("/repeating-groups")) return [group];
-        if (/\/(bindings|conditional-regions|binding-candidates)$/.test(path)) return [];
+        if (path.endsWith("/questionnaire")) return { fields: [...fields] };
+        if (path.endsWith("/repeating-groups/group-1") && options.method === "PATCH") {
+          const payload = JSON.parse(options.body);
+          window.__writes.push({ kind: "group-edit", payload });
+          Object.assign(group, payload);
+          return group;
+        }
+        if (path.endsWith("/repeating-groups")) return [{ ...group }];
+        if (path.endsWith("/bindings") && options.method === "POST") {
+          const payload = JSON.parse(options.body);
+          window.__writes.push({ kind: "binding", payload });
+          const binding = { ...payload, id: `binding-${bindings.length + 1}` };
+          bindings.push(binding);
+          return binding;
+        }
+        if (path.endsWith("/bindings")) return [...bindings];
+        if (path.endsWith("/fields") && options.method === "POST") {
+          const payload = JSON.parse(options.body);
+          window.__writes.push({ kind: "field", payload });
+          const created = { id: `field-${fields.length + 1}`, field_key: payload.field_key, label: payload.label, field_type: payload.field_type, required: payload.required, position: payload.position, config: { ...payload, group: payload.group } };
+          fields.push(created);
+          return created;
+        }
+        if (/\/fields\/field-\d+$/.test(path) && options.method === "PATCH") {
+          const payload = JSON.parse(options.body);
+          window.__writes.push({ kind: "field-edit", payload });
+          const index = fields.findIndex(item => path.endsWith(`/${item.id}`));
+          fields[index] = { ...fields[index], label: payload.label, config: { ...payload, group: payload.group } };
+          return fields[index];
+        }
+        if (path.endsWith("/conditional-regions/region-1") && options.method === "PATCH") {
+          const payload = JSON.parse(options.body);
+          window.__writes.push({ kind: "region-edit", payload });
+          Object.assign(regions[0], payload);
+          return regions[0];
+        }
+        if (path.endsWith("/conditional-regions")) return regions.map(region => ({ ...region }));
+        if (path.endsWith("/binding-candidates")) return [];
         throw new Error(`Unexpected fixture request: ${options.method || "GET"} ${path}`);
       };
       createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin, { api }));

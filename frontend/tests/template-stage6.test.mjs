@@ -58,7 +58,7 @@ test("step 6 uses employee questionnaire without Word DOM and preserves answers"
     assert.equal(await page.locator(".docx-page").count(), 0);
     await stages.getByRole("button", { name: /Условия и таблицы/ }).click();
     await page.locator(".docx-page").waitFor();
-    assert.equal(await page.evaluate(() => window.__previewRequests), 2);
+    assert.equal(await page.evaluate(() => window.__previewRequests), 1, "returning to the same Word reuses its preview");
   } finally {
     await browser.close();
     await server.close();

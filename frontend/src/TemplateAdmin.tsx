@@ -185,7 +185,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
   const previewBlocks = useMemo(() => layoutPreviewNodes(preview?.nodes || []), [preview]);
-  const virtualPreview = useDocxVirtualPreview(stage === 6 ? EMPTY_PREVIEW_BLOCKS : previewBlocks, canvasRef, pageRef, zoom);
+  const virtualPreview = useDocxVirtualPreview(stage === 6 ? EMPTY_PREVIEW_BLOCKS : previewBlocks, canvasRef, pageRef, zoom, preview?.documentKey);
   useEffect(() => {
     if (!schema || !requisiteSetsReady) return;
     setTestAnswers((current:any) => {
@@ -345,10 +345,11 @@ function TemplateBuilder({ api }: { api: Api }) {
     setVersions(await api(`/document-templates/${x.id}/versions`));
   }
   async function openVersion(x: any, options: { stage?: number; skipPreview?: boolean } = {}) {
+    const sameDocument = version?.id === x.id && !!preview;
     setVersion(x);
     setPendingFieldDelete(null);
     setCopyOpen(false);setCopySourceId("");setCopyFields([]);setCopySelected([]);
-    setStage(options.stage ?? 2);
+    setStage(options.stage ?? (sameDocument ? stage : 2));
     setSelection(null);
     setActiveBinding(null);
     setSelectionDraft(null);
@@ -363,14 +364,14 @@ function TemplateBuilder({ api }: { api: Api }) {
     setRepeatBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
       [p, q, links, areas, repeaters, candidates] = await Promise.all([
-        options.skipPreview ? Promise.resolve(null) : api(b + "/preview"),
+        options.skipPreview ? Promise.resolve(sameDocument ? preview : null) : sameDocument ? Promise.resolve(preview) : api(b + "/preview"),
         api(b + "/questionnaire"),
         api(b + "/bindings"),
         api(b + "/conditional-regions"),
         api(b + "/repeating-groups"),
         api(b + "/binding-candidates"),
       ]);
-    setPreview(p);
+    setPreview(p && !sameDocument ? { ...p, documentKey: x.id } : p);
     setSchema(q);
     setTestAnswers((current:any) => {
       const previous = testAnswerVersionRef.current === x.id ? current : {};
@@ -1061,7 +1062,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       <div className="docx-virtual-spacer" style={{ height: virtualPreview.top }} aria-hidden="true" />
       {previewBlocks.slice(virtualPreview.range.start, virtualPreview.range.end).map((block, offset) => {
         const index = virtualPreview.range.start + offset;
-        return <div className="docx-virtual-block" key={index} data-block-index={index} ref={element => virtualPreview.measure(index, element)}>
+        return <div className="docx-virtual-block" key={block.kind === "paragraph" ? block.node.locator : block.rows[0]?.[0]?.nodes[0]?.locator || `table-${index}`} data-block-index={index} ref={element => virtualPreview.measure(index, element)}>
           {block.kind === "paragraph" ? renderPreviewNode(block.node)
                               : <div className="docx-table-scroll"><table className="docx-table"><tbody>
                                   {block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) =>

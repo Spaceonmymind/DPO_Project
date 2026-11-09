@@ -40,7 +40,7 @@
 .template-open .workspace-canvas-toolbar select{height:30px;border:1px solid #c9dcd3;border-radius:7px;background:#fff;color:#254a3e}
 .template-open .workspace-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}
 .template-open .workspace-reset-layout{min-height:28px;padding:4px 7px;font-size:10px;line-height:1.2;white-space:nowrap}
-.template-open .document-canvas{height:clamp(440px,calc(100vh - 270px),760px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:10px;background:#f7faf8}
+.template-open .document-canvas{height:clamp(440px,calc(100vh - 270px),760px);overflow-y:auto;overflow-anchor:none;overscroll-behavior:contain;scrollbar-gutter:stable;border-radius:10px;background:#f7faf8}
 .template-open .workspace-canvas-toolbar{position:sticky;top:0;z-index:3}
 .template-open .docx-page{width:min(860px,100%);min-width:0;box-sizing:border-box}
 .template-open .docx-virtual-block{display:flow-root}

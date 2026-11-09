@@ -30,6 +30,7 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
   canvasRef: RefObject<HTMLElement | null>,
   pageRef: RefObject<HTMLElement | null>,
   zoom: number,
+  documentKey?: string,
 ) {
   const heights = useRef(new Map<number, number>());
   const observers = useRef(new Map<number, ResizeObserver>());
@@ -37,12 +38,12 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
   const frame = useRef<number | null>(null);
   const scrollFrame = useRef<number | null>(null);
   const anchor = useRef<{ index: number; within: number } | null>(null);
+  const savedScrollTop = useRef(0);
+  const mountedCanvas = useRef<HTMLElement | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const [revision, setRevision] = useState(0);
   const [range, setRange] = useState<WindowRange>({ start: 0, end: 35 });
-  const rangeRef = useRef(range);
-  rangeRef.current = range;
 
   const offsets = useMemo(() => {
     const values = [0];
@@ -80,17 +81,21 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
     frame.current = scheduleFrame(() => {
       frame.current = null;
       const canvas = canvasRef.current;
+      const page = pageRef.current;
+      const scale = zoomRef.current / 100;
+      const visibleTop = canvas && page ? Math.max(0, (canvas.getBoundingClientRect().top - page.getBoundingClientRect().top) / scale) : 0;
+      const visibleIndex = indexAt(offsets, visibleTop);
       let priorDelta = 0;
       for (const [blockIndex, measured] of pending.current) {
         const previous = heights.current.get(blockIndex) ?? estimatedHeight(blocks[blockIndex]);
         heights.current.set(blockIndex, measured);
-        if (blockIndex < rangeRef.current.start) priorDelta += measured - previous;
+        if (blockIndex < visibleIndex) priorDelta += measured - previous;
       }
       pending.current.clear();
-      if (canvas && priorDelta) canvas.scrollTop += priorDelta * (zoomRef.current / 100);
+      if (canvas && priorDelta) savedScrollTop.current = canvas.scrollTop += priorDelta * scale;
       setRevision(value => value + 1);
     });
-  }, [blocks, canvasRef]);
+  }, [blocks, canvasRef, pageRef, offsets]);
 
   const measure = useCallback((index: number, element: HTMLElement | null) => {
     observers.current.get(index)?.disconnect();
@@ -105,12 +110,23 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
   }, [queueMeasurement]);
 
   useLayoutEffect(() => {
+    if (frame.current !== null) cancelFrame(frame.current);
+    frame.current = null;
     heights.current.clear();
     pending.current.clear();
+    anchor.current = null;
+    savedScrollTop.current = 0;
     setRevision(value => value + 1);
     setRange({ start: 0, end: 35 });
     if (canvasRef.current) canvasRef.current.scrollTop = 0;
-  }, [blocks, canvasRef]);
+  }, [documentKey, canvasRef]);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === mountedCanvas.current) return;
+    mountedCanvas.current = canvas;
+    if (canvas) canvas.scrollTop = savedScrollTop.current;
+  });
 
   useEffect(() => () => {
     if (frame.current !== null) cancelFrame(frame.current);
@@ -122,6 +138,7 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
     const canvas = canvasRef.current;
     if (!canvas) return;
     const onScroll = () => {
+      savedScrollTop.current = canvas.scrollTop;
       if (scrollFrame.current !== null) return;
       scrollFrame.current = scheduleFrame(() => { scrollFrame.current = null; updateRange(); });
     };
@@ -146,6 +163,7 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
     anchor.current = null;
     const pageTop = page.getBoundingClientRect().top - canvas.getBoundingClientRect().top + canvas.scrollTop;
     canvas.scrollTop = pageTop + (offsets[saved.index] + saved.within) * (zoom / 100);
+    savedScrollTop.current = canvas.scrollTop;
     updateRange();
   }, [zoom, canvasRef, pageRef, offsets, updateRange]);
   useLayoutEffect(() => { restoreAnchor(); }, [zoom, restoreAnchor]);
@@ -160,6 +178,7 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
     const scale = zoomRef.current / 100;
     const pageTop = page.getBoundingClientRect().top - canvas.getBoundingClientRect().top + canvas.scrollTop;
     canvas.scrollTop = pageTop + offsets[index] * scale - canvas.clientHeight / 2 + (offsets[index + 1] - offsets[index]) * scale / 2;
+    savedScrollTop.current = canvas.scrollTop;
     const start = Math.max(0, indexAt(offsets, Math.max(0, offsets[index] - OVERSCAN / scale)));
     const end = Math.min(blocks.length, indexAt(offsets, offsets[index + 1] + canvas.clientHeight / scale + OVERSCAN / scale) + 2);
     setRange({ start, end });

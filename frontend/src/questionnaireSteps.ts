@@ -1,5 +1,6 @@
 import { evaluateCondition, fieldState } from "./conditions";
 import { OTHER, choiceAnswer, choiceOtherValues, isStructuredChoice } from "./choices";
+import { characterRuleError } from "./textRules";
 
 export type QuestionnaireStep = { name: string; fields: any[]; groups: any[] };
 
@@ -44,6 +45,7 @@ function fieldError(field: any, value: any, required: boolean): string | undefin
     if (typeof value !== "string") return "Ожидался текст";
     if (rules.min_length !== undefined && value.length < Number(rules.min_length)) return `Минимум ${rules.min_length} символов`;
     if (rules.max_length !== undefined && value.length > Number(rules.max_length)) return `Максимум ${rules.max_length} символов`;
+    if (characterRuleError(value, rules)) return characterRuleError(value, rules);
     if (rules.regex) {
       try { if (!new RegExp(`^(?:${rules.regex})$`).test(value)) return "Значение не соответствует требуемому формату"; }
       catch { return "Некорректный формат значения"; }

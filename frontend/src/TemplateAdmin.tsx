@@ -22,10 +22,12 @@ import { evaluateExpression } from "./calculations";
 import type { Condition } from "./conditions";
 import { conditionError, conditionStats, replaceCondition, removeCondition, moveCondition, canLiftCondition, liftCondition, canNestCondition, nestCondition, insertAdjacentCondition, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES } from "./conditionTree";
 import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type NamedCondition } from "./conditionFormula";
-import { resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
+import { blockUnitLocator, resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
+import { OTHER, choiceAnswer, choiceOtherValues, isStructuredChoice } from "./choices";
+import { CHARACTER_SETS } from "./textRules";
 import { DEFAULT_PANES, fitPaneWidths, PANE_STORAGE_KEY, readPaneWidths, type PaneWidths } from "./paneLayout";
 type Api = (path: string, options?: any) => Promise<any>;
 const TYPES: any = {
@@ -50,6 +52,8 @@ const OUTPUT_FORMATS: any = {
   MONEY_WORDS_RUB: "Сумма прописью",
   DATE: "Дата ДД.ММ.ГГГГ",
   DATE_WORDS: "Дата прописью",
+  DATE_MONTH_SHORT: "10 января 2000 г.",
+  GENITIVE: "Родительный падеж",
   PERCENT: "Процент",
 };
 const blank = (position = 1) => ({
@@ -72,6 +76,7 @@ const blank = (position = 1) => ({
   allow_other: false,
   other_required: false,
   default_value: null,
+  default_source: null,
   visible_when: null,
   required_when: null,
   text_expression: null,
@@ -80,6 +85,7 @@ const blank = (position = 1) => ({
   separator: "; ",
 });
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
+const bindingFormats = (question: any) => Object.entries(OUTPUT_FORMATS).filter(([key]) => key !== "GENITIVE" && key !== "DATE_MONTH_SHORT" || key === "GENITIVE" && !!question?.config?.option_items?.length || key === "DATE_MONTH_SHORT" && question?.field_type === "DATE");
 const newOption = () => ({ key: `option_${Math.random().toString(36).slice(2, 10)}`, label: "" });
 function conditionFieldKeys(node: any): string[] {
   if (!node || typeof node !== "object") return [];
@@ -103,9 +109,13 @@ function TemplateBuilder({ api }: { api: Api }) {
   const { pending: formulaPending } = React.useContext(FormulaStatusContext);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const builderGridRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{ side: "questions" | "settings"; x: number; widths: PaneWidths } | null>(null);
+  const dragRef = useRef<{ side: "questions" | "settings"; x: number; lastX: number; lineX: number; widths: PaneWidths; available: number; frame: number | null } | null>(null);
+  const dragLineRef = useRef<HTMLDivElement | null>(null);
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
   const [paneAvailable, setPaneAvailable] = useState(0);
+  const [requisiteSets, setRequisiteSets] = useState<any[]>([]);
+  const testAnswerVersionRef = useRef<string | undefined>(undefined);
+  useEffect(() => { api("/requisite-sets?include_archived=true").then(setRequisiteSets).catch(() => setRequisiteSets([])); }, [api]);
   const [templates, setTemplates] = useState<any[]>([]),
     [selected, setSelected] = useState<any>(),
     [versions, setVersions] = useState<any[]>([]),
@@ -140,6 +150,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     [fieldOptionsText, setFieldOptionsText] = useState(""),
     [groupFieldOptionsText, setGroupFieldOptionsText] = useState(""),
     [editing, setEditing] = useState<string>(),
+    [pendingFieldDelete, setPendingFieldDelete] = useState<any>(null),
     [name, setName] = useState(""),
     [code, setCode] = useState(""),
     [category, setCategory] = useState("Другое"),
@@ -177,44 +188,83 @@ function TemplateBuilder({ api }: { api: Api }) {
     return () => { observer?.disconnect(); window.removeEventListener("resize", measure); };
   }, [version?.id, preview]);
   const fittedPanes = fitPaneWidths(paneWidths, paneAvailable || 2000);
+  function applyPaneWidths(result: PaneWidths) {
+    setPaneWidths(result);
+    window.localStorage.setItem(PANE_STORAGE_KEY, JSON.stringify(result));
+  }
   function changePane(side: "questions" | "settings", next: number) {
     const width = builderGridRef.current?.clientWidth || paneAvailable || 2000;
-    setPaneWidths(current => {
-      const result = fitPaneWidths({ ...current, [side]: next }, width);
-      window.localStorage.setItem(PANE_STORAGE_KEY, JSON.stringify(result));
-      return result;
-    });
+    applyPaneWidths(fitPaneWidths({ ...fittedPanes, [side]: next }, width));
   }
   function resetPanes() {
     setPaneWidths(DEFAULT_PANES);
     window.localStorage.removeItem(PANE_STORAGE_KEY);
   }
   function panePointerDown(event: React.PointerEvent<HTMLDivElement>, side: "questions" | "settings") {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || dragRef.current) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { side, x: event.clientX, widths: fittedPanes };
+    const rect = event.currentTarget.getBoundingClientRect();
+    const grid = builderGridRef.current?.getBoundingClientRect();
+    if (!grid) return;
+    const lineX = rect.left + rect.width / 2;
+    dragRef.current = { side, x: event.clientX, lastX: event.clientX, lineX, widths: fittedPanes, available: grid.width, frame: null };
+    if (dragLineRef.current) {
+      dragLineRef.current.hidden = false;
+      dragLineRef.current.style.top = `${grid.top}px`;
+      dragLineRef.current.style.height = `${grid.height}px`;
+      dragLineRef.current.style.transform = `translate3d(${lineX}px, 0, 0)`;
+    }
     document.body.classList.add("workspace-resizing");
   }
   function panePointerMove(event: React.PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag) return;
-    const delta = event.clientX - drag.x;
-    changePane(drag.side, drag.widths[drag.side] + (drag.side === "questions" ? delta : -delta));
+    drag.lastX = event.clientX;
+    if (drag.frame !== null) return;
+    drag.frame = window.requestAnimationFrame(() => {
+      const current = dragRef.current;
+      if (current !== drag) return;
+      drag.frame = null;
+      const delta = drag.lastX - drag.x;
+      const widths = fitPaneWidths({ ...drag.widths, [drag.side]: drag.widths[drag.side] + (drag.side === "questions" ? delta : -delta) }, drag.available);
+      const appliedDelta = (widths[drag.side] - drag.widths[drag.side]) * (drag.side === "questions" ? 1 : -1);
+      if (dragLineRef.current) dragLineRef.current.style.transform = `translate3d(${drag.lineX + appliedDelta}px, 0, 0)`;
+    });
   }
-  function panePointerEnd() {
+  function panePointerEnd(event?: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.frame !== null) window.cancelAnimationFrame(drag.frame);
+    if (event) {
+      const delta = event.clientX - drag.x;
+      applyPaneWidths(fitPaneWidths({ ...drag.widths, [drag.side]: drag.widths[drag.side] + (drag.side === "questions" ? delta : -delta) }, drag.available));
+    }
     dragRef.current = null;
+    if (dragLineRef.current) dragLineRef.current.hidden = true;
     document.body.classList.remove("workspace-resizing");
   }
+  useEffect(() => {
+    const cancelOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape" && dragRef.current) { event.preventDefault(); panePointerEnd(); } };
+    const cancelOnBlur = () => panePointerEnd();
+    window.addEventListener("keydown", cancelOnEscape);
+    window.addEventListener("blur", cancelOnBlur);
+    return () => { window.removeEventListener("keydown", cancelOnEscape); window.removeEventListener("blur", cancelOnBlur); panePointerEnd(); };
+  }, []);
   function paneKeyDown(event: React.KeyboardEvent<HTMLDivElement>, side: "questions" | "settings") {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     changePane(side, fittedPanes[side] + (event.key === "ArrowRight" ? 16 : -16) * (side === "questions" ? 1 : -1));
   }
   function paneDivider(side: "questions" | "settings") {
-    return <div className="workspace-pane-divider" role="separator" tabIndex={0} aria-label={side === "questions" ? "Изменить ширину панели вопросов" : "Изменить ширину панели настроек"} aria-orientation="vertical" aria-valuenow={fittedPanes[side]} aria-valuemin={side === "questions" ? 180 : 260} aria-valuemax={side === "questions" ? 420 : 520} onPointerDown={event => panePointerDown(event, side)} onPointerMove={panePointerMove} onPointerUp={panePointerEnd} onPointerCancel={panePointerEnd} onLostPointerCapture={panePointerEnd} onKeyDown={event => paneKeyDown(event, side)} onDoubleClick={() => changePane(side, DEFAULT_PANES[side])} title="Перетащите для изменения ширины. Двойной щелчок — стандартная ширина." />;
+    return <div className="workspace-pane-divider" role="separator" tabIndex={0} aria-label={side === "questions" ? "Изменить ширину панели вопросов" : "Изменить ширину панели настроек"} aria-orientation="vertical" aria-valuenow={fittedPanes[side]} aria-valuemin={side === "questions" ? 180 : 260} aria-valuemax={side === "questions" ? 420 : 520} onPointerDown={event => panePointerDown(event, side)} onPointerMove={panePointerMove} onPointerUp={panePointerEnd} onPointerCancel={() => panePointerEnd()} onLostPointerCapture={() => panePointerEnd()} onKeyDown={event => paneKeyDown(event, side)} onDoubleClick={() => changePane(side, DEFAULT_PANES[side])} title="Перетащите для изменения ширины. Двойной щелчок — стандартная ширина." />;
   }
   const availableBlockLocators = useMemo(() => new Set<string>((preview?.nodes || []).map((node: any) => node.locator)), [preview]);
+  const firstBlockUnitNode = useMemo(() => {
+    const map = new Map<string,string>();
+    for (const node of preview?.nodes || []) { const unit=blockUnitLocator(node.locator); if (unit && !map.has(unit)) map.set(unit,node.locator); }
+    return map;
+  },[preview]);
   const savedBlockMarkers = useMemo(() => {
     const markers = new Map<string, { start: boolean; end: boolean }>();
     for (const region of regions) {
@@ -253,6 +303,7 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   async function openTemplate(x: any) {
     setSelected(x);
+    setPendingFieldDelete(null);
     setVersion(null);
     setPreview(null);
     setSchema(null);
@@ -262,6 +313,7 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   async function openVersion(x: any) {
     setVersion(x);
+    setPendingFieldDelete(null);
     setCopyOpen(false);setCopySourceId("");setCopyFields([]);setCopySelected([]);
     setStage(2);
     setSelection(null);
@@ -287,6 +339,21 @@ function TemplateBuilder({ api }: { api: Api }) {
       ]);
     setPreview(p);
     setSchema(q);
+    setTestAnswers((current:any) => {
+      const previous = testAnswerVersionRef.current === x.id ? current : {};
+      testAnswerVersionRef.current = x.id;
+      return Object.fromEntries((q.fields || []).map((item:any) => {
+        const value = previous[item.field_key];
+        if (isStructuredChoice(item)) {
+          const answer = choiceAnswer(value);
+          const allowed = new Set([...(item.config?.option_items || []).map((option:any) => option.key), ...(item.config?.allow_other ? [OTHER] : [])]);
+          return [item.field_key, { ...answer, selected: answer.selected.filter((key:string) => allowed.has(key)) }];
+        }
+        if (item.field_type === "SINGLE_SELECT" && value && !(item.config?.options || []).includes(value)) return [item.field_key, ""];
+        return [item.field_key, value];
+      }));
+    });
+    setTestDocument(null);
     setBindings(links);
     setRegions(areas);
     setRepeatingGroups(repeaters);
@@ -445,6 +512,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       allow_other: x.config.allow_other || false,
       other_required: x.config.other_required || false,
       default_value: x.config.default_value ?? null,
+      default_source: x.config.default_source ?? null,
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
@@ -463,13 +531,30 @@ function TemplateBuilder({ api }: { api: Api }) {
     setFieldOptionsText("");
     setShowFieldEditor(true);
   }
-  async function removeField(id: string) {
-    await run(async () => {
+  async function removeField(item: any) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
       await api(
-        `/document-templates/${selected.id}/versions/${version.id}/fields/${id}`,
-        { method: "DELETE" },
+        `/document-templates/${selected.id}/versions/${version.id}/fields/${item.id}`,
+        { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed_dependencies: (item.dependencies || []).map((dependency:any) => `${dependency.kind}:${dependency.id}`), acknowledge_logic_change: true }) },
       );
       await openVersion(version);
+      setPendingFieldDelete(null);
+    } catch (error: any) {
+      setPendingFieldDelete(null);
+      setError(error.message || "Удаление вопроса не выполнено. Проверьте зависимости и повторите действие.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function prepareFieldDelete(item: any) {
+    if (!item || busy || version?.status !== "DRAFT") return;
+    await run(async () => {
+      const result = await api(`/document-templates/${selected.id}/versions/${version.id}/fields/${item.id}/dependencies`);
+      const dependencies = result.dependencies || [];
+      setPendingFieldDelete({ ...item, dependencies });
     });
   }
   async function changeBindingFormat(binding: any, output_format: string) {
@@ -957,6 +1042,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                         </a>
                       </header>
                       <div ref={builderGridRef} className="builder-grid" style={{ "--questions-pane-width": `${fittedPanes.questions}px`, "--settings-pane-width": `${fittedPanes.settings}px` } as React.CSSProperties}>
+                        <div ref={dragLineRef} className="workspace-pane-drag-line" aria-hidden="true" hidden />
                         <aside className="document-outline" aria-label="Навигация по шаблону">
                           <div className="workspace-tabs" data-tour="tpl-tabs" role="tablist" aria-label="Навигация">
                             <button role="tab" aria-selected={workspaceTab === "questions"} className={workspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
@@ -1034,7 +1120,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                             Выделите текст для привязки или условного фрагмента.
                             Для структурной области используйте действия у
                             абзаца.
-                            {blockStart && <div className="block-selection-status"><span>Начало блока выбрано. Наведите на конечный абзац и нажмите «Конец блока».</span><button type="button" onClick={() => { setBlockStart(undefined); setBlockHover(undefined); setBlockError(""); if (regionDraft?.region_type === "CONDITIONAL_PARAGRAPH_GROUP" && !regionDraft.end_locator && !regionDraft.id) setRegionDraft(null); }}>Отменить выбор блока</button></div>}
+                            {blockStart && <div className="block-selection-status"><span>Начало блока выбрано. Наведите на конечный абзац или строку таблицы и нажмите «Конец блока».</span><button type="button" onClick={() => { setBlockStart(undefined); setBlockHover(undefined); setBlockError(""); if (regionDraft?.region_type === "CONDITIONAL_PARAGRAPH_GROUP" && !regionDraft.end_locator && !regionDraft.id) setRegionDraft(null); }}>Отменить выбор блока</button></div>}
                             {(blockError || (blockStart && blockHover && activeBlockRange?.error)) && <p className="block-selection-error" role="alert">{blockError || activeBlockRange?.error}</p>}
                           </div>
                           <article
@@ -1044,9 +1130,11 @@ function TemplateBuilder({ api }: { api: Api }) {
                           >
                             {preview.nodes.map((node: any) => {
                               const active = activeBlockRange?.locators.has(node.locator) || false;
-                              const saved = savedBlockMarkers.get(node.locator);
-                              const startMarker = activeBlockRange?.start === node.locator || saved?.start;
-                              const endMarker = activeBlockRange?.end === node.locator || saved?.end;
+                              const unit=blockUnitLocator(node.locator) || node.locator;
+                              const saved = savedBlockMarkers.get(unit);
+                              const boundaryNode=firstBlockUnitNode.get(unit)===node.locator;
+                              const startMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.start || "") === unit || saved?.start);
+                              const endMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.end || "") === unit || saved?.end);
                               return (
                               <div
                                 key={node.locator}
@@ -1174,7 +1262,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 <blockquote>
                                   {selection.selected_text || "Пустая ячейка"}
                                 </blockquote>
-                                <QuestionCombobox fields={schema?.fields || []} selectedId={selection.field_id || ""} onSelect={field_id => setSelection((current: any) => current ? { ...current, field_id } : current)} onCreate={label => newField(label)}/>
+                                <QuestionCombobox fields={schema?.fields || []} selectedId={selection.field_id || ""} onSelect={field_id => setSelection((current: any) => current ? { ...current, field_id, output_format: bindingFormats(schema?.fields?.find((item:any) => item.id === field_id)).some(([key]) => key === current.output_format) ? current.output_format : "RAW" } : current)} onCreate={label => newField(label)}/>
                                 <label>
                                   Формат в документе
                                   <select
@@ -1210,6 +1298,8 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     <option value="DATE_WORDS">
                                       Дата прописью
                                     </option>
+                                    {schema?.fields?.find((item:any) => item.id === selection.field_id)?.field_type === "DATE" && <option value="DATE_MONTH_SHORT">10 января 2000 г.</option>}
+                                    {!!schema?.fields?.find((item:any) => item.id === selection.field_id)?.config?.option_items?.length && <option value="GENITIVE">Родительный падеж</option>}
                                     <option value="PERCENT">Процент</option>
                                   </select>
                                 </label>
@@ -1501,7 +1591,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                         <aside ref={inspectorRef} data-tour="tpl-panel" className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
                           <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
                           <div id="workspace-context-inspector" />
-                          {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
+                          {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{bindingFormats(schema?.fields.find((item:any) => item.id === activeBinding.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
                           {(stage === 3 || stage === 5) && !selection && !activeBinding && !regionDraft && !groupDraft && <p className="workspace-inspector-tip">Создайте вопрос анкеты или выделите фрагмент Word для привязки. Для условий и таблиц используйте действия у фрагментов документа.</p>}
                           {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
                           <h3 className="panel-questionnaire">Вопросы анкеты</h3>
@@ -1674,10 +1764,11 @@ function TemplateBuilder({ api }: { api: Api }) {
                                 </label>
                               )}
                               {field.field_type === "SINGLE_SELECT" && !field.option_items?.length && <button type="button" className="secondary" onClick={() => setField({ ...field, option_items: parseOptionText(fieldOptionsText).map(label => ({ key: newOption().key, label })) .concat(!parseOptionText(fieldOptionsText).length ? [newOption()] : []), options: [] })}>Настроить варианты и «Иное»</button>}
-                              {["SINGLE_SELECT", "MULTI_SELECT"].includes(field.field_type) && (field.option_items?.length > 0 || field.field_type === "MULTI_SELECT") && <fieldset className="choice-options-editor"><legend>Варианты ответа</legend>{(field.option_items || []).map((option: any, index: number) => <div className="choice-option-row" key={option.key}><input aria-label={`Вариант ${index + 1}`} required value={option.label} onChange={e => setField({ ...field, option_items: field.option_items.map((item: any, n: number) => n === index ? { ...item, label: e.target.value } : item) })}/><button type="button" disabled={index === 0} onClick={() => { const items = [...field.option_items]; [items[index - 1], items[index]] = [items[index], items[index - 1]]; setField({ ...field, option_items: items }); }}>↑</button><button type="button" disabled={index === field.option_items.length - 1} onClick={() => { const items = [...field.option_items]; [items[index + 1], items[index]] = [items[index], items[index + 1]]; setField({ ...field, option_items: items }); }}>↓</button><button type="button" aria-label={`Удалить вариант ${index + 1}`} onClick={() => setField({ ...field, option_items: field.option_items.filter((_: any, n: number) => n !== index) })}>×</button></div>)}<button type="button" onClick={() => setField({ ...field, option_items: [...(field.option_items || []), newOption()] })}>Добавить вариант</button><label className="check"><input type="checkbox" checked={!!field.allow_other} onChange={e => setField({ ...field, allow_other: e.target.checked, other_required: e.target.checked ? field.other_required : false })}/>Разрешить вариант «Иное»</label>{field.allow_other && <label className="check"><input type="checkbox" checked={!!field.other_required} onChange={e => setField({ ...field, other_required: e.target.checked })}/>Текст для «Иное» обязателен</label>}</fieldset>}
+                              {["SINGLE_SELECT", "MULTI_SELECT"].includes(field.field_type) && (field.option_items?.length > 0 || field.field_type === "MULTI_SELECT") && <fieldset className="choice-options-editor"><legend>Варианты ответа</legend>{(field.option_items || []).map((option: any, index: number) => <div className="choice-option-row" key={option.key}><input aria-label={`Вариант ${index + 1}`} required value={option.label} onChange={e => setField({ ...field, option_items: field.option_items.map((item: any, n: number) => n === index ? { ...item, label: e.target.value } : item) })}/><input aria-label={`Родительный падеж варианта ${index + 1}`} placeholder="Родительный падеж" value={option.genitive || ""} onChange={e => setField({ ...field, option_items: field.option_items.map((item: any, n: number) => n === index ? { ...item, genitive: e.target.value } : item) })}/><button type="button" disabled={index === 0} onClick={() => { const items = [...field.option_items]; [items[index - 1], items[index]] = [items[index], items[index - 1]]; setField({ ...field, option_items: items }); }}>↑</button><button type="button" disabled={index === field.option_items.length - 1} onClick={() => { const items = [...field.option_items]; [items[index + 1], items[index]] = [items[index], items[index + 1]]; setField({ ...field, option_items: items }); }}>↓</button><button type="button" aria-label={`Удалить вариант ${index + 1}`} onClick={() => setField({ ...field, option_items: field.option_items.filter((_: any, n: number) => n !== index) })}>×</button></div>)}<button type="button" onClick={() => setField({ ...field, option_items: [...(field.option_items || []), newOption()] })}>Добавить вариант</button><label className="check"><input type="checkbox" checked={!!field.allow_other} onChange={e => setField({ ...field, allow_other: e.target.checked, other_required: e.target.checked ? field.other_required : false })}/>Разрешить вариант «Иное»</label>{field.allow_other && <label className="check"><input type="checkbox" checked={!!field.other_required} onChange={e => setField({ ...field, other_required: e.target.checked })}/>Текст для «Иное» обязателен</label>}</fieldset>}
                               {field.field_type === "LIST" && <div className="repeat-limits"><label>Минимум элементов<input type="number" min="0" max="100" value={field.item_config?.min_items ?? 0} onChange={e=>setField({...field,item_config:{...field.item_config,min_items:Number(e.target.value)}})}/></label><label>Максимум элементов<input type="number" min="1" max="100" value={field.item_config?.max_items ?? 20} onChange={e=>setField({...field,item_config:{...field.item_config,max_items:Number(e.target.value)}})}/></label><label>Разделитель в DOCX<input value={field.separator} onChange={e=>setField({...field,separator:e.target.value})}/></label></div>}
                               {field.field_type === "COMPOSITE" && <CompositeEditor components={field.components || []} change={(components:any)=>setField({...field,components})}/>}
-                              <DefaultValueEditor field={field} optionText={fieldOptionsText} change={value => setField((current:any) => ({ ...current, default_value: value }))}/>
+                              {["TEXT","MULTILINE_TEXT"].includes(field.field_type) && <details className="workspace-text-rules"><summary>Ограничения ответа</summary><div className="repeat-limits"><label>Минимум символов<input type="number" min="0" max="10000" value={field.validation?.min_length ?? ""} onChange={e=>setField({...field,validation:{...field.validation,min_length:e.target.value===""?undefined:Number(e.target.value)}})}/></label><label>Максимум символов<input type="number" min="0" max="10000" value={field.validation?.max_length ?? ""} onChange={e=>setField({...field,validation:{...field.validation,max_length:e.target.value===""?undefined:Number(e.target.value)}})}/></label></div><label>Допустимые символы<select value={field.validation?.character_set || "ANY"} onChange={e=>setField({...field,validation:{...field.validation,character_set:e.target.value}})}>{Object.entries(CHARACTER_SETS).map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>{field.validation?.character_set && field.validation.character_set!=="ANY" && <div className="workspace-text-rule-flags"><label className="check"><input type="checkbox" checked={!!field.validation?.allow_spaces} onChange={e=>setField({...field,validation:{...field.validation,allow_spaces:e.target.checked}})}/>Разрешить пробелы</label><label className="check"><input type="checkbox" checked={!!field.validation?.allow_hyphens} onChange={e=>setField({...field,validation:{...field.validation,allow_hyphens:e.target.checked}})}/>Разрешить дефисы</label></div>}{field.validation?.min_length!==undefined && field.validation?.max_length!==undefined && field.validation.min_length>field.validation.max_length && <p role="alert">Минимальная длина не может быть больше максимальной.</p>}</details>}
+                              <DefaultValueEditor field={field} optionText={fieldOptionsText} requisiteSets={requisiteSets} change={value => setField((current:any) => ({ ...current, default_value: value }))} changeSource={value => setField((current:any) => ({ ...current, default_source: value }))}/>
                               {!field.calculated && (
                                 <label className="check">
                                   <input
@@ -1722,6 +1813,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                   : "Добавить вопрос"}
                               </button>
                               <button type="button" className="secondary" onClick={() => { setShowFieldEditor(false); setEditing(undefined); if (selectionDraft) { setSelection(selectionDraft); setSelectionDraft(null); setStage(3); } }}>Отмена</button>
+                              {editing && <button type="button" className="secondary document-delete" disabled={busy} onClick={() => prepareFieldDelete(schema?.fields?.find((item:any) => item.id === editing))}>Удалить вопрос</button>}
                             </form>
                           )}
                           {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}</div>}
@@ -1754,7 +1846,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     </button>
                                     <button
                                       aria-label="Удалить вопрос"
-                                      onClick={() => removeField(x.id)}
+                                      onClick={() => prepareFieldDelete(x)}
                                     >
                                       <Trash2 size={14} />
                                     </button>
@@ -1785,7 +1877,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                       value={b.format_config?.format || "RAW"}
                                       onChange={(event) => changeBindingFormat(b, event.target.value)}
                                     >
-                                      {Object.entries(OUTPUT_FORMATS).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}
+                                      {bindingFormats(schema?.fields.find((item:any) => item.id === b.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}
                                     </select>
                                   </label>
                                 </span>
@@ -2095,6 +2187,7 @@ function TemplateBuilder({ api }: { api: Api }) {
         </main>
       </section>
       {pendingAction && selected && <ConfirmAction title={pendingAction === "delete" ? "Удалить шаблон" : pendingAction === "archive" ? "Архивировать шаблон" : "Восстановить шаблон"} body={pendingAction === "delete" ? `Удалить черновой шаблон «${selected.name}»?` : pendingAction === "archive" ? `Убрать шаблон «${selected.name}» из каталога новых договоров? Созданные документы сохранятся.` : `Вернуть шаблон «${selected.name}» в каталог?`} action={pendingAction === "delete" ? "Удалить" : pendingAction === "archive" ? "Архивировать" : "Восстановить"} busy={busy} onConfirm={() => void manageTemplate()} onCancel={() => setPendingAction(null)}/>}
+      {pendingFieldDelete && <ConfirmAction title="Удалить вопрос" body={`Удалить вопрос «${pendingFieldDelete.label}»? Связанных зависимостей: ${pendingFieldDelete.dependencies.length}.`} details={pendingFieldDelete.dependencies.map((dependency:any)=>dependency.label)} warning={pendingFieldDelete.dependencies.some((dependency:any)=>dependency.complex) ? "Внимание: логика вложенных условий или вычислений изменится. Условные области с этим вопросом станут всегда включёнными." : pendingFieldDelete.dependencies.some((dependency:any)=>dependency.kind==="region") ? "Условные области с этим вопросом станут всегда включёнными." : undefined} action="Удалить" busy={busy} onConfirm={() => void removeField(pendingFieldDelete)} onCancel={() => setPendingFieldDelete(null)}/>}
     </div>
   );
 }
@@ -2107,8 +2200,13 @@ function InspectorPortal({ children }: { children: React.ReactNode }) {
   return target ? createPortal(children, target) : null;
 }
 
-function TestDriveField({field,value,change}:any){
+export function TestDriveField({field,value,change}:any){
   if(field.field_type==="BOOLEAN")return <label>{field.label}<select value={String(value??"")} onChange={e=>change(e.target.value===""?null:e.target.value==="true")}><option value="">Не выбрано</option><option value="true">Да</option><option value="false">Нет</option></select></label>;
+  if(isStructuredChoice(field)){
+    const answer=choiceAnswer(value),multiple=field.field_type==="MULTI_SELECT";
+    const options=[...field.config.option_items,...(field.config.allow_other?[{key:OTHER,label:"Иное"}]:[])];
+    return <fieldset className="test-drive-choice"><legend>{field.label}</legend><div className="test-drive-options">{options.map((option:any)=><label key={option.key}><input type={multiple?"checkbox":"radio"} name={`test-${field.id}`} checked={answer.selected.includes(option.key)} onChange={event=>change({...answer,selected:multiple?event.target.checked?[...answer.selected,option.key]:answer.selected.filter(key=>key!==option.key):[option.key]})}/><span>{option.label}</span></label>)}</div>{answer.selected.includes(OTHER)&&(multiple?<div className="test-drive-other">{choiceOtherValues(answer).map((text,index)=><div key={index}><input aria-label={`Свой вариант ${index+1}`} value={text} onChange={event=>{const other_texts=[...choiceOtherValues(answer)];other_texts[index]=event.target.value;change({...answer,other_text:other_texts[0]||"",other_texts});}}/><button type="button" onClick={()=>{const other_texts=choiceOtherValues(answer).filter((_,position)=>position!==index);change({...answer,other_text:other_texts[0]||"",other_texts});}}>Удалить</button></div>)}<button type="button" onClick={()=>change({...answer,other_texts:[...choiceOtherValues(answer),""]})}>Добавить свой вариант</button></div>:<input aria-label="Свой вариант" value={answer.other_text} onChange={event=>change({...answer,other_text:event.target.value})}/>)}</fieldset>;
+  }
   if(field.field_type==="SINGLE_SELECT")return <label>{field.label}<select value={value??""} onChange={e=>change(e.target.value)}><option value="">Не выбрано</option>{(field.config?.options||[]).map((option:string)=><option key={option}>{option}</option>)}</select></label>;
   if(field.field_type==="LIST")return <label>{field.label}<textarea value={(value||[]).join("\n")} onChange={e=>change(e.target.value.split("\n").filter(Boolean))}/></label>;
   if(field.field_type==="COMPOSITE")return <fieldset><legend>{field.label}</legend>{(field.config?.components||[]).map((part:any)=><label key={part.key}>{part.label}<input value={(value||{})[part.key]||""} onChange={e=>change({...value,[part.key]:e.target.value})}/></label>)}</fieldset>;
@@ -2134,7 +2232,7 @@ const OPS: any = {
 const REGION_LABELS: any = {
   CONDITIONAL_RUN: "Фрагмент текста",
   CONDITIONAL_PARAGRAPH: "Абзац",
-  CONDITIONAL_PARAGRAPH_GROUP: "Блок соседних абзацев",
+  CONDITIONAL_PARAGRAPH_GROUP: "Блок абзацев и строк таблицы",
   CONDITIONAL_TABLE_ROW: "Строка таблицы",
   CONDITIONAL_TABLE: "Таблица",
   CONDITIONAL_TABLE_COLUMN: "Колонка таблицы",
@@ -2152,7 +2250,7 @@ function regionHasNode(region: any, node: string) {
   )
     return loc.node === node;
   if (region.region_type === "CONDITIONAL_PARAGRAPH_GROUP")
-    return loc.nodes.includes(node);
+    return loc.nodes.includes(blockUnitLocator(node));
   let prefix = `${loc.part}#/tbl[${loc.table}]`;
   return node.startsWith(
     region.region_type === "CONDITIONAL_TABLE_ROW"

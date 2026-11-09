@@ -61,7 +61,7 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     await act(async()=>{const setter=Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,"value").set;setter.call(groupInput,"Сведения о Заказчике");groupInput.dispatchEvent(new dom.window.Event("input",{bubbles:true}));});
     const defaultDetails = form.querySelector(".default-value-editor");
     assert.ok(defaultDetails, "default value is available in the question editor");
-    await act(async () => defaultDetails.querySelector('input[type="checkbox"]').click());
+    await act(async () => { const source = defaultDetails.querySelector('[aria-label="Источник предзаполнения"]'); source.value = "FIXED"; source.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
     const defaultInput = defaultDetails.querySelector('input[type="text"]');
     await act(async () => { const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set; setter.call(defaultInput, "Москва"); defaultInput.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
     await act(async () => { form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })); });
@@ -168,4 +168,54 @@ test("copy questions from another version selects dependencies and refreshes the
     assert.equal(writes.length,1);assert.deepEqual(new Set(writes[0].field_ids),new Set(["a","b"]));
     assert.match(dom.window.document.querySelector(".workspace-question-list").textContent,/Аванс/);
   }finally{await act(async()=>root.unmount());await server.close();dom.window.close();for(const [key,descriptor] of Object.entries(previous))descriptor?Object.defineProperty(globalThis,key,descriptor):delete globalThis[key];}
+});
+
+test("deleting a question warns about linked Word and nested rules, then refreshes the editor", async () => {
+  const dom=new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>",{url:"http://localhost/templates"});
+  const globals={window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,Node:dom.window.Node,IS_REACT_ACT_ENVIRONMENT:true,crypto:dom.window.crypto};
+  const previous=Object.fromEntries(Object.keys(globals).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  for(const [key,value] of Object.entries(globals))Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
+  const server=await createServer({server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
+  const {TemplateAdmin}=await server.ssrLoadModule("/src/TemplateAdmin.tsx");
+  const React=await import("react");const {act}=React;const {createRoot}=await import("react-dom/client");const root=createRoot(dom.window.document.getElementById("root"));
+  const version={id:"version-1",template_id:"template-1",version_number:1,status:"DRAFT",original_filename:"sample.docx"};
+  const fields=[{id:"source",field_key:"source",label:"Источник",field_type:"TEXT",position:1,config:{group:"Раздел"}},{id:"dependent",field_key:"dependent",label:"Зависимый",field_type:"TEXT",position:2,config:{group:"Раздел"}}];
+  const dependencies=[{kind:"binding",id:"binding-1",label:"Привязка Word: «VALUE»"},{kind:"question",id:"dependent:visible_when",label:"Условие вопроса «Зависимый»",complex:true}];
+  const writes=[];
+  const api=async(path,options={})=>{
+    if(path==="/document-templates")return[{id:"template-1",name:"Тестовый договор",category:"Договоры",version_count:1}];
+    if(path.endsWith("/versions"))return[version];
+    if(path.endsWith("/preview"))return{nodes:[{locator:"word/document.xml#/p[1]",kind:"paragraph",text:"VALUE"}]};
+    if(path.endsWith("/questionnaire"))return{fields:[...fields]};
+    if(path.endsWith("/bindings")||path.endsWith("/conditional-regions")||path.endsWith("/repeating-groups")||path.endsWith("/binding-candidates"))return[];
+    if(path.endsWith("/fields/source/dependencies"))return{dependencies};
+    if(path.endsWith("/fields/source")&&options.method==="DELETE"){
+      writes.push(JSON.parse(options.body));fields.splice(0,1);return null;
+    }
+    throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
+  };
+  const click=async item=>{assert.ok(item);await act(async()=>item.click());};
+  try{
+    await act(async()=>root.render(React.createElement(TemplateAdmin,{api})));
+    await click([...dom.window.document.querySelectorAll("button")].find(button=>button.textContent.includes("Тестовый договор")));
+    await click([...dom.window.document.querySelectorAll("button")].find(button=>button.textContent.includes("Версия 1")));
+    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    await click([...dom.window.document.querySelectorAll(".field-editor button")].find(button=>button.textContent.includes("Удалить вопрос")));
+    let dialog=dom.window.document.querySelector('[role="dialog"]');
+    assert.match(dialog.textContent,/Связанных зависимостей: 2/);
+    assert.match(dialog.textContent,/Привязка Word/);
+    assert.match(dialog.textContent,/логика вложенных условий/);
+    await click([...dialog.querySelectorAll("button")].find(button=>button.textContent==="Отмена"));
+    assert.equal(writes.length,0);
+    await click([...dom.window.document.querySelectorAll(".field-editor button")].find(button=>button.textContent.includes("Удалить вопрос")));
+    dialog=dom.window.document.querySelector('[role="dialog"]');
+    await click([...dialog.querySelectorAll("button")].find(button=>button.textContent==="Удалить"));
+    assert.deepEqual(writes,[{confirmed_dependencies:["binding:binding-1","question:dependent:visible_when"],acknowledge_logic_change:true}]);
+    assert.doesNotMatch(dom.window.document.querySelector(".workspace-question-list").textContent,/Источник/);
+    assert.match(dom.window.document.querySelector(".workspace-question-list").textContent,/Зависимый/);
+    assert.equal(dom.window.document.querySelector('[role="dialog"]'),null);
+  }finally{
+    await act(async()=>root.unmount());await server.close();dom.window.close();
+    for(const [key,descriptor] of Object.entries(previous))descriptor?Object.defineProperty(globalThis,key,descriptor):delete globalThis[key];
+  }
 });

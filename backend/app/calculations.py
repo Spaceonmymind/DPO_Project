@@ -7,7 +7,7 @@ from app.conditions import ConditionEngine, ConditionConfigurationError
 
 CALC_OPERATIONS={'ADD','SUBTRACT','MULTIPLY','DIVIDE','SUM','COUNT','MIN','MAX','ROUND','PERCENT_OF','ADD_PERCENT','EXTRACT_PERCENT','REMOVE_PERCENT','IF'}
 ROUNDING={'HALF_UP':ROUND_HALF_UP,'HALF_EVEN':ROUND_HALF_EVEN,'DOWN':ROUND_DOWN,'UP':ROUND_UP}
-FORMATS={'RAW','NUMBER','DECIMAL','MONEY','MONEY_WITH_CURRENCY','DATE','DATE_WORDS','PERCENT','MONEY_WORDS_RUB'}
+FORMATS={'RAW','NUMBER','DECIMAL','MONEY','MONEY_WITH_CURRENCY','DATE','DATE_WORDS','DATE_MONTH_SHORT','GENITIVE','PERCENT','MONEY_WORDS_RUB'}
 NUMERIC_TYPES={'INTEGER','DECIMAL','MONEY'}
 
 class CalculationError(ValueError): pass
@@ -220,9 +220,12 @@ class ValueFormatter:
  def format(cls,value,name='RAW',options=None):
   cls.validate(name);options=options or {};cls.validate_options(options)
   if value in (None,''):return ''
-  if name=='RAW':return str(value)
-  if name in {'DATE','DATE_WORDS'}:
-   parsed=date.fromisoformat(str(value));return parsed.strftime('%d.%m.%Y') if name=='DATE' else f'{parsed.day} {cls.MONTHS[parsed.month-1]} {parsed.year} года'
+  if name in {'RAW','GENITIVE'}:return str(value)
+  if name in {'DATE','DATE_WORDS','DATE_MONTH_SHORT'}:
+   try: parsed=date.fromisoformat(str(value))
+   except (TypeError,ValueError): raise CalculationError('Ожидалась дата в формате ГГГГ-ММ-ДД')
+   if name=='DATE':return parsed.strftime('%d.%m.%Y')
+   return f'{parsed.day} {cls.MONTHS[parsed.month-1]} {parsed.year} '+('г.' if name=='DATE_MONTH_SHORT' else 'года')
   number=decimal_value(value);precision=int(options.get('precision',0 if name in {'NUMBER','PERCENT'} else 2));number=CalculationEngine.quantize(number,precision,options.get('rounding','HALF_UP'))
   if name=='MONEY_WORDS_RUB':return cls.money_words(number)
   text=f'{number:,.{precision}f}'.replace(',',' ').replace('.',',')

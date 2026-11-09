@@ -11,12 +11,14 @@ def validate_options(items, allow_other=False):
         return False
     keys = []
     for item in items:
-        if not isinstance(item, dict) or set(item) != {'key', 'label'}:
+        if not isinstance(item, dict) or not {'key', 'label'} <= set(item) or set(item) - {'key', 'label', 'genitive'}:
             return False
         key, label = item['key'], item['label']
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,79}', key) or key == OTHER:
             return False
         if not isinstance(label, str) or not label.strip() or len(label) > 200:
+            return False
+        if 'genitive' in item and (not isinstance(item['genitive'], str) or len(item['genitive']) > 200):
             return False
         keys.append(key)
     return len(keys) == len(set(keys))
@@ -68,9 +70,9 @@ def validate_answer(value, config, multiple, required=False):
     return None
 
 
-def render(value, config):
+def render(value, config, genitive=False):
     keys = selected(value)
-    labels = {item['key']: item['label'] for item in config.get('option_items', [])}
+    labels = {item['key']: (item.get('genitive') or item['label']) if genitive else item['label'] for item in config.get('option_items', [])}
     parts=[]
     for key in keys:
         if key==OTHER: parts.extend(text.strip() for text in other_values(value) if isinstance(text,str) and text.strip())

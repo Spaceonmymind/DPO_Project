@@ -5,6 +5,8 @@
 .template-open .workspace-pane-divider{position:relative;align-self:stretch;min-height:440px;cursor:col-resize;touch-action:none;outline:none}
 .template-open .workspace-pane-divider::before{content:"";position:absolute;top:12px;bottom:12px;left:5px;width:2px;border-radius:2px;background:#dce9e3;transition:background .15s,width .15s}
 .template-open .workspace-pane-divider:hover::before,.template-open .workspace-pane-divider:focus-visible::before,.workspace-resizing .workspace-pane-divider::before{width:3px;background:#0d8168}
+.template-open .workspace-pane-drag-line{position:fixed;left:0;width:2px;z-index:1000;pointer-events:none;background:#087d64;box-shadow:0 0 0 2px #d9f5e9;will-change:transform}
+.template-open .workspace-pane-drag-line[hidden]{display:none}
 .workspace-resizing,.workspace-resizing *{cursor:col-resize!important;user-select:none!important}
 .template-open .document-outline,.template-open .questionnaire-builder{position:sticky;top:12px;height:clamp(440px,calc(100vh - 270px),760px);max-height:none;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .template-open .document-outline{display:flex;flex-direction:column;padding:12px;background:#fff}
@@ -195,3 +197,20 @@
 .template-open .default-other-values input,.template-open .default-list-values input{flex:1;min-width:0}
 .template-open .default-other-values button,.template-open .default-list-values button{flex:none}
 .template-open .default-value-editor button{justify-self:start}
+.template-open .default-requisite-source{display:grid;gap:9px;min-width:0}
+.template-open .choice-option-row{flex-wrap:wrap}
+.template-open .choice-option-row input[placeholder="Родительный падеж"]{flex-basis:100%}
+.template-open .test-drive-choice{min-width:0;border:1px solid #d8e6e1;border-radius:9px;padding:10px}
+.template-open .test-drive-choice legend{padding:0 4px;font-size:12px;font-weight:750}
+.template-open .test-drive-options{display:grid;gap:6px}
+.template-open .test-drive-options label{display:flex;align-items:flex-start;gap:8px;min-width:0;white-space:normal;overflow-wrap:anywhere}
+.template-open .test-drive-options input{width:auto!important;flex:none;margin-top:3px}
+.template-open .test-drive-other{display:grid;gap:6px;margin-top:9px}
+.template-open .test-drive-other>div{display:flex;gap:6px;min-width:0}
+.template-open .workspace-text-rules{padding:10px;border:1px solid #d8e6e1;border-radius:9px;background:#f8fcfa}
+.template-open .workspace-text-rules summary{cursor:pointer;color:#245648;font-size:12px;font-weight:750}
+.template-open .workspace-text-rules>label,.template-open .workspace-text-rules>div{margin-top:9px}
+.template-open .workspace-text-rule-flags{display:grid;gap:5px}
+.template-open .workspace-text-rules p[role="alert"]{color:#ad493f;font-size:11px}
+.confirmation-dependencies{max-height:220px;overflow:auto;margin:0;padding-left:20px;color:#42584f;font-size:13px;line-height:1.45}
+.confirmation-warning{margin:0;padding:9px 11px;border-radius:8px;background:#fff3de;color:#755220;font-size:12px;line-height:1.4}

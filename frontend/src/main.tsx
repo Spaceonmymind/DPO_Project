@@ -35,6 +35,7 @@ import {
   getSupplySpecification,
 } from "./specificationPresentation.js";
 import { TemplateAdmin } from "./TemplateAdmin";
+import { RequisiteDirectory } from "./RequisiteDirectory";
 import { ContractCatalog } from "./ContractCatalog";
 import { ContractHome } from "./ContractHome";
 import { MyDocuments } from "./MyDocuments";
@@ -288,6 +289,7 @@ function Sidebar({ u, route, go, logout }: any) {
             {!closed && "Конструктор шаблонов"}
           </button>
         )}
+        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/requisites" ? "active" : ""} title={closed ? "Справочник реквизитов" : ""} onClick={() => go("/requisites")}><FileCheck2 />{!closed && "Справочник реквизитов"}</button>}
         <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && 'Обучение'}</button>
       </nav>
       <footer>
@@ -1043,6 +1045,8 @@ function Shell({ u, logout }: any) {
               load(q).catch((e: any) => setToast(e.message))
             }
           />
+        ) : route === "/requisites" ? (
+          u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) ? <RequisiteDirectory api={api} /> : <div className="page platform-empty"><h2>Раздел недоступен</h2></div>
         ) : route === "/templates" ? (
           u.roles?.some((r: string) =>
             ["dpo_specialist", "administrator"].includes(r),

@@ -28,7 +28,8 @@ test('preview selection persists a structural locator instead of coordinates',()
   assert.match(component,/data-locator/);
   assert.match(component,/selected_text/);
   assert.match(component,/bindings/);
-  assert.doesNotMatch(component,/getBoundingClientRect|pageX|pageY/);
+  const selectionHandler=component.slice(component.indexOf('function selectRange('),component.indexOf('  function ',component.indexOf('function selectRange(')+1));
+  assert.doesNotMatch(selectionHandler,/getBoundingClientRect|pageX|pageY/);
 });
 
 test('template page is role-gated in the application shell',()=>{

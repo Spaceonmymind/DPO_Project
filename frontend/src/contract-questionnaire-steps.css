@@ -16,6 +16,7 @@
 .contract-questionnaire .dynamic-form .repeat-item>header{margin-bottom:9px}
 .contract-questionnaire .dynamic-form .repeat-fields{gap:12px}
 .contract-questionnaire .dynamic-form .contract-choice-options{margin-top:2px}
+.contract-questionnaire .question-rule-hint{display:block;color:#60736b;font-size:12px;font-weight:400;line-height:1.4}
 .documents-list article>div{flex-wrap:wrap}
 .document-dialog-backdrop{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;padding:16px;background:#152c2580}
 .document-dialog{display:grid;gap:12px;width:min(440px,100%);padding:24px;border:1px solid #d8e6e1;border-radius:16px;background:#fff;box-shadow:0 20px 60px #10261b33}

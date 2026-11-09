@@ -8,15 +8,17 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any,Callable
 from xml.etree import ElementTree as ET
-from fastapi import APIRouter,Depends,File,HTTPException,UploadFile
+from fastapi import APIRouter,Body,Depends,File,HTTPException,UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app import choices
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
-from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductFieldMapping,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,RequisiteSet,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
@@ -32,6 +34,8 @@ def validated_draft_title(value):
   raise HTTPException(422,detail='Название должно содержать от 1 до 200 символов')
  return title
 def roles(u): return set(u.roles or [])
+def require_requisite_editor(u):
+ if not roles(u)&{'dpo_specialist','administrator'}:raise HTTPException(403,detail='Изменять общий справочник может специалист ДПО или администратор')
 def require_manager(u):
  if not roles(u)&{'dpo_specialist','administrator'}: raise HTTPException(403,detail='Управление шаблонами доступно специалистам ДПО')
 def require_publisher(u):
@@ -127,13 +131,20 @@ def template_out(x,s): return {'id':x.id,'code':x.code,'name':x.name,'category':
 def version_out(x): return {'id':x.id,'template_id':x.template_id,'version_number':x.version_number,'status':x.status,'original_filename':x.original_filename,'source_sha256':x.source_sha256,'structure_fingerprint':x.structure_fingerprint,'preview_metadata':x.preview_metadata,'created_at':x.created_at,'published_at':x.published_at}
 def field_out(x): return {'id':x.id,'schema_id':x.schema_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config}
 def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.binding_key,'occurrence_index':x.occurrence_index,'selected_text':x.selected_text,'locator':x.locator,'format_config':x.format_config or {},'status':x.status}
+def requisite_set_out(x): return {'id':x.id,'name':x.name,'status':x.status,'entries':x.entries,'revision':x.revision,'updated_at':x.updated_at}
+def validate_binding_format(name,field):
+ ValueFormatter.validate(name)
+ if name=='GENITIVE' and (not field or field.field_type not in {'SINGLE_SELECT','MULTI_SELECT'} or not (field.config or {}).get('option_items')):
+  raise CalculationError('Родительный падеж доступен для вопросов с настроенными вариантами ответа')
+ if name=='DATE_MONTH_SHORT' and (not field or field.field_type!='DATE'):
+  raise CalculationError('Формат даты доступен только для вопроса типа «Дата»')
 def region_out(x): return {'id':x.id,'region_key':x.region_key,'region_type':x.region_type,'locator':x.locator,'include_when':x.include_when,'original_text':x.original_text,'status':x.status}
 def repeating_field_out(x): return {'id':x.id,'group_id':x.group_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator}
 def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x.name,'description':x.description,'min_items':x.min_items,'max_items':x.max_items,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator,'status':x.status,'fields':[repeating_field_out(f) for f in s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all()]}
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; default_value:Any=None; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; default_value:Any=None; default_source:dict[str,Any]|None=None; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
@@ -148,9 +159,16 @@ class RepeatingFieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
 class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
 class AnswersPayload(BaseModel): answers:dict[str,Any]
+class DeleteFieldPayload(BaseModel):
+ confirmed_dependencies:list[str]=Field(default_factory=list)
+ acknowledge_logic_change:bool=False
 class CopyQuestionsPayload(BaseModel):
  source_version_id:str
  field_ids:list[str]|None=None
+class RequisiteSetPayload(BaseModel):
+ name:str=Field(min_length=2,max_length=240)
+ entries:list[dict[str,Any]]=Field(default_factory=list,max_length=100)
+ revision:int|None=Field(default=None,ge=1)
 class CandidateDecisionPayload(BaseModel):
  decision:str=Field(pattern=r'^(CONFIRMED|REJECTED)$')
 class CandidateBatchPayload(BaseModel):
@@ -158,7 +176,14 @@ class CandidateBatchPayload(BaseModel):
 
 def validate_field_payload(p):
  if p.field_type not in FIELD_TYPES: raise HTTPException(422,detail='Неподдерживаемый тип поля')
- if set(p.validation)-{'min_length','max_length','min','max','regex'}: raise HTTPException(422,detail='Параметры проверки содержат неподдерживаемые правила')
+ if set(p.validation)-{'min_length','max_length','min','max','regex','character_set','allow_spaces','allow_hyphens'}: raise HTTPException(422,detail='Параметры проверки содержат неподдерживаемые правила')
+ text_rules={'min_length','max_length','character_set','allow_spaces','allow_hyphens'}
+ if p.field_type not in {'TEXT','MULTILINE_TEXT'} and set(p.validation)&text_rules:raise HTTPException(422,detail='Ограничения символов доступны только для текстового вопроса')
+ for key in ('min_length','max_length'):
+  if key in p.validation and (type(p.validation[key]) is not int or not 0<=p.validation[key]<=10000):raise HTTPException(422,detail='Длина ответа должна быть от 0 до 10000 символов')
+ if p.validation.get('min_length',0)>p.validation.get('max_length',10000):raise HTTPException(422,detail='Минимальная длина не может быть больше максимальной')
+ if p.validation.get('character_set','ANY') not in {'ANY','DIGITS','LETTERS','ALNUM'}:raise HTTPException(422,detail='Неизвестный набор допустимых символов')
+ if any(key in p.validation and type(p.validation[key]) is not bool for key in ('allow_spaces','allow_hyphens')):raise HTTPException(422,detail='Разрешение пробелов и дефисов должно быть логическим')
  if 'regex' in p.validation:
   pattern=str(p.validation['regex'])
   if len(pattern)>200 or '(?' in pattern or re.search(r'\\[1-9]',pattern): raise HTTPException(422,detail='Регулярное выражение слишком сложное')
@@ -197,8 +222,28 @@ def validate_default_value(p):
  if kind=='COMPOSITE' and not isinstance(value,dict):raise HTTPException(422,detail='Значение по умолчанию должно быть составным объектом')
  if message:=validate_answer(type('DefaultField',(),{'field_type':kind,'required':p.required,'config':field_config(p)})(),value):
   raise HTTPException(422,detail=f'Значение по умолчанию: {message}')
+def validate_requisite_entries(entries):
+ keys=[]
+ for item in entries:
+  if set(item)!={'key','label','value'} or not isinstance(item['key'],str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{1,79}',item['key']):raise HTTPException(422,detail='Некорректный ключ реквизита')
+  if not isinstance(item['label'],str) or not 1<=len(item['label'].strip())<=160:raise HTTPException(422,detail='Укажите название реквизита')
+  if not isinstance(item['value'],(str,int,float,bool)) or isinstance(item['value'],str) and len(item['value'])>2000:raise HTTPException(422,detail='Некорректное значение реквизита')
+  keys.append(item['key'])
+ if len(keys)!=len(set(keys)):raise HTTPException(422,detail='Ключи реквизитов должны быть уникальными')
+def validate_default_source(p,s):
+ source=p.default_source
+ if source is None:return
+ if set(source)!={'set_id','field_key','fallback'} or source['fallback'] not in {'NONE','FIXED'} or not isinstance(source['set_id'],str) or not isinstance(source['field_key'],str):raise HTTPException(422,detail='Некорректный источник предзаполнения')
+ if p.calculated:raise HTTPException(422,detail='Вычисляемому вопросу нельзя назначить справочник')
+ if source['fallback']=='FIXED' and p.default_value is None:raise HTTPException(422,detail='Укажите резервное фиксированное значение')
+ item=s.get(RequisiteSet,source['set_id'])
+ if not item or item.status!='ACTIVE':raise HTTPException(422,detail='Набор реквизитов недоступен')
+ entry=next((entry for entry in item.entries if entry['key']==source['field_key']),None)
+ if not entry:raise HTTPException(422,detail='Реквизит не найден в наборе')
+ field=type('ReferenceField',(),{'field_type':p.field_type,'required':p.required,'config':field_config(p)})()
+ if error:=validate_answer(field,entry['value']):raise HTTPException(422,detail=f'Значение реквизита не подходит вопросу: {error}')
 def calculation_config(p): return {'calculated':p.calculated,'expression':p.expression,'precision':p.precision,'rounding':p.rounding,'output_format':p.output_format}
-def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'default_value':p.default_value,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'default_value':p.default_value,'default_source':p.default_source,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
 def canonical_group(name,fields):
  clean=' '.join(name.split()) or 'Основные сведения'
  return next((item.config['group'] for item in fields if ' '.join((item.config or {}).get('group','').split()).casefold()==clean.casefold()),clean)
@@ -249,15 +294,62 @@ def validate_repeating_field_payload(p):
 def validate_condition_schema(fields):
  try: ConditionEngine.validate_schema(fields)
  except ConditionConfigurationError as exc: raise HTTPException(422,detail=f'Некорректные условия анкеты: {exc}')
+def _references_question(value,key):
+ if isinstance(value,dict):
+  if value.get('source') in {'ROW_FIELD','ROW_CALCULATED'} or value.get('operation') in {'SUM','COUNT','MIN','MAX'}:return False
+  return value.get('field_key')==key or any(_references_question(item,key) for item in value.values())
+ if isinstance(value,list):return any(_references_question(item,key) for item in value)
+ return False
+def _prune_question_condition(node,key):
+ """Remove a referenced leaf and collapse groups without changing surviving branches."""
+ if node is None:return None
+ if node.get('field_key')==key:return None
+ operator=node.get('operator')
+ if operator in {'AND','OR'}:
+  children=[item for child in node['conditions'] if (item:=_prune_question_condition(child,key)) is not None]
+  return {**node,'conditions':children} if len(children)>1 else children[0] if children else None
+ if operator=='NOT':
+  child=_prune_question_condition(node['condition'],key)
+  return {**node,'condition':child} if child is not None else None
+ if operator in {'ALWAYS','NEVER'} and 'previous_condition' in node:
+  previous=_prune_question_condition(node['previous_condition'],key)
+  return {**node,'previous_condition':previous} if previous is not None else {'operator':operator}
+ return node
+def _complex_question_condition(node):
+ if not isinstance(node,dict):return False
+ return node.get('operator') in {'AND','OR','NOT'} or any(_complex_question_condition(value) for value in node.values() if isinstance(value,dict)) or any(_complex_question_condition(item) for value in node.values() if isinstance(value,list) for item in value)
+def question_dependencies(field,version,s):
+ result=[];schema=s.get(QuestionnaireSchema,field.schema_id)
+ for binding in s.query(DocumentBinding).filter_by(template_version_id=version.id).all():
+  if binding.field_id==field.id or binding.binding_key==field.field_key:result.append({'kind':'binding','label':f'Привязка Word: «{binding.selected_text[:80]}»','id':binding.id})
+ for other in s.query(QuestionnaireField).filter_by(schema_id=schema.id).all():
+  if other.id==field.id:continue
+  cfg=other.config or {}
+  for name in ('visible_when','required_when','document_condition'):
+   if _references_question(cfg.get(name),field.field_key):result.append({'kind':'question','label':f'Условие вопроса «{other.label}» ({name})','id':f'{other.id}:{name}','complex':_complex_question_condition(cfg[name])})
+  if any(_references_question(cfg.get(name),field.field_key) for name in ('expression','text_expression')):result.append({'kind':'calculation','label':f'Вычисление вопроса «{other.label}» станет обычным полем','id':other.id,'complex':True})
+ for region in s.query(ConditionalDocumentRegion).filter_by(template_version_id=version.id).all():
+  if _references_question(region.include_when,field.field_key):result.append({'kind':'region','label':f'Условная область «{region.region_key}»: будет всегда включена','id':region.id,'complex':_complex_question_condition(region.include_when)})
+ for group in s.query(RepeatingGroup).filter_by(template_version_id=version.id).all():
+  if _references_question((group.config or {}).get('visible_when'),field.field_key):result.append({'kind':'group','label':f'Условие повторяемой группы «{group.name}»','id':group.id,'complex':_complex_question_condition((group.config or {})['visible_when'])})
+  for row_field in s.query(RepeatingGroupField).filter_by(group_id=group.id).all():
+   cfg=row_field.config or {}
+   if _references_question(cfg.get('visible_when'),field.field_key):result.append({'kind':'row_field','label':f'Условие поля группы «{row_field.label}»','id':f'{row_field.id}:visible_when','complex':_complex_question_condition(cfg['visible_when'])})
+   if any(_references_question(cfg.get(name),field.field_key) for name in ('expression','text_expression')):result.append({'kind':'row_calculation','label':f'Вычисление поля группы «{row_field.label}» станет обычным полем','id':row_field.id,'complex':True})
+ for mapping in s.query(ContractProductFieldMapping).filter_by(target_field_id=field.id).all():result.append({'kind':'product','label':'Сопоставление вопроса с договорным продуктом','id':mapping.id})
+ return result
 def validate_answer(field,value):
  if value in (None,''):
   return 'Обязательное поле' if field.required else None
  cfg=field.config or {}; rules=cfg.get('validation') or {}; kind=field.field_type
  try:
   if kind in {'TEXT','MULTILINE_TEXT'}:
-   text=str(value)
+   if not isinstance(value,str):return 'Ожидался текст'
+   text=value
    if rules.get('min_length') is not None and len(text)<int(rules['min_length']): return f'Минимум {rules["min_length"]} символов'
    if rules.get('max_length') is not None and len(text)>int(rules['max_length']): return f'Максимум {rules["max_length"]} символов'
+   charset=rules.get('character_set','ANY')
+   if charset!='ANY' and any(not ((char==' ' and rules.get('allow_spaces')) or (char=='-' and rules.get('allow_hyphens')) or (charset=='DIGITS' and '0'<=char<='9') or (charset=='LETTERS' and char.isalpha()) or (charset=='ALNUM' and (char.isalpha() or '0'<=char<='9'))) for char in text):return {'DIGITS':'Допустимы только цифры','LETTERS':'Допустимы только буквы','ALNUM':'Допустимы только буквы и цифры'}[charset]+(' с пробелами' if rules.get('allow_spaces') else '')+(' и дефисами' if rules.get('allow_hyphens') else '')
    if rules.get('regex') and not re.fullmatch(str(rules['regex']),text): return 'Значение не соответствует требуемому формату'
   elif kind=='INTEGER': number=Decimal(int(value))
   elif kind in {'DECIMAL','MONEY'}: number=Decimal(str(value).replace(',','.'))
@@ -342,7 +434,7 @@ def formatted_bindings(bindings,values,fields=None):
  for binding in bindings:
   cfg=binding.format_config or {}; value=values.get(binding.binding_key,''); field=by_id.get(binding.field_id)
   structured_choice=field and field.field_type in {'SINGLE_SELECT','MULTI_SELECT'} and (field.config or {}).get('option_items')
-  result[binding.id]=render_value(field,value) if structured_choice or (field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list')))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
+  result[binding.id]=choices.render(value,field.config or {},genitive=cfg.get('format')=='GENITIVE') if structured_choice else render_value(field,value) if field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list'))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
  return result
 def validate_active_answers(fields,answers):
  errors={}
@@ -430,6 +522,25 @@ def _table_parts(locator):
 def _top_paragraph(locator):
  match=re.fullmatch(r'(.+)#/p\[(\d+)\]',locator)
  return (match.group(1),int(match.group(2))) if match else None
+def _structural_element(root,locator):
+ part,path=locator.split('#/',1);body=_body(root)
+ if match:=re.fullmatch(r'p\[(\d+)\]',path):return body.findall('./w:p',NS)[int(match.group(1))-1]
+ if match:=re.fullmatch(r'tbl\[(\d+)\]/tr\[(\d+)\]',path):return body.findall('./w:tbl',NS)[int(match.group(1))-1].findall('./w:tr',NS)[int(match.group(2))-1]
+ raise ValueError('Блок поддерживает только абзацы и строки таблицы')
+def _ordered_structural_units(root,part):
+ body=_body(root);units=[];paragraph_number=table_number=0
+ for child in body:
+  if child.tag==f'{{{WORD_NS}}}p':
+   paragraph_number+=1;units.append((f'{part}#/p[{paragraph_number}]',child))
+  elif child.tag==f'{{{WORD_NS}}}tbl':
+   table_number+=1
+   for row_number,row in enumerate(child.findall('./w:tr',NS),1):units.append((f'{part}#/tbl[{table_number}]/tr[{row_number}]',row))
+ return units
+def _block_unit(locator):
+ if _top_paragraph(locator):return locator
+ if parsed:=_table_parts(locator):return f'{parsed[0]}#/tbl[{parsed[1]}]/tr[{parsed[2]}]'
+ if re.fullmatch(r'.+#/tbl\[\d+\]/tr\[\d+\]',locator):return locator
+ return None
 def _paragraph_text(node): return ''.join(x.text or '' for x in node.findall('.//w:t',NS))
 def _span(cell):
  node=cell.find('./w:tcPr/w:gridSpan',NS);return int(node.get(f'{{{WORD_NS}}}val','1')) if node is not None else 1
@@ -472,13 +583,20 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
  elif p.region_type=='CONDITIONAL_PARAGRAPH':
   node=paragraph_for(root,p.start_locator); targets=[node]; locator.update({'node':p.start_locator,'nodes':[p.start_locator],'element_hash':_element_hash(node)})
  elif p.region_type=='CONDITIONAL_PARAGRAPH_GROUP':
-  first=_top_paragraph(p.start_locator); last=_top_paragraph(p.end_locator or '')
-  if not first or not last or first[0]!=last[0] or first[0]!=part: raise ValueError('Блок можно создать только из соседних абзацев одной части документа')
-  a,b=first[1],last[1]
-  if a>b: raise ValueError('Конец блока должен находиться после начала')
-  paragraphs=body.findall('./w:p',NS)
-  if b>len(paragraphs): raise ValueError('Границы блока устарели')
-  targets=paragraphs[a-1:b]; locators=[f'{part}#/p[{i}]' for i in range(a,b+1)]; locator.update({'nodes':locators,'start_node':locators[0],'end_node':locators[-1],'element_hashes':[_element_hash(x) for x in targets]})
+  start=_block_unit(p.start_locator);end=_block_unit(p.end_locator or '')
+  if not start or not end or not nodes.get(p.end_locator) or p.end_locator.split('#/',1)[0]!=part:raise ValueError('Выберите начальный абзац или строку и конечный абзац или строку одной части Word')
+  units=_ordered_structural_units(root,part);indexes={key:index for index,(key,_) in enumerate(units)}
+  if start not in indexes or end not in indexes:raise ValueError('Границы блока устарели')
+  if indexes[end]<indexes[start]:raise ValueError('Конец блока должен находиться после начала')
+  selected=units[indexes[start]:indexes[end]+1];locators=[key for key,_ in selected];targets=[element for _,element in selected]
+  selected_set=set(locators);whole_tables=[]
+  for key,row in selected:
+   if '/tr[' not in key:continue
+   table_no=int(re.search(r'/tbl\[(\d+)\]',key).group(1));table=body.findall('./w:tbl',NS)[table_no-1]
+   table_rows=[f'{part}#/tbl[{table_no}]/tr[{index}]' for index,_ in enumerate(table.findall('./w:tr',NS),1)]
+   if set(table_rows)<=selected_set and table_no not in whole_tables:whole_tables.append(table_no)
+   if not set(table_rows)<=selected_set and row.find('.//w:vMerge',NS) is not None:raise ValueError('Частичное удаление таблицы пересекает вертикально объединённые ячейки; выберите целую таблицу или другие границы')
+  locator.update({'nodes':locators,'start_node':start,'end_node':end,'whole_tables':whole_tables,'element_hashes':[_element_hash(x) for x in targets]})
  elif p.region_type in {'CONDITIONAL_TABLE_ROW','CONDITIONAL_TABLE','CONDITIONAL_TABLE_COLUMN'}:
   parsed=_table_parts(p.start_locator)
   if not parsed: raise ValueError('Выберите ячейку нужной таблицы')
@@ -517,7 +635,8 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
 def _binding_inside_region(binding,region):
  node=binding.locator['node']; loc=region.locator; kind=region.region_type
  if kind=='CONDITIONAL_RUN': return node==loc['node'] and binding.locator['text_start']>=loc['text_start'] and binding.locator['text_end']<=loc['text_end']
- if kind in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}: return node in loc.get('nodes',[])
+ if kind=='CONDITIONAL_PARAGRAPH_GROUP':return _block_unit(node) in loc.get('nodes',[])
+ if kind=='CONDITIONAL_PARAGRAPH':return node in loc.get('nodes',[])
  if kind=='CONDITIONAL_TABLE_COLUMN':
   return any(node.startswith(prefix+'/') for prefix in loc.get('cell_nodes',[]))
  prefix=f"{loc['part']}#/tbl[{loc['table']}]"
@@ -535,7 +654,7 @@ def validate_regions(v,s,bindings=None):
   root=_part_root(safe_source(v),loc.get('part',''))
   try:
    if region.region_type in {'CONDITIONAL_RUN','CONDITIONAL_PARAGRAPH'}: actual=[paragraph_for(root,loc['node'])]
-   elif region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': actual=[paragraph_for(root,x) for x in loc['nodes']]
+   elif region.region_type=='CONDITIONAL_PARAGRAPH_GROUP': actual=[_structural_element(root,x) for x in loc['nodes']]
    elif region.region_type=='CONDITIONAL_TABLE_ROW': actual=[_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1]]
    else: actual=[_body(root).findall('./w:tbl',NS)[loc['table']-1]]
   except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Границы области «{region.region_key}» устарели')
@@ -569,7 +688,10 @@ def _region_contains(parent,child):
  if pt=='CONDITIONAL_PARAGRAPH_GROUP':
   own=set(p.get('nodes',[])); other=set(c.get('nodes',[]))
   if ct=='CONDITIONAL_PARAGRAPH_GROUP': return bool(other) and other<own
-  return ct in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_RUN'} and c.get('node') in own
+  if ct in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_RUN'}:return _block_unit(c.get('node','')) in own
+  if ct=='CONDITIONAL_TABLE_ROW':return f"{c['part']}#/tbl[{c['table']}]/tr[{c['row']}]" in own
+  if ct=='CONDITIONAL_TABLE':return c.get('table') in p.get('whole_tables',[])
+  return False
  if pt=='CONDITIONAL_PARAGRAPH':
   return ct=='CONDITIONAL_RUN' and c.get('node')==p.get('node')
  return False
@@ -584,6 +706,7 @@ def _regions_overlap(a,b):
   col,other=(a,b) if ta=='CONDITIONAL_TABLE_COLUMN' else (b,a)
   if other.region_type=='CONDITIONAL_TABLE': return col.locator.get('table')==other.locator.get('table')
   if other.region_type=='CONDITIONAL_TABLE_ROW': return col.locator.get('table')==other.locator.get('table')
+  if other.region_type=='CONDITIONAL_PARAGRAPH_GROUP':return any(key.startswith(f"{col.locator['part']}#/tbl[{col.locator['table']}]/tr[") for key in other.locator.get('nodes',[]))
   return any(other.locator.get('node','').startswith(node+'/') for node in col.locator.get('cell_nodes',[]))
  def scope(region):
   loc=region.locator;kind=region.region_type
@@ -750,7 +873,8 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
     for region in grouped[info.filename]['regions']:
      loc=region.locator
      if region.region_type=='CONDITIONAL_RUN':continue
-     if region.region_type in {'CONDITIONAL_PARAGRAPH','CONDITIONAL_PARAGRAPH_GROUP'}:structural_removals.extend(paragraph_for(root,x) for x in loc['nodes'])
+     if region.region_type=='CONDITIONAL_PARAGRAPH':structural_removals.extend(paragraph_for(root,x) for x in loc['nodes'])
+     elif region.region_type=='CONDITIONAL_PARAGRAPH_GROUP':structural_removals.extend(_structural_element(root,x) for x in loc['nodes'])
      elif region.region_type=='CONDITIONAL_TABLE_ROW':structural_removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1].findall('./w:tr',NS)[loc['row']-1])
      elif region.region_type=='CONDITIONAL_TABLE_COLUMN':column_removals.append((_body(root).findall('./w:tbl',NS)[loc['table']-1],loc['column']))
      else:structural_removals.append(_body(root).findall('./w:tbl',NS)[loc['table']-1])
@@ -781,16 +905,63 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
       for row_offset,clone in enumerate(clones):table.insert(insert_at+item_index*block_size+row_offset,clone)
      for row in source_rows:table.remove(row)
     for table,column in column_removals:_remove_table_column(table,column)
+    affected_tables=set()
     for node in structural_removals:
      parent=_parent_of(root,node)
      if parent is None: raise ValueError('Не удалось безопасно удалить OOXML-область')
+     if node.tag==f'{{{WORD_NS}}}tr':affected_tables.add(parent)
      parent.remove(node)
+    for table in affected_tables:
+     if not table.findall('./w:tr',NS):
+      parent=_parent_of(root,table)
+      if parent is not None:parent.remove(table)
     raw=ET.tostring(root,encoding='utf-8',xml_declaration=True)
    dst.writestr(info,raw)
  validate_docx(target.name,DOCX_MIME,target.read_bytes())
 
 def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  r=APIRouter(tags=['contract-platform']); prefix='/api/v1/document-templates'
+ @r.get('/api/v1/requisite-sets')
+ def requisite_sets(include_archived:bool=False,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u)
+  query=s.query(RequisiteSet)
+  if not include_archived:query=query.filter_by(status='ACTIVE')
+  return [requisite_set_out(item) for item in query.order_by(RequisiteSet.name).all()]
+ @r.post('/api/v1/requisite-sets',status_code=201)
+ def create_requisite_set(p:RequisiteSetPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_requisite_editor(u);validate_requisite_entries(p.entries)
+  if len(p.name.strip())<2:raise HTTPException(422,detail='Укажите название набора')
+  if p.revision is not None:raise HTTPException(422,detail='При создании ревизия не указывается')
+  item=RequisiteSet(name=p.name.strip(),entries=p.entries,created_by_id=u.id)
+  s.add(item)
+  try:s.commit()
+  except IntegrityError:s.rollback();raise HTTPException(409,detail='Набор с таким названием уже существует')
+  return requisite_set_out(item)
+ @r.put('/api/v1/requisite-sets/{set_id}')
+ def update_requisite_set(set_id:str,p:RequisiteSetPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_requisite_editor(u);validate_requisite_entries(p.entries)
+  if len(p.name.strip())<2:raise HTTPException(422,detail='Укажите название набора')
+  if p.revision is None:raise HTTPException(422,detail='Укажите текущую ревизию набора')
+  existing=s.get(RequisiteSet,set_id)
+  if not existing:raise HTTPException(404,detail='Набор не найден')
+  if existing.status!='ACTIVE':raise HTTPException(409,detail='Архивный набор нельзя редактировать')
+  for field in s.query(QuestionnaireField).all():
+   cfg=field.config or {};source=cfg.get('default_source') or {}
+   if source.get('set_id')!=set_id:continue
+   entry=next((entry for entry in p.entries if entry['key']==source.get('field_key')),None)
+   if entry and (error:=validate_answer(field,entry['value'])):raise HTTPException(422,detail=f'Реквизит «{entry["label"]}» не подходит вопросу «{field.label}»: {error}')
+  result=s.execute(update(RequisiteSet).where(RequisiteSet.id==set_id,RequisiteSet.revision==p.revision,RequisiteSet.status=='ACTIVE').values(name=p.name.strip(),entries=p.entries,revision=p.revision+1,updated_at=now()))
+  if result.rowcount!=1:s.rollback();raise HTTPException(409,detail='Набор изменён другим пользователем. Обновите страницу')
+  try:s.commit()
+  except IntegrityError:s.rollback();raise HTTPException(409,detail='Набор с таким названием уже существует')
+  return requisite_set_out(s.get(RequisiteSet,set_id))
+ @r.post('/api/v1/requisite-sets/{set_id}/archive')
+ def archive_requisite_set(set_id:str,p:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_requisite_editor(u);revision=p.get('revision')
+  if not isinstance(revision,int) or isinstance(revision,bool):raise HTTPException(422,detail='Укажите текущую ревизию набора')
+  result=s.execute(update(RequisiteSet).where(RequisiteSet.id==set_id,RequisiteSet.revision==revision,RequisiteSet.status=='ACTIVE').values(status='ARCHIVED',revision=revision+1,updated_at=now()))
+  if result.rowcount!=1:s.rollback();raise HTTPException(409,detail='Набор уже изменён или архивирован')
+  s.commit();return requisite_set_out(s.get(RequisiteSet,set_id))
  @r.get('/api/v1/contract-catalog')
  def catalog(q:str='',u=Depends(current_dependency),s:DBS=Depends(db)):
   query=s.query(DocumentTemplate).join(TemplateVersion,DocumentTemplate.current_version_id==TemplateVersion.id).filter(DocumentTemplate.status=='ACTIVE',DocumentTemplate.deleted_at.is_(None),TemplateVersion.status=='PUBLISHED')
@@ -802,7 +973,15 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not t or t.deleted_at or t.status!='ACTIVE' or not t.current_version_id: raise HTTPException(404,detail='Опубликованный шаблон не найден')
   v=s.get(TemplateVersion,t.current_version_id); schema=schema_for(v.id,s)
   if not schema or schema.status!='PUBLISHED': raise HTTPException(409,detail='Анкета шаблона не опубликована')
-  defaults={field.field_key:copy.deepcopy(field.config['default_value']) for field in s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if (field.config or {}).get('default_value') is not None}
+  defaults={}
+  for field in s.query(QuestionnaireField).filter_by(schema_id=schema.id).all():
+   cfg=field.config or {};value=cfg.get('default_value');source=cfg.get('default_source')
+   if source:
+    item=s.get(RequisiteSet,source.get('set_id'))
+    entry=next((entry for entry in (item.entries if item and item.status=='ACTIVE' else []) if entry['key']==source.get('field_key')),None)
+    if entry and entry['value'] not in (None,'') and not validate_answer(field,entry['value']):value=entry['value']
+    elif source.get('fallback')!='FIXED':value=None
+   if value is not None:defaults[field.field_key]=copy.deepcopy(value)
   d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'schema':schema_out(schema,s)}
  @r.get('/api/v1/contract-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
@@ -1063,7 +1242,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   return {'count':len(created),'fields':[field_out(x) for x in created]}
  @r.post(prefix+'/{tid}/versions/{vid}/fields',status_code=201)
  def create_field(tid:str,vid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); schema=schema_for(v.id,s,True,u)
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s,True,u)
   existing_fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all()
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
@@ -1077,7 +1256,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   s.commit(); return field_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/fields/{fid}')
  def update_field(tid:str,vid:str,fid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   duplicate=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.field_key==p.field_key,QuestionnaireField.id!=x.id).first()
   occupied=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.position==p.position,QuestionnaireField.id!=x.id).first()
@@ -1093,18 +1272,58 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    validate_calculations(v.id,s)
   except HTTPException: s.rollback(); raise
   s.commit(); return field_out(x)
+ @r.get(prefix+'/{tid}/versions/{vid}/fields/{fid}/dependencies')
+ def field_dependencies(tid:str,vid:str,fid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  schema=schema_for(v.id,s);field=s.get(QuestionnaireField,fid)
+  if not field or not schema or field.schema_id!=schema.id:raise HTTPException(404,detail='Вопрос не найден')
+  return {'dependencies':question_dependencies(field,v,s)}
  @r.delete(prefix+'/{tid}/versions/{vid}/fields/{fid}',status_code=204)
- def delete_field(tid:str,vid:str,fid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+ def delete_field(tid:str,vid:str,fid:str,p:DeleteFieldPayload|None=Body(default=None),u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
-  if s.query(DocumentBinding).filter_by(field_id=x.id).first(): raise HTTPException(409,detail='Сначала удалите привязки поля')
-  s.delete(x); s.flush()
+  dependencies=question_dependencies(x,v,s);expected={f"{item['kind']}:{item['id']}" for item in dependencies}
+  if expected and (p is None or set(p.confirmed_dependencies)!=expected or len(p.confirmed_dependencies)!=len(expected)):
+   raise HTTPException(409,detail={'message':'Связи вопроса изменились. Проверьте их и подтвердите удаление повторно.','dependencies':dependencies})
+  if any(item.get('complex') for item in dependencies) and not p.acknowledge_logic_change:
+   raise HTTPException(409,detail={'message':'Подтвердите изменение логики условий и вычислений.','dependencies':dependencies})
+  key=x.field_key
   try:
+   for binding in s.query(DocumentBinding).filter_by(template_version_id=v.id).all():
+    if binding.field_id==x.id or binding.binding_key==key:s.delete(binding)
+   for other in s.query(QuestionnaireField).filter_by(schema_id=schema.id).all():
+    if other.id==x.id:continue
+    cfg=copy.deepcopy(other.config or {});changed=False
+    for name in ('visible_when','required_when','document_condition'):
+     if _references_question(cfg.get(name),key):cfg[name]=_prune_question_condition(cfg[name],key);changed=True
+    if any(_references_question(cfg.get(name),key) for name in ('expression','text_expression')):
+     cfg.update({'calculated':False,'expression':None,'text_expression':None});changed=True
+    if changed:other.config=cfg
+   for region in s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id).all():
+    if _references_question(region.include_when,key):region.include_when={'operator':'ALWAYS'}
+   for group in s.query(RepeatingGroup).filter_by(template_version_id=v.id).all():
+    cfg=copy.deepcopy(group.config or {})
+    if _references_question(cfg.get('visible_when'),key):cfg['visible_when']=_prune_question_condition(cfg['visible_when'],key);group.config=cfg
+    for row_field in s.query(RepeatingGroupField).filter_by(group_id=group.id).all():
+     cfg=copy.deepcopy(row_field.config or {});changed=False
+     if _references_question(cfg.get('visible_when'),key):cfg['visible_when']=_prune_question_condition(cfg['visible_when'],key);changed=True
+     if any(_references_question(cfg.get(name),key) for name in ('expression','text_expression')):
+      cfg.update({'calculated':False,'expression':None,'text_expression':None});changed=True
+     if changed:row_field.config=cfg
+   for mapping in s.query(ContractProductFieldMapping).filter_by(target_field_id=x.id).all():
+    variant=s.get(ContractProductVariant,mapping.variant_id);product_version=s.get(ContractProductVersion,variant.product_version_id)
+    if product_version.status!='DRAFT':raise HTTPException(409,detail='Вопрос связан с опубликованным договорным продуктом; его конфигурацию нельзя изменять')
+    s.delete(mapping)
+   s.delete(x);s.flush()
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
-   validate_regions(v,s)
+   bindings=validate_bindings(v,s);regions=validate_regions(v,s,bindings)
+   validate_repeating_groups(v,s,bindings,regions)
    validate_calculations(v.id,s)
-  except HTTPException: s.rollback(); raise
-  s.commit()
+   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='QUESTION_DELETED',metadata_json={'field_key':key,'dependency_count':len(dependencies)}))
+   s.commit()
+  except Exception:s.rollback();raise
  @r.get(prefix+'/{tid}/versions/{vid}/bindings')
  def bindings(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); return [binding_out(x) for x in s.query(DocumentBinding).filter_by(template_version_id=v.id).all()]
@@ -1114,7 +1333,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if p.field_id and (not field or not schema or field.schema_id!=schema.id): raise HTTPException(404,detail='Поле анкеты не найдено')
   key=field.field_key if field else p.binding_key
   if not key: raise HTTPException(422,detail='Выберите поле анкеты')
-  try: ValueFormatter.validate(p.output_format); ValueFormatter.validate_options(p.format_options); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+  try: validate_binding_format(p.output_format,field); ValueFormatter.validate_options(p.format_options); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
@@ -1124,7 +1343,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def update_binding_format(tid:str,vid:str,bid:str,p:BindingFormatPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(DocumentBinding,bid)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Привязка не найдена')
-  try: ValueFormatter.validate(p.output_format); ValueFormatter.validate_options(p.format_options)
+  try: validate_binding_format(p.output_format,s.get(QuestionnaireField,x.field_id) if x.field_id else None); ValueFormatter.validate_options(p.format_options)
   except CalculationError as exc: raise HTTPException(422,detail=str(exc))
   x.format_config={'format':p.output_format,'options':p.format_options}; s.commit(); return binding_out(x)
  @r.delete(prefix+'/{tid}/versions/{vid}/bindings/{bid}',status_code=204)

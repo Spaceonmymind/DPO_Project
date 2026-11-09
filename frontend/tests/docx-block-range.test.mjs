@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
-test("block range uses existing paragraph locators and rejects invalid boundaries", async () => {
+test("block range follows paragraph and table-row order and rejects invalid boundaries", async () => {
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
   try {
     const { resolveBlockRange } = await server.ssrLoadModule("/src/docxBlockRange.ts");
@@ -14,11 +14,11 @@ test("block range uses existing paragraph locators and rejects invalid boundarie
     assert.equal(range.locators.size, 701);
     assert.equal(range.locators.has(`${part}#/tbl[1]/tr[1]/tc[1]/p[1]`), false);
     assert.match(resolveBlockRange(`${part}#/p[8]`, `${part}#/p[3]`, locators).error, /после начала/);
-    assert.match(resolveBlockRange(`${part}#/p[8]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, locators).error, /абзацами/);
+    assert.deepEqual([...resolveBlockRange(`${part}#/p[8]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, locators).locators].slice(0,2),[`${part}#/p[8]`,`${part}#/p[9]`]);
     assert.match(resolveBlockRange(`${part}#/p[8]`, "word/header1.xml#/p[1]", locators).error, /одной части/);
     const sparse = [`${part}#/p[1]`, `${part}#/p[3]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[7]`];
-    assert.deepEqual([...resolveBlockRange(`${part}#/p[1]`, `${part}#/p[7]`, sparse).locators], [`${part}#/p[1]`, `${part}#/p[3]`, `${part}#/p[7]`], "empty Word paragraphs need not appear in preview");
-    assert.match(resolveBlockRange(`${part}#/p[1]`, `${part}#/p[7]`, [...sparse].reverse()).error, /Порядок/);
+    assert.deepEqual([...resolveBlockRange(`${part}#/p[1]`, `${part}#/p[7]`, sparse).locators], sparse, "table rows between boundaries are included");
+    assert.match(resolveBlockRange(`${part}#/p[1]`, `${part}#/p[7]`, [...sparse].reverse()).error, /после начала/);
   } finally { await server.close(); }
 });
 
@@ -48,9 +48,9 @@ test("DOCX builder previews, changes, saves, selects and cancels block highlight
     if (/\/(bindings|repeating-groups|binding-candidates)$/.test(path)) return [];
     if (path.endsWith("/conditional-regions") && options.method === "POST") {
       const payload = JSON.parse(options.body); writes.push(payload);
-      const start = Number(payload.start_locator.match(/\/p\[(\d+)\]$/)[1]);
-      const end = Number(payload.end_locator.match(/\/p\[(\d+)\]$/)[1]);
-      const locators = Array.from({ length: end - start + 1 }, (_, index) => `${part}#/p[${start + index}]`);
+      const start = nodes.findIndex(node => node.locator === payload.start_locator);
+      const end = nodes.findIndex(node => node.locator === payload.end_locator);
+      const locators = nodes.slice(start,end+1).map(node => node.locator.replace(/\/tc\[\d+\]\/p\[\d+\]$/, ""));
       const region = { ...payload, id: "region-1", locator: { nodes: locators, part } }; regions.push(region); return region;
     }
     throw new Error(`Unexpected API request: ${options.method || "GET"} ${path}`);
@@ -68,22 +68,20 @@ test("DOCX builder previews, changes, saves, selects and cancels block highlight
     assert.deepEqual(current(), [`${part}#/p[2]`]);
     assert.match(preview(`${part}#/p[2]`).textContent, /Начало блока/);
     await hover(`${part}#/p[4]`);
-    assert.deepEqual(current(), [`${part}#/p[2]`, `${part}#/p[3]`, `${part}#/p[4]`]);
-    assert.equal(preview(`${part}#/tbl[1]/tr[1]/tc[1]/p[1]`).classList.contains("block-range-active"), false);
+    assert.deepEqual(current(), [`${part}#/p[2]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[3]`, `${part}#/p[4]`]);
+    assert.equal(preview(`${part}#/tbl[1]/tr[1]/tc[1]/p[1]`).classList.contains("block-range-active"), true);
     await click(action(`${part}#/p[1]`, "Конец блока"));
     assert.match(dom.window.document.querySelector(".block-selection-error").textContent, /после начала/);
     assert.equal(dom.window.document.querySelector(".region-editor"), null);
-    await click(action(`${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, "Конец блока"));
-    assert.match(dom.window.document.querySelector(".block-selection-error").textContent, /абзацами/);
     await click(action(`${part}#/p[4]`, "Конец блока"));
-    assert.deepEqual(current(), [`${part}#/p[2]`, `${part}#/p[3]`, `${part}#/p[4]`]);
+    assert.deepEqual(current(), [`${part}#/p[2]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[3]`, `${part}#/p[4]`]);
     assert.ok(dom.window.document.querySelector(".region-editor"));
     await click(action(`${part}#/p[1]`, "Начало блока"));
     assert.deepEqual(current(), [`${part}#/p[1]`]);
     await hover(`${part}#/p[3]`);
-    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/p[3]`]);
+    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[3]`]);
     await click(action(`${part}#/p[3]`, "Конец блока"));
-    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/p[3]`]);
+    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[3]`]);
     const mode = dom.window.document.querySelector(".region-editor select[aria-label='Отображение в готовом документе']");
     await act(async () => { mode.value = "NEVER"; mode.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
     const key = dom.window.document.querySelector(".region-editor input[required]");
@@ -96,7 +94,7 @@ test("DOCX builder previews, changes, saves, selects and cancels block highlight
     assert.ok(preview(`${part}#/p[1]`).classList.contains("block-boundary-saved"));
     assert.ok(preview(`${part}#/p[3]`).classList.contains("block-boundary-saved"));
     await click(dom.window.document.querySelector(".region-list button[aria-label='Изменить условную область']"));
-    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/p[3]`]);
+    assert.deepEqual(current(), [`${part}#/p[1]`, `${part}#/p[2]`, `${part}#/tbl[1]/tr[1]/tc[1]/p[1]`, `${part}#/p[3]`]);
     await click([...dom.window.document.querySelectorAll(".region-editor button")].find(button => button.textContent === "Отмена"));
     assert.deepEqual(current(), []);
     await click(action(`${part}#/p[2]`, "Начало блока"));

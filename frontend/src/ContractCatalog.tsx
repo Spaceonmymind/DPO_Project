@@ -19,6 +19,7 @@ import { ProductQuestionnaire } from "./ProductQuestionnaire";
 import { QuestionHint } from "./QuestionHint";
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 import { OTHER, choiceAnswer, choiceComplete, choiceOtherValues, choiceText, isStructuredChoice } from "./choices";
+import { textRuleHint } from "./textRules";
 type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
@@ -620,7 +621,7 @@ function Question({ field, value, error, change, required }: any) {
         {field.label}<QuestionHint text={field.config?.description} id={id}/>
       </span>
       {field.field_type === "MULTILINE_TEXT" ? (
-        <textarea {...common} />
+        <textarea {...common} maxLength={field.config?.validation?.max_length} />
       ) : field.field_type === "BOOLEAN" ||
           field.field_type === "SINGLE_SELECT" ? (
         <div
@@ -670,6 +671,8 @@ function Question({ field, value, error, change, required }: any) {
         </div>      ) : (
         <input
           {...common}
+          maxLength={field.field_type === "TEXT" ? field.config?.validation?.max_length : undefined}
+          inputMode={field.field_type === "TEXT" && field.config?.validation?.character_set === "DIGITS" ? "numeric" : undefined}
           type={
             field.field_type === "DATE"
               ? "date"
@@ -681,7 +684,7 @@ function Question({ field, value, error, change, required }: any) {
           }
           step={field.field_type === "INTEGER" ? "1" : "any"}
         />
-      )}{" "}
+      )}{["TEXT","MULTILINE_TEXT"].includes(field.field_type) && !!textRuleHint(field.config?.validation) && <small className="question-rule-hint">{textRuleHint(field.config?.validation)}</small>}{" "}
       {error && <b id={id + "-error"}>{error}</b>}
     </label>
   );

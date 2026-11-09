@@ -4,6 +4,8 @@ import tempfile
 import hashlib
 import shutil
 import zipfile
+import uuid
+from unittest.mock import patch
 import pytest
 from urllib.parse import quote
 from pathlib import Path
@@ -28,10 +30,14 @@ supply_specification_source=Path(__file__).resolve().parents[2]/'specification_t
 shutil.copytree(supply_specification_source,specification_template_directory/'supply')
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 import fitz
 import openpyxl
 import xlwt
 from app.db import Base, engine, SessionLocal, User, QuestionnaireField, QuestionnaireSchema, TemplateVersion, DocumentBinding, DocumentDraft, DocumentTemplate, GeneratedDocument, ContractProduct, ContractProductVersion, ContractProductDraft, ContractProductVariant, settings
+from app.security import hash_password
+from app.calculations import ValueFormatter, CalculationError
+from app import choices
 from app.documents.service import SpreadsheetSpecificationParser
 from app.ai.dialogue import clarification
 
@@ -193,6 +199,309 @@ def create_platform_template(client,headers,code='TRAINING_POC'):
     response=client.post('/api/v1/document-templates',headers=headers,json={'code':code,'name':'Договор для проверки'})
     assert response.status_code==201,response.text
     return response.json()
+
+
+def test_requisite_snapshots_and_binding_formats_end_to_end():
+    assert choices.render({'selected':['ip'],'other_text':''},{'option_items':[{'key':'ip','label':'Индивидуальный предприниматель','genitive':'Индивидуального предпринимателя'}]},genitive=True)=='Индивидуального предпринимателя'
+    assert choices.render({'selected':['ip'],'other_text':''},{'option_items':[{'key':'ip','label':'Индивидуальный предприниматель'}]},genitive=True)=='Индивидуальный предприниматель'
+    assert ValueFormatter.format('2000-01-10','DATE_MONTH_SHORT')=='10 января 2000 г.'
+    assert ValueFormatter.format('2024-02-29','DATE_MONTH_SHORT')=='29 февраля 2024 г.'
+    for month, name in [(3,'марта'),(5,'мая'),(12,'декабря')]:
+        assert name in ValueFormatter.format(f'2025-{month:02d}-01','DATE_MONTH_SHORT')
+    with pytest.raises(CalculationError):ValueFormatter.format('2025-02-29','DATE_MONTH_SHORT')
+    external_id='admin_'+uuid.uuid4().hex[:12]
+    with SessionLocal() as session:
+        session.add(User(external_id=external_id,full_name='Администратор теста',email=external_id+'@example.test',department='ДПО',roles=['administrator'],password=hash_password('Testpassword'),is_active=True));session.commit()
+    admin=TestClient(app);login=admin.post('/api/v1/auth/login',json={'external_id':external_id,'password':'Testpassword'});assert login.status_code==200,login.text
+    headers={'x-csrf-token':login.json()['csrf_token']}
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    assert employee.get('/api/v1/requisite-sets').status_code==403
+    assert employee.post('/api/v1/requisite-sets',headers=employee_headers,json={'name':'Чужой набор','entries':[]}).status_code==403
+    directory=admin.post('/api/v1/requisite-sets',headers=headers,json={'name':'Реквизиты для теста','entries':[{'key':'legal_address','label':'Юридический адрес','value':'Адрес 1'}]})
+    assert directory.status_code==201,directory.text
+    set_id=directory.json()['id'];assert admin.get('/api/v1/requisite-sets').json()[0]['id']==set_id
+    specialist=TestClient(app);specialist_headers=auth(specialist)
+    assert specialist.get('/api/v1/requisite-sets').status_code==200
+    assert specialist.post('/api/v1/requisite-sets',headers=specialist_headers,json={'name':'Набор специалиста '+uuid.uuid4().hex[:6],'entries':[]}).status_code==201
+    stale=admin.put(f'/api/v1/requisite-sets/{set_id}',headers=headers,json={'name':'Реквизиты для теста','entries':[],'revision':100})
+    assert stale.status_code==409
+    doc=Document()
+    for text in ('NAME','GENITIVE','ADDRESS','DATE'):doc.add_paragraph(text)
+    raw=io.BytesIO();doc.save(raw)
+    template=create_platform_template(admin,headers,'R910_'+uuid.uuid4().hex[:8])
+    version=admin.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('requisites.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    specs=[
+        {'field_key':'party_type','label':'Сторона','field_type':'SINGLE_SELECT','option_items':[{'key':'ip','label':'Индивидуальный предприниматель','genitive':'Индивидуального предпринимателя'}]},
+        {'field_key':'address','label':'Адрес','field_type':'TEXT','default_source':{'set_id':set_id,'field_key':'legal_address','fallback':'NONE'}},
+        {'field_key':'signed','label':'Дата подписания','field_type':'DATE','default_value':'2000-01-10'},
+        {'field_key':'reserve_address','label':'Резервный адрес','field_type':'TEXT','default_value':'Запасной адрес','default_source':{'set_id':set_id,'field_key':'legal_address','fallback':'FIXED'}},
+    ]
+    fields=[]
+    for position,payload in enumerate(specs,1):
+        response=admin.post(base+'/fields',headers=headers,json={**payload,'position':position});assert response.status_code==201,response.text;fields.append(response.json())
+    invalid_reference=admin.patch(base+f"/fields/{fields[1]['id']}",headers=headers,json={**specs[1],'position':2,'default_source':{'set_id':set_id,'field_key':'unknown','fallback':'NONE'}})
+    assert invalid_reference.status_code==422
+    preview=admin.get(base+'/preview',headers=headers).json()['nodes']
+    bindings_by_text={}
+    for text,field,format_name in [('NAME',fields[0],'RAW'),('GENITIVE',fields[0],'GENITIVE'),('ADDRESS',fields[1],'RAW'),('DATE',fields[2],'DATE_MONTH_SHORT')]:
+        node=next(node for node in preview if node['text']==text)
+        response=admin.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':len(text),'selected_text':text,'output_format':format_name});assert response.status_code==201,response.text
+        binding=response.json();bindings_by_text[text]=binding
+        assert next(item for item in admin.get(base+'/bindings',headers=headers).json() if item['id']==binding['id'])['format_config']['format']==format_name
+    invalid_format=admin.patch(base+f"/bindings/{bindings_by_text['ADDRESS']['id']}/format",headers=headers,json={'output_format':'DATE_MONTH_SHORT'})
+    assert invalid_format.status_code==422
+    assert admin.post(base+'/publish',headers=headers).status_code==200
+    assert admin.patch(base+f"/bindings/{bindings_by_text['NAME']['id']}/format",headers=headers,json={'output_format':'GENITIVE'}).status_code==409
+    created=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']});assert created.status_code==201,created.text
+    draft_path=f"/api/v1/contract-drafts/{created.json()['id']}";assert created.json()['answers']['address']=='Адрес 1'
+    assert employee.patch(draft_path+'/autosave',headers=employee_headers,json={'answers':{'party_type':{'selected':['ip'],'other_text':''}}}).status_code==200
+    generated=employee.post(draft_path+'/generate',headers=employee_headers);assert generated.status_code==201,generated.text
+    rendered=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+    assert [p.text for p in rendered.paragraphs]==['Индивидуальный предприниматель','Индивидуального предпринимателя','Адрес 1','10 января 2000 г.']
+    changed=admin.put(f'/api/v1/requisite-sets/{set_id}',headers=headers,json={'name':'Реквизиты для теста','entries':[{'key':'legal_address','label':'Юридический адрес','value':'Адрес 2'}],'revision':1});assert changed.status_code==200,changed.text
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['address']=='Адрес 1'
+    preserved=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+    assert preserved.paragraphs[2].text=='Адрес 1'
+    new_draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']});assert new_draft.json()['answers']['address']=='Адрес 2'
+    assert employee.patch(draft_path+'/autosave',headers=employee_headers,json={'answers':{'address':''}}).status_code==200
+    assert employee.get(draft_path,headers=employee_headers).json()['answers']['address']==''
+    assert admin.post(f'/api/v1/requisite-sets/{set_id}/archive',headers=headers,json={'revision':2}).status_code==200
+    archived=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']});assert 'address' not in archived.json()['answers']
+    assert archived.json()['answers']['reserve_address']=='Запасной адрес'
+
+
+def test_mixed_paragraph_table_row_conditional_range_renders_without_damaging_word():
+    document=Document();document.add_paragraph('BEFORE')
+    first=document.add_table(rows=3,cols=1)
+    for row,text in zip(first.rows,['R1','R2','R3']):row.cells[0].text=text
+    document.add_paragraph('AFTER')
+    second=document.add_table(rows=2,cols=1)
+    for row,text in zip(second.rows,['S1','S2']):row.cells[0].text=text
+    document.add_paragraph('END')
+    raw=io.BytesIO();document.save(raw);original=raw.getvalue()
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'MIXED_BLOCK_'+uuid.uuid4().hex[:8])
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('mixed.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')});assert uploaded.status_code==201,uploaded.text
+    version=uploaded.json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    flag=manager.post(base+'/fields',headers=headers,json={'field_key':'show_block','label':'Показать блок','field_type':'BOOLEAN','position':1});assert flag.status_code==201,flag.text
+    token=manager.post(base+'/fields',headers=headers,json={'field_key':'token','label':'Конец','field_type':'TEXT','position':2});assert token.status_code==201,token.text
+    preview=manager.get(base+'/preview',headers=headers).json()['nodes'];locator={node['text']:node['locator'] for node in preview}
+    end=locator['END'];binding=manager.post(base+'/bindings',headers=headers,json={'field_id':token.json()['id'],'locator':end,'start':0,'end':3,'selected_text':'END'});assert binding.status_code==201,binding.text
+    def region(start,stop,key,rule):
+        result=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':key,'region_type':'CONDITIONAL_PARAGRAPH_GROUP','start_locator':locator[start],'end_locator':locator[stop],'include_when':rule})
+        assert result.status_code==201,result.text
+        return result.json()
+    def result(show):
+        generated=manager.post(base+'/test-drive',headers=headers,json={'answers':{'show_block':show,'token':'DONE'}});assert generated.status_code==201,generated.text
+        data=manager.get(generated.json()['download_url'],headers=headers).content
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:assert archive.testzip() is None
+        rendered=Document(io.BytesIO(data))
+        return [p.text for p in rendered.paragraphs],[ [row.cells[0].text for row in table.rows] for table in rendered.tables ]
+    conditional={'operator':'EQUALS','field_key':'show_block','value':True}
+    parent=region('BEFORE','R2','mixed_partial',conditional)
+    assert result(False)==(['AFTER','DONE'],[['R3'],['S1','S2']])
+    assert result(True)==(['BEFORE','AFTER','DONE'],[['R1','R2','R3'],['S1','S2']])
+    child=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'nested_row','region_type':'CONDITIONAL_TABLE_ROW','start_locator':locator['R1'],'include_when':{'operator':'NEVER'}});assert child.status_code==201,child.text
+    assert result(True)==(['BEFORE','AFTER','DONE'],[['R2','R3'],['S1','S2']])
+    assert result(False)==(['AFTER','DONE'],[['R3'],['S1','S2']])
+    overlap=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'crossing','region_type':'CONDITIONAL_PARAGRAPH_GROUP','start_locator':locator['R2'],'end_locator':locator['R3'],'include_when':conditional})
+    assert overlap.status_code==422
+    assert manager.delete(base+f"/conditional-regions/{child.json()['id']}",headers=headers).status_code==204
+    assert manager.delete(base+f"/conditional-regions/{parent['id']}",headers=headers).status_code==204
+    for index,(start,stop,expected) in enumerate([
+        ('BEFORE','R3',(['AFTER','DONE'],[['S1','S2']])),
+        ('BEFORE','AFTER',(['DONE'],[['S1','S2']])),
+        ('R1','R2',(['BEFORE','AFTER','DONE'],[['R3'],['S1','S2']])),
+        ('BEFORE','S2',(['DONE'],[])),
+    ]):
+        current=region(start,stop,f'case_{index}',conditional)
+        assert result(False)==expected
+        assert manager.delete(base+f"/conditional-regions/{current['id']}",headers=headers).status_code==204
+    source=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{version['id']}/source",headers=headers)
+    assert source.content==original
+
+
+def test_text_answer_limits_preserve_leading_zeros_and_reject_invalid_api_answers():
+    doc=Document();doc.add_paragraph('SERIES');raw=io.BytesIO();doc.save(raw)
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'TEXT_LIMITS_'+uuid.uuid4().hex[:8])
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('limits.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    field={'field_key':'passport_series','label':'Серия паспорта','field_type':'TEXT','position':1,'validation':{'min_length':4,'max_length':4,'character_set':'DIGITS'},'default_value':'0012'}
+    for invalid in ({'validation':{'min_length':5,'max_length':4}},{'default_value':'ABCD'},{'validation':{'character_set':'UNKNOWN'}},{'field_type':'DATE','validation':{'character_set':'DIGITS'}}):
+        response=manager.post(base+'/fields',headers=headers,json={**field,**invalid});assert response.status_code==422,response.text
+    created=manager.post(base+'/fields',headers=headers,json=field);assert created.status_code==201,created.text
+    plain=manager.post(base+'/fields',headers=headers,json={'field_key':'note','label':'Примечание','field_type':'TEXT','position':2});assert plain.status_code==201
+    node=next(item for item in manager.get(base+'/preview',headers=headers).json()['nodes'] if item['text']=='SERIES')
+    assert manager.post(base+'/bindings',headers=headers,json={'field_id':created.json()['id'],'locator':node['locator'],'start':0,'end':6,'selected_text':'SERIES'}).status_code==201
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']});assert draft.status_code==201
+    path=f"/api/v1/contract-drafts/{draft.json()['id']}";assert draft.json()['answers']['passport_series']=='0012'
+    for invalid in ('12345','12A4','123'):
+        response=employee.patch(path+'/autosave',headers=employee_headers,json={'answers':{'passport_series':invalid}})
+        assert response.status_code==422 and 'passport_series' in response.text
+    assert employee.patch(path+'/autosave',headers=employee_headers,json={'answers':{'passport_series':''}}).status_code==200
+    assert employee.get(path,headers=employee_headers).json()['answers']['passport_series']==''
+    assert employee.patch(path+'/autosave',headers=employee_headers,json={'answers':{'passport_series':'0012'}}).status_code==200
+    generated=employee.post(path+'/generate',headers=employee_headers);assert generated.status_code==201,generated.text
+    result=Document(io.BytesIO(employee.get(generated.json()['download_url'],headers=employee_headers).content))
+    assert result.paragraphs[0].text=='0012'
+
+
+def test_question_deletion_lists_dependencies_and_preserves_other_versions():
+    doc=Document();doc.add_paragraph('VALUE');raw=io.BytesIO();doc.save(raw)
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'DELETE_QUESTION_'+uuid.uuid4().hex[:8])
+    version=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('delete.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    a=manager.post(base+'/fields',headers=headers,json={'field_key':'source','label':'Источник','field_type':'TEXT','position':1});assert a.status_code==201
+    condition={'operator':'NOT','condition':{'operator':'EQUALS','field_key':'source','value':'нет'}}
+    b=manager.post(base+'/fields',headers=headers,json={'field_key':'dependent','label':'Зависимый','field_type':'TEXT','position':2,'visible_when':condition});assert b.status_code==201,b.text
+    source_path=base+f"/fields/{a.json()['id']}"
+    dependencies=manager.get(source_path+'/dependencies',headers=headers);assert dependencies.status_code==200
+    assert any(item['kind']=='question' for item in dependencies.json()['dependencies'])
+    blocked=manager.delete(source_path,headers=headers);assert blocked.status_code==409 and 'Зависимый' in blocked.text
+    outsider=TestClient(app);outsider_headers=auth(outsider,'petrova')
+    assert outsider.delete(source_path,headers=outsider_headers).status_code==403
+    assert manager.delete(base+f"/fields/{b.json()['id']}",headers=headers).status_code==204
+    region=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'conditional_value','region_type':'CONDITIONAL_PARAGRAPH','start_locator':next(item['locator'] for item in manager.get(base+'/preview',headers=headers).json()['nodes'] if item['text']=='VALUE'),'include_when':{'operator':'EQUALS','field_key':'source','value':'да'}});assert region.status_code==201,region.text
+    assert any(item['kind']=='region' for item in manager.get(source_path+'/dependencies',headers=headers).json()['dependencies'])
+    assert manager.delete(base+f"/conditional-regions/{region.json()['id']}",headers=headers).status_code==204
+    node=next(item for item in manager.get(base+'/preview',headers=headers).json()['nodes'] if item['text']=='VALUE')
+    binding=manager.post(base+'/bindings',headers=headers,json={'field_id':a.json()['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'VALUE'})
+    assert binding.status_code==201,binding.text
+    assert any(item['kind']=='binding' for item in manager.get(source_path+'/dependencies',headers=headers).json()['dependencies'])
+    assert manager.delete(source_path,headers=headers).status_code==409
+    assert manager.delete(base+f"/bindings/{binding.json()['id']}",headers=headers).status_code==204
+    assert manager.delete(source_path,headers=headers).status_code==204
+    assert manager.get(base+'/questionnaire',headers=headers).json()['fields']==[]
+    survivor=manager.post(base+'/fields',headers=headers,json={'field_key':'survivor','label':'Оставшийся вопрос','field_type':'TEXT','position':1})
+    assert survivor.status_code==201,survivor.text
+    assert manager.post(base+'/bindings',headers=headers,json={'field_id':survivor.json()['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).status_code==201
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    assert manager.delete(base+f"/fields/{survivor.json()['id']}",headers=headers).status_code==409
+
+
+def deletion_test_template(label):
+    doc=Document();doc.add_paragraph('VALUE');doc.add_paragraph('BOUND');raw=io.BytesIO();doc.save(raw)
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,label+'_'+uuid.uuid4().hex[:8])
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('delete.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    return client,headers,base,raw.getvalue()
+
+
+def confirmed_question_delete(client,headers,path,acknowledge=True):
+    response=client.get(path+'/dependencies',headers=headers)
+    assert response.status_code==200,response.text
+    dependencies=response.json()['dependencies']
+    deleted=client.request('DELETE',path,headers=headers,json={'confirmed_dependencies':[f"{item['kind']}:{item['id']}" for item in dependencies],'acknowledge_logic_change':acknowledge})
+    return deleted,dependencies
+
+
+def test_question_delete_without_dependencies_needs_no_cleanup():
+    client,headers,base,_=deletion_test_template('DELETE_SIMPLE')
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'simple','label':'Простой вопрос','field_type':'TEXT','position':1}).json()
+    path=base+f"/fields/{field['id']}"
+    assert client.get(path+'/dependencies',headers=headers).json()['dependencies']==[]
+    assert client.delete(path,headers=headers).status_code==204
+    assert client.get(base+'/questionnaire',headers=headers).json()['fields']==[]
+
+
+def test_question_delete_cleans_word_binding_and_keeps_source_unchanged():
+    client,headers,base,original=deletion_test_template('DELETE_BINDING')
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'bound','label':'Привязанный вопрос','field_type':'TEXT','position':1}).json()
+    locator=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='VALUE')
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':locator,'start':0,'end':5,'selected_text':'VALUE'})
+    assert binding.status_code==201,binding.text
+    path=base+f"/fields/{field['id']}"
+    assert client.delete(path,headers=headers).status_code==409
+    deleted,dependencies=confirmed_question_delete(client,headers,path)
+    assert deleted.status_code==204,deleted.text
+    assert [item['kind'] for item in dependencies]==['binding']
+    assert client.get(base+'/bindings',headers=headers).json()==[]
+    assert client.get(base+'/source',headers=headers).content==original
+
+
+def test_question_delete_keeps_conditional_region_and_always_includes_it():
+    client,headers,base,original=deletion_test_template('DELETE_REGION')
+    flag=client.post(base+'/fields',headers=headers,json={'field_key':'flag','label':'Показать текст','field_type':'BOOLEAN','position':1}).json()
+    locator=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='VALUE')
+    created=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'area','region_type':'CONDITIONAL_PARAGRAPH','start_locator':locator,'include_when':{'operator':'EQUALS','field_key':'flag','value':True}})
+    assert created.status_code==201,created.text
+    path=base+f"/fields/{flag['id']}"
+    deleted,dependencies=confirmed_question_delete(client,headers,path)
+    assert deleted.status_code==204,deleted.text
+    assert [item['kind'] for item in dependencies]==['region']
+    regions=client.get(base+'/conditional-regions',headers=headers).json()
+    assert len(regions)==1 and regions[0]['include_when']=={'operator':'ALWAYS'}
+    assert client.get(base+'/source',headers=headers).content==original
+    keep=client.post(base+'/fields',headers=headers,json={'field_key':'keep','label':'Оставить текст','field_type':'TEXT','position':1})
+    assert keep.status_code==201,keep.text
+    other=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='BOUND')
+    assert client.post(base+'/bindings',headers=headers,json={'field_id':keep.json()['id'],'locator':other,'start':0,'end':5,'selected_text':'BOUND'}).status_code==201
+    generated=client.post(base+'/test-drive',headers=headers,json={'answers':{'keep':'HELLO'}})
+    assert generated.status_code==201,generated.text
+    rendered=Document(io.BytesIO(client.get(generated.json()['download_url'],headers=headers).content))
+    assert [paragraph.text for paragraph in rendered.paragraphs]==['VALUE','HELLO']
+
+
+def test_question_delete_prunes_nested_conditions_without_empty_groups():
+    client,headers,base,_=deletion_test_template('DELETE_NESTED')
+    fields={}
+    for position,key in enumerate(('aa','bb','cc'),1):
+        response=client.post(base+'/fields',headers=headers,json={'field_key':key,'label':'Поле '+key,'field_type':'BOOLEAN','position':position})
+        assert response.status_code==201,response.text
+        fields[key]=response.json()
+    rule={'operator':'AND','conditions':[{'operator':'OR','conditions':[{'operator':'EQUALS','field_key':'aa','value':True},{'operator':'EQUALS','field_key':'bb','value':True}]},{'operator':'NOT','condition':{'operator':'EQUALS','field_key':'cc','value':True}}]}
+    dependent=client.post(base+'/fields',headers=headers,json={'field_key':'target','label':'Зависимый вопрос','field_type':'TEXT','position':4,'visible_when':rule,'required_when':{'operator':'NOT','condition':{'operator':'EQUALS','field_key':'bb','value':True}}})
+    assert dependent.status_code==201,dependent.text
+    path=base+f"/fields/{fields['bb']['id']}"
+    dependencies=client.get(path+'/dependencies',headers=headers).json()['dependencies']
+    assert len(dependencies)==2 and all(item['complex'] for item in dependencies)
+    payload={'confirmed_dependencies':[f"{item['kind']}:{item['id']}" for item in dependencies]}
+    assert client.request('DELETE',path,headers=headers,json=payload).status_code==409
+    assert client.request('DELETE',path,headers=headers,json={**payload,'acknowledge_logic_change':True,'confirmed_dependencies':[]}).status_code==409
+    deleted,_=confirmed_question_delete(client,headers,path)
+    assert deleted.status_code==204,deleted.text
+    target=next(item for item in client.get(base+'/questionnaire',headers=headers).json()['fields'] if item['field_key']=='target')
+    assert target['config']['visible_when']=={'operator':'AND','conditions':[{'operator':'EQUALS','field_key':'aa','value':True},{'operator':'NOT','condition':{'operator':'EQUALS','field_key':'cc','value':True}}]}
+    assert target['config']['required_when'] is None
+    for key in ('cc','aa'):
+        deleted,_=confirmed_question_delete(client,headers,base+f"/fields/{fields[key]['id']}")
+        assert deleted.status_code==204,deleted.text
+    target=next(item for item in client.get(base+'/questionnaire',headers=headers).json()['fields'] if item['field_key']=='target')
+    assert target['config']['visible_when'] is None
+
+
+def test_question_delete_resets_dependent_calculation_to_manual_field():
+    client,headers,base,_=deletion_test_template('DELETE_CALCULATION')
+    source=client.post(base+'/fields',headers=headers,json={'field_key':'amount','label':'Сумма','field_type':'INTEGER','position':1})
+    assert source.status_code==201,source.text
+    calculated=client.post(base+'/fields',headers=headers,json={'field_key':'total','label':'Итого','field_type':'INTEGER','position':2,'calculated':True,'expression':{'source':'FIELD','field_key':'amount'}})
+    assert calculated.status_code==201,calculated.text
+    deleted,dependencies=confirmed_question_delete(client,headers,base+f"/fields/{source.json()['id']}")
+    assert deleted.status_code==204,deleted.text
+    assert [item['kind'] for item in dependencies]==['calculation']
+    remaining=client.get(base+'/questionnaire',headers=headers).json()['fields']
+    assert len(remaining)==1 and remaining[0]['field_key']=='total'
+    assert remaining[0]['config']['calculated'] is False and remaining[0]['config']['expression'] is None
+
+
+def test_question_delete_rolls_back_all_cleanup_when_validation_fails():
+    client,headers,base,_=deletion_test_template('DELETE_ROLLBACK')
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'source','label':'Источник','field_type':'TEXT','position':1}).json()
+    locator=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='VALUE')
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':locator,'start':0,'end':5,'selected_text':'VALUE'})
+    assert binding.status_code==201,binding.text
+    region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'visible','region_type':'CONDITIONAL_PARAGRAPH','start_locator':locator,'include_when':{'operator':'IS_NOT_EMPTY','field_key':'source'}})
+    assert region.status_code==201,region.text
+    path=base+f"/fields/{field['id']}"
+    with patch('app.contract_platform.validate_calculations',side_effect=HTTPException(422,detail='Проверка прервана')):
+        deleted,_=confirmed_question_delete(client,headers,path)
+    assert deleted.status_code==422
+    assert client.get(base+'/questionnaire',headers=headers).json()['fields'][0]['id']==field['id']
+    assert client.get(base+'/bindings',headers=headers).json()[0]['id']==binding.json()['id']
+    assert client.get(base+'/conditional-regions',headers=headers).json()[0]['include_when']=={'operator':'IS_NOT_EMPTY','field_key':'source'}
 
 
 def configure_platform_field(client,headers,template,version,field_key='customer_name',label='Наименование заказчика',occurrences=1):

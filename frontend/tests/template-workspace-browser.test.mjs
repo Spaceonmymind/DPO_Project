@@ -157,3 +157,91 @@ test("DOCX workspace controls fit their panels at desktop and zoom-equivalent wi
     await server.close();
   }
 });
+
+test("3500 Word fragments keep their layout during drag and apply each resize once", { skip: !existsSync(chromePath) }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 900 } });
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html?large=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.locator(".preview-node").nth(3499).waitFor();
+    await page.locator(".workspace-question-list button").first().click();
+    await page.locator(".docx-page [data-locator]").first().evaluate((node) => {
+      window.__firstPreviewNode = node;
+      const range = document.createRange(); range.selectNodeContents(node); getSelection().removeAllRanges(); getSelection().addRange(range);
+    });
+    const left = page.getByRole("separator", { name: "Изменить ширину панели вопросов" });
+    const right = page.getByRole("separator", { name: "Изменить ширину панели настроек" });
+    const snapshot = () => page.locator(".builder-grid").evaluate(grid => ({
+      widths: [grid.querySelector(".document-outline").getBoundingClientRect().width, grid.querySelector(".questionnaire-builder").getBoundingClientRect().width],
+      stored: localStorage.getItem("dpo-template-pane-widths"),
+      requests: window.__previewRequests,
+      sameNode: window.__firstPreviewNode === grid.querySelector(".docx-page [data-locator]"),
+      selection: getSelection().toString(),
+      selectedQuestion: !!grid.querySelector(".workspace-question-list button.active"),
+    }));
+    const before = await snapshot();
+    assert.equal(before.requests, 1);
+    assert.equal(before.selectedQuestion, true);
+    const drag = async (divider, delta) => {
+      const start = await snapshot();
+      const box = await divider.boundingBox();
+      const x = box.x + box.width / 2, y = box.y + 40;
+      await page.mouse.move(x, y); await page.mouse.down();
+      await page.mouse.move(x + delta, y, { steps: 12 });
+      await page.locator(".workspace-pane-drag-line:not([hidden])").waitFor();
+      const during = await snapshot();
+      const line = await page.locator(".workspace-pane-drag-line").evaluate(node => node.getBoundingClientRect().left);
+      assert.deepEqual(during.widths, start.widths, "panel widths remain fixed during pointer movement");
+      assert.equal(during.requests, before.requests);
+      assert.equal(during.stored, start.stored);
+      assert.ok(Math.abs(line - (x + delta)) < 8, "preview line follows the pointer");
+      await page.mouse.up();
+      assert.equal(await page.locator(".workspace-pane-drag-line").isVisible(), false);
+    };
+    await drag(left, 80);
+    const afterLeft = await snapshot();
+    assert.ok(afterLeft.widths[0] > before.widths[0] + 60);
+    await drag(right, -70);
+    const afterRight = await snapshot();
+    assert.ok(afterRight.widths[1] > afterLeft.widths[1] + 50);
+    assert.equal(afterRight.requests, 1);
+    assert.equal(afterRight.sameNode, true);
+    assert.equal(afterRight.selection, before.selection);
+    assert.equal(afterRight.selectedQuestion, true);
+
+    const cancel = async (divider, action) => {
+      const old = await snapshot(); const box = await divider.boundingBox(); const x = box.x + box.width / 2, y = box.y + 40;
+      await page.mouse.move(x, y); await page.mouse.down(); await page.mouse.move(x + 35, y);
+      if (action === "escape") await page.keyboard.press("Escape");
+      else await divider.dispatchEvent("pointercancel", { bubbles: true, pointerId: 1 });
+      await page.mouse.up();
+      assert.deepEqual((await snapshot()).widths, old.widths, `${action} cancels resize`);
+      assert.equal(await page.locator(".workspace-pane-drag-line").isVisible(), false);
+    };
+    await cancel(left, "escape");
+    await cancel(right, "pointercancel");
+    const maxDrag = async (divider, delta) => {
+      const box = await divider.boundingBox(); const x = box.x + box.width / 2, y = box.y + 40;
+      await page.mouse.move(x, y); await page.mouse.down(); await page.mouse.move(x + delta, y);
+      await page.mouse.up();
+    };
+    await maxDrag(left, 1000);
+    await maxDrag(right, -1000);
+    const clamped = await snapshot();
+    assert.ok(Math.abs(clamped.widths[0] - 420) < 2);
+    assert.ok(Math.abs(clamped.widths[1] - 520) < 2);
+    await maxDrag(left, -1000);
+    await maxDrag(right, 1000);
+    const minimum = await snapshot();
+    assert.ok(Math.abs(minimum.widths[0] - 180) < 2);
+    assert.ok(Math.abs(minimum.widths[1] - 260) < 2);
+    await page.reload();
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    assert.deepEqual((await snapshot()).widths, minimum.widths);
+  } finally { await browser.close(); await server.close(); }
+});

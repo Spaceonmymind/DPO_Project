@@ -467,7 +467,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     </div>
   );
 }
-function RepeatingGroupForm({
+export function RepeatingGroupForm({
   group,
   tourTarget,
   items,
@@ -578,7 +578,7 @@ function selectLabel(value: string): string {
   return SELECT_LABELS[value] || value;
 }
 
-function Question({ field, value, error, change, required }: any) {
+export function Question({ field, value, error, change, required }: any) {
   let id = `field-${field.id}`,
     common = {
       id,

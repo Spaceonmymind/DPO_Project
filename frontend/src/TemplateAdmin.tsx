@@ -23,6 +23,7 @@ import type { Condition } from "./conditions";
 import { conditionError, conditionStats, replaceCondition, removeCondition, moveCondition, canLiftCondition, liftCondition, canNestCondition, nestCondition, insertAdjacentCondition, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES } from "./conditionTree";
 import { formulaFromCondition, parseConditionFormula, usedFormulaNames, type NamedCondition } from "./conditionFormula";
 import { blockUnitLocator, resolveBlockRange, regionBlockBounds } from "./docxBlockRange";
+import { layoutPreviewNodes } from "./docxPreviewLayout";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
@@ -177,6 +178,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     const query = docQuery.trim().toLocaleLowerCase("ru");
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
+  const previewBlocks = useMemo(() => layoutPreviewNodes(preview?.nodes || []), [preview]);
   useEffect(() => {
     const grid = builderGridRef.current;
     if (!grid) return;
@@ -868,6 +870,132 @@ function TemplateBuilder({ api }: { api: Api }) {
   const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
   const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
   const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
+  const renderPreviewNode = (node: any) => {
+                              const active = activeBlockRange?.locators.has(node.locator) || false;
+                              const unit=blockUnitLocator(node.locator) || node.locator;
+                              const saved = savedBlockMarkers.get(unit);
+                              const boundaryNode=firstBlockUnitNode.get(unit)===node.locator;
+                              const startMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.start || "") === unit || saved?.start);
+                              const endMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.end || "") === unit || saved?.end);
+                              return (
+                              <div
+                                key={node.locator}
+                                tabIndex={0}
+                                onMouseEnter={() => previewBlockEnd(node.locator)}
+                                onMouseLeave={() => { if (blockStart) setBlockHover(undefined); }}
+                                onFocus={() => previewBlockEnd(node.locator)}
+                                className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) ? "hidden-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""} ${active ? "block-range-active" : ""} ${blockStart && active && node.locator !== blockStart ? "block-range-preview" : ""} ${(startMarker || endMarker) && !active ? "block-boundary-saved" : ""}`}
+                              >
+                                {startMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Начало блока</span>}
+                                {endMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Конец блока</span>}
+                                {regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) && <span className="region-hidden-badge"><EyeOff size={12}/>Скрыт</span>}
+                                <p
+                                  data-locator={node.locator}
+                                  className={
+                                    node.kind === "table_cell"
+                                      ? "docx-cell"
+                                      : ""
+                                  }
+                                >
+                                  {paint(
+                                    node.text,
+                                    bindings.filter(
+                                      (b) => b.locator.node === node.locator,
+                                    ),
+                                    schema?.fields || [],
+                                    regions.filter(
+                                      (r) =>
+                                        r.region_type === "CONDITIONAL_RUN" &&
+                                        r.locator.node === node.locator,
+                                    ),
+                                    (binding: any) => { setActiveBinding(binding); setSelection(null); setRegionDraft(null); setGroupDraft(null); setStage(3); },
+                                  )}
+                                </p>
+                                {version.status === "DRAFT" && (
+                                  <div
+                                    className="region-actions"
+                                    aria-label="Выбор условной области"
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        draftRegion(
+                                          "CONDITIONAL_PARAGRAPH",
+                                          node.locator,
+                                        )
+                                      }
+                                    >
+                                      Абзац
+                                    </button>
+                                    {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: node.text.length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
+                                    <button
+                                      type="button"
+                                      onClick={() => chooseBlock(node.locator)}
+                                    >
+                                      {blockStart
+                                        ? "Конец блока"
+                                        : "Начало блока"}
+                                    </button>
+                                    {node.kind === "table_cell" && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setSelection({
+                                              locator: node.locator,
+                                              start: 0,
+                                              end: node.text.length,
+                                              selected_text: node.text,
+                                              field_id: "",
+                                            })
+                                          }
+                                        >
+                                          Выбрать ячейку
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRegion(
+                                              "CONDITIONAL_TABLE_ROW",
+                                              node.locator,
+                                            )
+                                          }
+                                        >
+                                          Строка
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRegion(
+                                              "CONDITIONAL_TABLE",
+                                              node.locator,
+                                            )
+                                          }
+                                        >
+                                          Таблица
+                                        </button>
+                                        <button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE_COLUMN", node.locator)}>Колонка</button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            draftRepeatingGroup(node.locator)
+                                          }
+                                        >
+                                          Сделать строку повторяемой
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => chooseRepeatingBlock(node.locator)}
+                                        >
+                                          {repeatBlockStart ? "Завершить блок строк" : "Начать блок строк"}
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+  };
   return (
     <div className={`page template-admin ${selected ? "template-open" : ""}`}>
       <header className="pagehead">
@@ -1128,131 +1256,15 @@ function TemplateBuilder({ api }: { api: Api }) {
                             onMouseUp={selectRange}
                             style={{ zoom: `${zoom}%` }}
                           >
-                            {preview.nodes.map((node: any) => {
-                              const active = activeBlockRange?.locators.has(node.locator) || false;
-                              const unit=blockUnitLocator(node.locator) || node.locator;
-                              const saved = savedBlockMarkers.get(unit);
-                              const boundaryNode=firstBlockUnitNode.get(unit)===node.locator;
-                              const startMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.start || "") === unit || saved?.start);
-                              const endMarker = boundaryNode && (blockUnitLocator(activeBlockRange?.end || "") === unit || saved?.end);
-                              return (
-                              <div
-                                key={node.locator}
-                                tabIndex={0}
-                                onMouseEnter={() => previewBlockEnd(node.locator)}
-                                onMouseLeave={() => { if (blockStart) setBlockHover(undefined); }}
-                                onFocus={() => previewBlockEnd(node.locator)}
-                                className={`preview-node ${regions.some((r) => regionHasNode(r, node.locator)) ? "conditional-area" : ""} ${regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) ? "hidden-area" : ""} ${repeatingGroups.some((g: any) => repeatingHasNode(g, node.locator)) ? "repeating-area" : ""} ${active ? "block-range-active" : ""} ${blockStart && active && node.locator !== blockStart ? "block-range-preview" : ""} ${(startMarker || endMarker) && !active ? "block-boundary-saved" : ""}`}
-                              >
-                                {startMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Начало блока</span>}
-                                {endMarker && <span className={`block-boundary-label ${active ? "is-active" : ""}`}>Конец блока</span>}
-                                {regions.some((r) => regionMode(r.include_when) === "NEVER" && regionHasNode(r, node.locator)) && <span className="region-hidden-badge"><EyeOff size={12}/>Скрыт</span>}
-                                <p
-                                  data-locator={node.locator}
-                                  className={
-                                    node.kind === "table_cell"
-                                      ? "docx-cell"
-                                      : ""
-                                  }
-                                >
-                                  {paint(
-                                    node.text,
-                                    bindings.filter(
-                                      (b) => b.locator.node === node.locator,
-                                    ),
-                                    schema?.fields || [],
-                                    regions.filter(
-                                      (r) =>
-                                        r.region_type === "CONDITIONAL_RUN" &&
-                                        r.locator.node === node.locator,
-                                    ),
-                                    (binding: any) => { setActiveBinding(binding); setSelection(null); setRegionDraft(null); setGroupDraft(null); setStage(3); },
-                                  )}
-                                </p>
-                                {version.status === "DRAFT" && (
-                                  <div
-                                    className="region-actions"
-                                    aria-label="Выбор условной области"
-                                  >
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        draftRegion(
-                                          "CONDITIONAL_PARAGRAPH",
-                                          node.locator,
-                                        )
-                                      }
-                                    >
-                                      Абзац
-                                    </button>
-                                    {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: node.text.length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
-                                    <button
-                                      type="button"
-                                      onClick={() => chooseBlock(node.locator)}
-                                    >
-                                      {blockStart
-                                        ? "Конец блока"
-                                        : "Начало блока"}
-                                    </button>
-                                    {node.kind === "table_cell" && (
-                                      <>
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            setSelection({
-                                              locator: node.locator,
-                                              start: 0,
-                                              end: node.text.length,
-                                              selected_text: node.text,
-                                              field_id: "",
-                                            })
-                                          }
-                                        >
-                                          Выбрать ячейку
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            draftRegion(
-                                              "CONDITIONAL_TABLE_ROW",
-                                              node.locator,
-                                            )
-                                          }
-                                        >
-                                          Строка
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            draftRegion(
-                                              "CONDITIONAL_TABLE",
-                                              node.locator,
-                                            )
-                                          }
-                                        >
-                                          Таблица
-                                        </button>
-                                        <button type="button" onClick={() => draftRegion("CONDITIONAL_TABLE_COLUMN", node.locator)}>Колонка</button>
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            draftRepeatingGroup(node.locator)
-                                          }
-                                        >
-                                          Сделать строку повторяемой
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => chooseRepeatingBlock(node.locator)}
-                                        >
-                                          {repeatBlockStart ? "Завершить блок строк" : "Начать блок строк"}
-                                        </button>
-                                      </>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );})}
+                            {previewBlocks.map((block, index) => block.kind === "paragraph"
+                              ? renderPreviewNode(block.node)
+                              : <div className="docx-table-scroll" key={`table-${index}`}><table className="docx-table"><tbody>
+                                  {block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) =>
+                                    <td key={cellIndex} colSpan={cell.colSpan} rowSpan={cell.rowSpan} className={cell.continuation ? "docx-merge-continuation" : undefined}>
+                                      {cell.nodes.map(renderPreviewNode)}
+                                    </td>
+                                  )}</tr>)}
+                                </tbody></table></div>)}
                           </article>
                           {selection && <InspectorPortal>
                             <section className="selection-card selection-card-floating" aria-label="Настройка выбранного фрагмента">

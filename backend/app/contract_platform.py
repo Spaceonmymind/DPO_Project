@@ -498,7 +498,7 @@ def _unsafe(node):
  return next((name for name in names if node.find(f'.//w:{name}',NS) is not None),None)
 def _safe_text_range_around_word_fields(paragraph,start,end):
  """Allow a run edit beside a Word field, never inside its code or displayed result."""
- if any(paragraph.find(f'.//w:{name}',NS) is not None for name in ('drawing','pict','object','bookmarkStart','bookmarkEnd')):return False
+ if any(paragraph.find(f'.//w:{name}',NS) is not None for name in ('drawing','pict','object')):return False
  depth=0;position=0
  for element in paragraph.iter():
   local=element.tag.rsplit('}',1)[-1]

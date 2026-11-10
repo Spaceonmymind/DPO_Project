@@ -1,4 +1,12 @@
 /* The three panes share the existing template builder and its API state. */
+.template-operation-dialog{width:min(400px,calc(100vw - 40px));max-width:none;padding:28px;border:1px solid #cfe1d8;border-radius:16px;background:#fff;color:#18382e;box-shadow:0 20px 70px #103a2a30}
+.template-operation-dialog::backdrop{background:#10291d70}
+.template-operation-dialog[open]{display:flex;align-items:center;gap:20px}
+.template-operation-dialog h2{margin:0 0 7px;font-size:18px;line-height:1.25}
+.template-operation-dialog p{margin:0;color:#5d746b;font-size:13px;line-height:1.5}
+.template-operation-spinner{flex:none;width:34px;height:34px;border:3px solid #d7eee3;border-top-color:#07856b;border-radius:50%;animation:template-operation-spin .8s linear infinite}
+@keyframes template-operation-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.template-operation-spinner{animation:none;border-top-color:#07856b}}
 .template-open .version-grid{grid-template-columns:132px minmax(0,1fr);gap:16px}
 .template-open .docx-preview,.template-open .document-canvas,.template-open .questionnaire-builder{min-width:0}
 .template-open .builder-grid{grid-template-columns:var(--questions-pane-width,240px) 12px minmax(0,1fr) 12px var(--settings-pane-width,340px);gap:0;align-items:start;min-width:0}

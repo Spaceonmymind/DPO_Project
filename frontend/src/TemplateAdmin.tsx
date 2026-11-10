@@ -26,6 +26,7 @@ import { blockUnitLocator, resolveBlockRange, regionBlockBounds } from "./docxBl
 import { layoutPreviewNodes } from "./docxPreviewLayout";
 import { useDocxVirtualPreview } from "./docxVirtualPreview";
 import { TemplateQuestionnairePreview } from "./TemplateQuestionnairePreview";
+import { TemplateOperationDialog, type TemplateOperation } from "./TemplateOperationDialog";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
@@ -95,8 +96,8 @@ function conditionFieldKeys(node: any): string[] {
   if (!node || typeof node !== "object") return [];
   return [...(typeof node.field_key === "string" ? [node.field_key] : []), ...conditionFieldKeys(node.condition), ...conditionFieldKeys(node.previous_condition), ...(Array.isArray(node.conditions) ? node.conditions.flatMap(conditionFieldKeys) : [])];
 }
-export function TemplateAdmin({ api }: { api: Api }) {
-  return <FormulaStatusProvider><TemplateBuilder api={api} /></FormulaStatusProvider>;
+export function TemplateAdmin({ api, downloadFile }: { api: Api; downloadFile?: (path: string, filename: string) => Promise<void | { receivedAt: number }> }) {
+  return <FormulaStatusProvider><TemplateBuilder api={api} downloadFile={downloadFile} /></FormulaStatusProvider>;
 }
 const FormulaStatusContext = React.createContext({ pending: false, setPending: (_id: string, _value: boolean) => {} });
 function FormulaStatusProvider({ children }: { children: React.ReactNode }) {
@@ -109,7 +110,7 @@ function FormulaStatusProvider({ children }: { children: React.ReactNode }) {
   }), []);
   return <FormulaStatusContext.Provider value={{ pending: Object.keys(pendingById).length > 0, setPending }}>{children}</FormulaStatusContext.Provider>;
 }
-function TemplateBuilder({ api }: { api: Api }) {
+function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path: string, filename: string) => Promise<void | { receivedAt: number }> }) {
   const { pending: formulaPending } = React.useContext(FormulaStatusContext);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const builderGridRef = useRef<HTMLDivElement | null>(null);
@@ -117,6 +118,8 @@ function TemplateBuilder({ api }: { api: Api }) {
   const pageRef = useRef<HTMLElement | null>(null);
   const dragRef = useRef<{ side: "questions" | "settings"; x: number; lastX: number; lineX: number; widths: PaneWidths; available: number; frame: number | null } | null>(null);
   const dragLineRef = useRef<HTMLDivElement | null>(null);
+  const runningRef = useRef(false);
+  const [operation, setOperation] = useState<TemplateOperation | null>(null);
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
   const [paneAvailable, setPaneAvailable] = useState(0);
   const [requisiteSets, setRequisiteSets] = useState<any[]>([]);
@@ -322,15 +325,20 @@ function TemplateBuilder({ api }: { api: Api }) {
   useEffect(() => {
     load().catch((e) => setError(e.message));
   }, []);
-  async function run(fn: () => Promise<void>) {
+  async function run(fn: () => Promise<void>, longOperation?: TemplateOperation) {
+    if (runningRef.current) return;
+    runningRef.current = true;
     setBusy(true);
     setError("");
     setNotice("");
+    if (longOperation) setOperation(longOperation);
     try {
       await fn();
     } catch (e: any) {
       setError(e.message || "Операция не выполнена");
     } finally {
+      setOperation(null);
+      runningRef.current = false;
       setBusy(false);
     }
   }
@@ -425,13 +433,36 @@ function TemplateBuilder({ api }: { api: Api }) {
     await run(async () => {
       await api(`/document-templates/${version.template_id}/versions/${version.id}/binding-candidates/batch-materialize`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({candidate_ids:selectedCandidates})});
       await openVersion(version); setSelectedCandidates([]); setNotice("Выбранные и ранее подтверждённые кандидаты материализованы.");
-    });
+    }, { title: "Настраиваем привязки", description: "Применяем выбранные соответствия к исходному документу." });
   }
   async function generateTestDocument() {
     await run(async()=>{
+      setTestDocument(null);
+      const start = performance.now();
       const result=await api(`/document-templates/${version.template_id}/versions/${version.id}/test-drive`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answers:testAnswers})});
-      setTestDocument(result);setNotice("Тестовый DOCX сформирован и промаркирован.");
-    });
+      const responseAt = performance.now();
+      if (!result?.download_url) throw new Error("Сервер не вернул ссылку на тестовый DOCX.");
+      const filename = `ТЕСТОВЫЙ_${selected.name}.docx`;
+      let receivedAt: number;
+      if (downloadFile) {
+        const timing = await downloadFile(result.download_url, filename);
+        receivedAt = timing && typeof timing === "object" ? timing.receivedAt : performance.now();
+      } else {
+        const response = await fetch(result.download_url.startsWith("/api/v1/") ? result.download_url : `/api/v1${result.download_url}`, { credentials: "same-origin" });
+        if (!response.ok) throw new Error("Тестовый DOCX создан, но скачать его не удалось.");
+        const blob = await response.blob();
+        receivedAt = performance.now();
+        const url = URL.createObjectURL(blob);
+        const link = Object.assign(document.createElement("a"), { href: url, download: filename });
+        link.click(); URL.revokeObjectURL(url);
+      }
+      setTestDocument({ ...result, download_url: result.download_url.startsWith("/api/v1/") ? result.download_url : `/api/v1${result.download_url}` });
+      setNotice("Тестовый DOCX сформирован и скачан.");
+      const completedAt = performance.now();
+      performance.measure("template-test-docx-api-response", { start, end: responseAt });
+      performance.measure("template-test-docx-file-transfer", { start: responseAt, end: receivedAt });
+      performance.measure("template-test-docx-client-processing", { start: receivedAt, end: completedAt });
+    }, { title: "Формируем тестовый DOCX", description: "Проверяем ответы и создаём документ. Окно закроется после получения файла." });
   }
   React.useEffect(() => { const show = (event: Event) => setStage((event as CustomEvent<number>).detail); window.addEventListener("tour-template-stage", show); return () => window.removeEventListener("tour-template-stage", show); }, []);
   async function create(e: FormEvent) {
@@ -458,7 +489,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       });
       setVersions(await api(`/document-templates/${selected.id}/versions`));
       await openVersion(x);
-    });
+    }, { title: "Загружаем Word", description: "Сохраняем исходный DOCX и разбираем его структуру для конструктора." });
   }
   function selectRange(event: React.MouseEvent<HTMLElement>) {
     if (version?.status !== "DRAFT") return;
@@ -485,7 +516,7 @@ function TemplateBuilder({ api }: { api: Api }) {
     let before = document.createRange();
     before.selectNodeContents(a);
     before.setEnd(r.startContainer, r.startOffset);
-    let start = before.toString().length,
+    let start = Array.from(before.toString()).length,
       text = s.toString();
     if (text.trim())
       setActiveBinding(null);
@@ -495,7 +526,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       setSelection({
         locator: a.dataset.locator,
         start,
-        end: start + text.length,
+        end: start + Array.from(text).length,
         selected_text: text,
         field_id: "",
       });
@@ -607,16 +638,24 @@ function TemplateBuilder({ api }: { api: Api }) {
     });
   }
   async function bind() {
+    const draft = selection;
+    const node = preview?.nodes?.find((item: any) => item.locator === draft?.locator);
+    if (!draft?.field_id || !schema?.fields?.some((item: any) => item.id === draft.field_id) || !node || !Number.isInteger(draft.start) || !Number.isInteger(draft.end) || draft.start < 0 || draft.end <= draft.start || Array.from(node.text).slice(draft.start, draft.end).join("") !== draft.selected_text) {
+      setError("Проверьте выбранный вопрос и фрагмент Word. Выделение должно точно совпадать с исходным абзацем или ячейкой.");
+      return;
+    }
     await run(async () => {
-      await api(
+      const saved = await api(
         `/document-templates/${selected.id}/versions/${version.id}/bindings`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(selection),
+          body: JSON.stringify(draft),
         },
       );
-      await openVersion(version);
+      if (!saved?.id || saved?.locator?.node !== draft.locator || saved.field_id !== draft.field_id) throw new Error("Сервер не подтвердил сохранение привязки. Обновите данные и повторите проверку.");
+      setBindings((current: any[]) => [...current.filter(item => item.id !== saved.id), saved]);
+      setSelection(null);
       setNotice("Привязка создана.");
     });
   }
@@ -860,7 +899,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       await openVersion(created);
       setStage(4);
       setNotice(`Версия ${created.version_number} создана. Можно редактировать.`);
-    });
+    }, { title: "Создаём версию", description: "Копируем настройки шаблона и готовим новую редактируемую версию." });
   }
   async function chooseCopySource(sourceId: string) {
     setCopySourceId(sourceId);setCopyFields([]);setCopySelected([]);
@@ -888,7 +927,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       await load();
       setSelected({ ...selected, status: "ACTIVE" });
       setNotice("Версия опубликована и доступна сотрудникам.");
-    });
+    }, { title: "Публикуем шаблон", description: "Проверяем настройки и открываем опубликованную версию для сотрудников." });
   }
   async function manageTemplate() {
     if (!selected || !pendingAction) return;
@@ -903,8 +942,12 @@ function TemplateBuilder({ api }: { api: Api }) {
   }
   async function showStage(next: number) {
     if (next !== 6 && version && !preview) {
-      try { setPreview(await api(`/document-templates/${version.template_id}/versions/${version.id}/preview`)); }
-      catch (e:any) { setError(e.message || "Не удалось открыть исходный DOCX"); return; }
+      await run(async () => {
+        const loaded = await api(`/document-templates/${version.template_id}/versions/${version.id}/preview`);
+        setPreview({ ...loaded, documentKey: version.id });
+        setStage(next);
+      }, { title: "Открываем Word", description: "Загружаем структуру исходного DOCX для работы с фрагментами." });
+      return;
     }
     setStage(next);
   }
@@ -989,7 +1032,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                                     >
                                       Абзац
                                     </button>
-                                    {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: node.text.length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
+                                    {node.kind === "paragraph" && !!node.text.trim() && <button type="button" onClick={() => { setActiveBinding(null); setRegionDraft(null); setGroupDraft(null); setSelection({ locator: node.locator, start: 0, end: Array.from(node.text).length, selected_text: node.text, field_id: "", output_format: "RAW" }); setStage(3); }}>Привязать абзац</button>}
                                     <button
                                       type="button"
                                       onClick={() => previewActions.current.chooseBlock(node.locator)}
@@ -1219,7 +1262,7 @@ function TemplateBuilder({ api }: { api: Api }) {
                     <button
                       key={x.id}
                       className={version?.id === x.id ? "active" : ""}
-                      onClick={() => openVersion(x)}
+                    onClick={() => void run(() => openVersion(x), { title: "Открываем Word", description: "Читаем структуру документа и загружаем настройки шаблона." })}
                     >
                       <b>Версия {x.version_number}</b>
                       <small>{x.original_filename}</small>
@@ -2256,6 +2299,7 @@ function TemplateBuilder({ api }: { api: Api }) {
       </section>
       {pendingAction && selected && <ConfirmAction title={pendingAction === "delete" ? "Удалить шаблон" : pendingAction === "archive" ? "Архивировать шаблон" : "Восстановить шаблон"} body={pendingAction === "delete" ? `Удалить черновой шаблон «${selected.name}»?` : pendingAction === "archive" ? `Убрать шаблон «${selected.name}» из каталога новых договоров? Созданные документы сохранятся.` : `Вернуть шаблон «${selected.name}» в каталог?`} action={pendingAction === "delete" ? "Удалить" : pendingAction === "archive" ? "Архивировать" : "Восстановить"} busy={busy} onConfirm={() => void manageTemplate()} onCancel={() => setPendingAction(null)}/>}
       {pendingFieldDelete && <ConfirmAction title="Удалить вопрос" body={`Удалить вопрос «${pendingFieldDelete.label}»? Связанных зависимостей: ${pendingFieldDelete.dependencies.length}.`} details={pendingFieldDelete.dependencies.map((dependency:any)=>dependency.label)} warning={pendingFieldDelete.dependencies.some((dependency:any)=>dependency.complex) ? "Внимание: логика вложенных условий или вычислений изменится. Условные области с этим вопросом станут всегда включёнными." : pendingFieldDelete.dependencies.some((dependency:any)=>dependency.kind==="region") ? "Условные области с этим вопросом станут всегда включёнными." : undefined} action="Удалить" busy={busy} onConfirm={() => void removeField(pendingFieldDelete)} onCancel={() => setPendingFieldDelete(null)}/>}
+      <TemplateOperationDialog operation={operation} />
     </div>
   );
 }
@@ -2774,6 +2818,7 @@ function paint(
   conditional: any[] = [],
   onBindingSelect?: (binding: any) => void,
 ) {
+  const characters = Array.from(text);
   const ranges = [
     ...items.map((b) => ({
       start: b.locator.text_start,
@@ -2792,12 +2837,12 @@ function paint(
   ];
   if (!ranges.length) return text;
   const points = [
-    ...new Set([0, text.length, ...ranges.flatMap((r) => [r.start, r.end])]),
+    ...new Set([0, characters.length, ...ranges.flatMap((r) => [r.start, r.end])]),
   ].sort((a, b) => a - b);
   return points.slice(0, -1).map((start, index) => {
     let end = points[index + 1],
       active = ranges.filter((r) => r.start <= start && r.end >= end),
-      value = text.slice(start, end);
+      value = characters.slice(start, end).join("");
     if (!active.length) return value;
     return (
       <mark

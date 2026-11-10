@@ -44,7 +44,7 @@
         if (path.endsWith("/bindings") && options.method === "POST") {
           const payload = JSON.parse(options.body);
           window.__writes.push({ kind: "binding", payload });
-          const binding = { ...payload, id: `binding-${bindings.length + 1}` };
+          const binding = { ...payload, id: `binding-${bindings.length + 1}`, binding_key: fields.find(field => field.id === payload.field_id)?.field_key, occurrence_index: bindings.length + 1, locator: { node: payload.locator, text_start: payload.start, text_end: payload.end }, format_config: { format: payload.output_format || "RAW" } };
           bindings.push(binding);
           return binding;
         }

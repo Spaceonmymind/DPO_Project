@@ -24,7 +24,7 @@
     { id: "field-schedule", field_key: "schedule", label: "График тренировок", field_type: "TEXT", required: false, position: 2, config: { group: "Условия" } },
   ];
   const bindings = [], regions = [], writes = [];
-  window.fixtureState = { bindings, regions, writes, nodes };
+  window.fixtureState = { bindings, regions, writes, nodes, failBinding: false };
   const api = async (path, options = {}) => {
     if (path === "/document-templates") return [template];
     if (path.endsWith("/versions")) return [version];
@@ -39,6 +39,7 @@
       fields.push(field); return field;
     }
     if (path.endsWith("/bindings") && options.method === "POST") {
+      if (window.fixtureState.failBinding) throw new Error("Выделение не соответствует исходному DOCX.");
       const payload = JSON.parse(options.body); writes.push({ kind: "binding", payload });
       const binding = { ...payload, id: `binding-${bindings.length + 1}`, binding_key: fields.find(field => field.id === payload.field_id)?.field_key, occurrence_index: 1, locator: { node: payload.locator, text_start: payload.start, text_end: payload.end }, selected_text: payload.selected_text, format_config: { format: payload.output_format || "RAW" } };
       bindings.push(binding); return binding;

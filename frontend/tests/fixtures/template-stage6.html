@@ -15,7 +15,7 @@ const fields=[
 ];
 const group={id:"group-1",group_key:"extras",name:"Иные услуги",required:false,min_items:0,max_items:5,position:1,config:{group:"Дополнительно"},fields:[{id:"row-description",field_key:"description",label:"Описание услуги",field_type:"TEXT",required:true,position:1,config:{}}]};
 const nodes=Array.from({length:3500},(_,index)=>({locator:`word/document.xml#/p[${index+1}]`,kind:"paragraph",text:`Фрагмент ${index+1}`}));
-window.__previewRequests=0;window.__testAnswers=null;window.__publishes=0;
+window.__previewRequests=0;window.__testAnswers=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;
 const api=async(path,options={})=>{
   if(path==="/requisite-sets?include_archived=true")return [];
   if(path==="/document-templates")return [template];
@@ -24,9 +24,20 @@ const api=async(path,options={})=>{
   if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group]};
   if(path.endsWith("/repeating-groups"))return[group];
   if(/\/(bindings|conditional-regions|binding-candidates)$/.test(path))return[];
-  if(path.endsWith("/test-drive")&&options.method==="POST"){window.__testAnswers=JSON.parse(options.body).answers;return{download_url:"/test.docx"};}
-  if(path.endsWith("/publish")&&options.method==="POST"){window.__publishes++;version={...version,status:"PUBLISHED"};return version;}
+  if(path.endsWith("/test-drive")&&options.method==="POST"){
+    window.__testCalls++;window.__testAnswers=JSON.parse(options.body).answers;
+    if(new URLSearchParams(location.search).has("slow"))return new Promise((resolve,reject)=>{window.__completeTest=()=>resolve({download_url:"/test.docx"});window.__failTest=()=>reject(new Error("Ошибка тестовой генерации"));});
+    return{download_url:"/test.docx"};
+  }
+  if(path.endsWith("/publish")&&options.method==="POST"){
+    window.__publishes++;
+    if(new URLSearchParams(location.search).has("slow"))return new Promise(resolve=>{window.__completePublish=()=>{version={...version,status:"PUBLISHED"};resolve(version);};});
+    version={...version,status:"PUBLISHED"};return version;
+  }
   throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
 };
-createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin,{api}));
+createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin,{api,downloadFile:async()=>{
+  window.__downloads++;
+  if(new URLSearchParams(location.search).has("slow"))await new Promise(resolve=>{window.__completeDownload=resolve;});
+}}));
 </script></body></html>

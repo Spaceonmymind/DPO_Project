@@ -93,18 +93,20 @@ const init = (n: string) =>
     .map((x) => x[0])
     .join("");
 const dl = (p: string, n: string) =>
-  fetch(API + p, { credentials: "same-origin" })
+  fetch(p.startsWith(`${API}/`) ? p : API + p, { credentials: "same-origin" })
     .then(async (r) => {
       if (!r.ok) throw Error((await r.json()).detail);
       return r.blob();
     })
     .then((b) => {
+      const receivedAt = performance.now();
       const a = Object.assign(document.createElement("a"), {
         href: URL.createObjectURL(b),
         download: n,
       });
       a.click();
       URL.revokeObjectURL(a.href);
+      return { receivedAt };
     });
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -1051,7 +1053,7 @@ function Shell({ u, logout }: any) {
           u.roles?.some((r: string) =>
             ["dpo_specialist", "administrator"].includes(r),
           ) ? (
-            <TemplateAdmin api={api} />
+            <TemplateAdmin api={api} downloadFile={dl} />
           ) : (
             <div className="page platform-empty"><FileCheck2 /><h2>Раздел недоступен</h2><p>Конструктор шаблонов доступен специалистам ДПО и администраторам.</p></div>
           )

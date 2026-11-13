@@ -64,3 +64,37 @@ test("step 6 uses employee questionnaire without Word DOM and preserves answers"
     await server.close();
   }
 });
+
+test("publication warnings remain visible and do not block the action", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?warnings=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Проверка и публикация/ }).click();
+    await page.getByText(/Служебный вопрос.*не используется/).waitFor();
+    const button = page.getByRole("button", { name: "Опубликовать с предупреждениями" });
+    assert.equal(await button.isEnabled(), true);
+    await button.click();
+    assert.equal(await page.evaluate(() => window.__publishes), 1);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("critical publication error disables the action", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?errors=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Проверка и публикация/ }).click();
+    await page.getByText(/Привязка «Имя» ссылается/).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Опубликовать шаблон" }).isDisabled(), true);
+    assert.equal(await page.evaluate(() => window.__publishes), 0);
+  } finally { await browser.close(); await server.close(); }
+});

@@ -1,4 +1,5 @@
 import io
+import time
 import os
 import tempfile
 import hashlib
@@ -249,7 +250,10 @@ def test_requisite_snapshots_and_binding_formats_end_to_end():
         response=admin.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':len(text),'selected_text':text,'output_format':format_name});assert response.status_code==201,response.text
         binding=response.json();bindings_by_text[text]=binding
         assert next(item for item in admin.get(base+'/bindings',headers=headers).json() if item['id']==binding['id'])['format_config']['format']==format_name
-    invalid_format=admin.patch(base+f"/bindings/{bindings_by_text['ADDRESS']['id']}/format",headers=headers,json={'output_format':'DATE_MONTH_SHORT'})
+    text_date_format=admin.patch(base+f"/bindings/{bindings_by_text['ADDRESS']['id']}/format",headers=headers,json={'output_format':'DATE_MONTH_SHORT'})
+    assert text_date_format.status_code==200
+    assert admin.patch(base+f"/bindings/{bindings_by_text['ADDRESS']['id']}/format",headers=headers,json={'output_format':'RAW'}).status_code==200
+    invalid_format=admin.patch(base+f"/bindings/{bindings_by_text['NAME']['id']}/format",headers=headers,json={'output_format':'DATE_MONTH_SHORT'})
     assert invalid_format.status_code==422
     assert admin.post(base+'/publish',headers=headers).status_code==200
     assert admin.patch(base+f"/bindings/{bindings_by_text['NAME']['id']}/format",headers=headers,json={'output_format':'GENITIVE'}).status_code==409
@@ -1323,6 +1327,43 @@ def test_docx_preview_and_binding_use_stable_structural_locator():
     assert invalid.status_code==422
 
 
+def test_paragraph_binding_persists_and_test_docx_downloads():
+    document=Document()
+    document.add_paragraph('Заказчик: Иванов')
+    document.add_paragraph('Исполнитель: Иванов')
+    source=io.BytesIO(); document.save(source); original=source.getvalue()
+    client=TestClient(app); headers=auth(client)
+    template=create_platform_template(client,headers,'PARAGRAPH_BINDING_REGRESSION')
+    upload=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('paragraphs.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert upload.status_code==201,upload.text
+    version=upload.json(); base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'customer_name','label':'Имя заказчика','field_type':'TEXT','required':True,'position':1})
+    assert field.status_code==201,field.text
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes']
+    first,second=[node for node in nodes if node['kind']=='paragraph'][:2]
+    partial=client.post(base+'/bindings',headers=headers,json={'field_id':field.json()['id'],'locator':first['locator'],'start':10,'end':16,'selected_text':'Иванов'})
+    assert partial.status_code==201,partial.text
+    whole=client.post(base+'/bindings',headers=headers,json={'field_id':field.json()['id'],'locator':second['locator'],'start':0,'end':len(second['text']),'selected_text':second['text']})
+    assert whole.status_code==201,whole.text
+    invalid=client.post(base+'/bindings',headers=headers,json={'field_id':field.json()['id'],'locator':first['locator'],'start':0,'end':6,'selected_text':'Другой'})
+    assert invalid.status_code==422
+    reader=TestClient(app); reader_headers=auth(reader)
+    stored=reader.get(base+'/bindings',headers=reader_headers)
+    assert stored.status_code==200
+    assert {item['id'] for item in stored.json()}=={partial.json()['id'],whole.json()['id']}
+    assert next(item for item in stored.json() if item['id']==partial.json()['id'])['locator']['node']==first['locator']
+    response_start=time.perf_counter()
+    generated=reader.post(base+'/test-drive',headers=reader_headers,json={'answers':{'customer_name':'Петров'}})
+    response_seconds=time.perf_counter()-response_start
+    assert generated.status_code==201,generated.text
+    download_start=time.perf_counter()
+    downloaded=reader.get(generated.json()['download_url'],headers=reader_headers)
+    download_seconds=time.perf_counter()-download_start
+    assert downloaded.status_code==200 and downloaded.content.startswith(b'PK')
+    assert hashlib.sha256(Path(settings.storage,'template_sources',template['id'],version['id'],'source.docx').read_bytes()).hexdigest()==hashlib.sha256(original).hexdigest()
+    print(f'paragraph test-drive API response: {response_seconds:.3f}s; file download: {download_seconds:.3f}s')
+
+
 def test_contract_platform_end_to_end_multiple_occurrences_generation_and_ownership():
     document=Document()
     for prefix in ('Заказчик: ','Подпись заказчика: '):
@@ -1672,7 +1713,16 @@ def test_region_visibility_modes_generate_safe_docx_and_preserve_source():
     assert {item['region_key']:item['include_when'] for item in manager.get(base+'/conditional-regions',headers=headers).json()}['conditional']==conditional
     invalid=manager.post(base+'/conditional-regions',headers=headers,json={'region_key':'invalid','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node('RESTORED PARAGRAPH')['locator'],'include_when':{'operator':'NEVER','field_key':'flag'}})
     assert invalid.status_code==422
-    published=manager.post(base+'/publish',headers=headers); assert published.status_code==200,published.text
+    from app.contract_platform import render_docx
+    included=[]
+    def capture_regions(*args,**kwargs):
+        included.append((args[5],{region.id for region in args[4]}))
+        return render_docx(*args,**kwargs)
+    with patch('app.contract_platform.render_docx',side_effect=capture_regions) as smoke:
+        published=manager.post(base+'/publish',headers=headers)
+        assert smoke.call_count==1
+        assert included[0][0]==included[0][1]
+    assert published.status_code==200,published.text
     assert manager.patch(base+f"/conditional-regions/{created['never']['id']}",headers=headers,json={'region_key':'never','include_when':always}).status_code in (403,409)
     employee=TestClient(app);employee_headers=auth(employee,'petrova')
     for flag in (True,False):
@@ -2022,3 +2072,211 @@ def test_r35_training_matrix_blocking_facts_are_deterministic():
     assert ContractVariantResolver.resolve(version,fields,variants,base)['variant_id']=='person'
     for patch,code in [({'status':'IP_NPD'},'D005'),({'citizenship':'NON_RU'},'D006'),({'adult':False},'D007'),({'third_parties':True},'D008'),({'labor_signs':True},'D009')]:
         result=ContractVariantResolver.resolve(version,fields,variants,{**base,**patch}); assert result['state']=='NOT_APPLICABLE' and result['reason_code']==code
+
+
+def test_mvp_publication_allows_unbound_required_and_warns_unused_question():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'MVP_PUBLISH_UNUSED')
+    source=Document(); source.add_paragraph('Договор: Иванов'); raw=io.BytesIO(); source.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'unused_name','label':'Служебный вопрос','field_type':'TEXT','required':True,'position':1})
+    assert field.status_code==201,field.text
+    check=client.get(base+'/publication-check',headers=headers)
+    assert check.status_code==200 and not check.json()['errors']
+    assert any('Служебный вопрос' in warning for warning in check.json()['warnings'])
+    published=client.post(base+'/publish',headers=headers)
+    assert published.status_code==200,published.text
+    assert any('Служебный вопрос' in warning for warning in published.json()['warnings'])
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    assert employee.post(f"/api/v1/contract-drafts/{draft.json()['id']}/generate",headers=employee_headers).status_code==422
+
+
+def test_mvp_publication_condition_only_question_and_current_test_revision():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'MVP_PUBLISH_CONDITION')
+    source=Document(); source.add_paragraph('Значение: Иванов'); raw=io.BytesIO(); source.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    controller=client.post(base+'/fields',headers=headers,json={'field_key':'flag','label':'Флаг','field_type':'BOOLEAN','position':1})
+    dependent=client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':2,'visible_when':{'operator':'EQUALS','field_key':'flag','value':True}})
+    assert controller.status_code==201 and dependent.status_code==201
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    start=node['text'].index('Иванов')
+    bound=client.post(base+'/bindings',headers=headers,json={'field_id':dependent.json()['id'],'locator':node['locator'],'start':start,'end':start+6,'selected_text':'Иванов'})
+    assert bound.status_code==201,bound.text
+    check=client.get(base+'/publication-check',headers=headers).json()
+    assert not check['errors'] and not any('Флаг' in warning for warning in check['warnings'])
+    drive=client.post(base+'/test-drive',headers=headers,json={'answers':{'flag':True,'name':'Петров'}})
+    assert drive.status_code==201,drive.text
+    assert client.get(base+'/publication-check',headers=headers).json()['tested_current_revision'] is True
+    updated=client.patch(base+f"/fields/{dependent.json()['id']}",headers=headers,json={'field_key':'name','label':'Имя после правки','field_type':'TEXT','position':2,'visible_when':{'operator':'EQUALS','field_key':'flag','value':True}})
+    assert updated.status_code==200,updated.text
+    assert client.get(base+'/publication-check',headers=headers).json()['tested_current_revision'] is False
+    assert client.post(base+'/publish',headers=headers).status_code==200
+
+
+def test_mvp_publication_rejects_corrupt_source():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'MVP_PUBLISH_CORRUPT')
+    source=Document(); source.add_paragraph('Договор: Иванов'); raw=io.BytesIO(); source.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('contract.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    assert client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':1}).status_code==201
+    stored=Path(settings.storage,'template_sources',template['id'],uploaded.json()['id'],'source.docx')
+    stored.chmod(0o644)
+    try:
+        stored.write_bytes(b'corrupt')
+        assert client.post(base+'/publish',headers=headers).status_code in {409,422}
+    finally:
+        stored.write_bytes(raw.getvalue());stored.chmod(0o444)
+
+
+def test_mvp_publication_large_questionnaire_and_many_bindings():
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'MVP_PUBLISH_LARGE')
+    source=Document()
+    for index in range(200): source.add_paragraph(f'Поле {index:03d}: VALUE')
+    raw=io.BytesIO(); source.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('large.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes']
+    fields=[]
+    for index in range(151):
+        field=client.post(base+'/fields',headers=headers,json={'field_key':f'field_{index}','label':f'Вопрос {index}','field_type':'TEXT','position':index+1})
+        assert field.status_code==201,field.text
+        fields.append(field.json())
+    for index,node in enumerate(nodes):
+        start=node['text'].index('VALUE')
+        binding=client.post(base+'/bindings',headers=headers,json={'field_id':fields[index%(len(fields)-1)]['id'],'locator':node['locator'],'start':start,'end':start+5,'selected_text':'VALUE'})
+        assert binding.status_code==201,binding.text
+    assessment=client.get(base+'/publication-check',headers=headers)
+    assert assessment.status_code==200 and not assessment.json()['errors'],assessment.text
+    assert any('Вопрос 150' in warning for warning in assessment.json()['warnings'])
+    from app.contract_platform import render_docx
+    with patch('app.contract_platform.render_docx',wraps=render_docx) as smoke:
+        published=client.post(base+'/publish',headers=headers)
+        assert smoke.call_count==1
+    assert published.status_code==200 and published.json()['status']=='PUBLISHED',published.text
+
+
+def test_mvp_publication_warns_about_optional_unbound_repeating_field():
+    manager=TestClient(app); headers=auth(manager)
+    template,version,_,_,group=configure_repeating_platform(manager,headers,'MVP_REPEAT_OPTIONAL')
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=headers,json={'field_key':'note','label':'Примечание','field_type':'TEXT','required':False,'position':3})
+    assert field.status_code==201,field.text
+    check=manager.get(base+'/publication-check',headers=headers)
+    assert check.status_code==200 and not check.json()['errors'],check.text
+    assert any('Примечание' in warning for warning in check.json()['warnings'])
+    from app.contract_platform import render_docx
+    with patch('app.contract_platform.render_docx',wraps=render_docx) as smoke:
+        assert manager.post(base+'/publish',headers=headers).status_code==200
+        assert smoke.call_count==1
+        assert smoke.call_args.args[7]['schedule']==[{'_id':'publish-check'}]
+    employee=TestClient(app); employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']}).json()
+    answers={'customer_name':'Заказчик','schedule':[{'_id':'row-1','date':'2026-11-13','place':'Зал','note':'Служебное'}]}
+    assert employee.patch(f"/api/v1/contract-drafts/{draft['id']}",headers=employee_headers,json={'answers':answers}).status_code==200
+    generated=employee.post(f"/api/v1/contract-drafts/{draft['id']}/generate",headers=employee_headers)
+    assert generated.status_code==201,generated.text
+
+
+def test_publication_fingerprint_is_order_independent_and_tracks_generation_settings():
+    from sqlalchemy.orm import Query
+    from app.contract_platform import publication_fingerprint
+    client=TestClient(app); headers=auth(client); template=create_platform_template(client,headers,'MVP_FINGERPRINT')
+    document=Document();document.add_paragraph('Первый: NAME');document.add_paragraph('Второй: NAME')
+    raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('fingerprint.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    first=client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':1}).json()
+    assert client.post(base+'/fields',headers=headers,json={'field_key':'aux','label':'Дополнение','field_type':'TEXT','position':2}).status_code==201
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes']
+    for node in nodes:
+        start=node['text'].index('NAME')
+        assert client.post(base+'/bindings',headers=headers,json={'field_id':first['id'],'locator':node['locator'],'start':start,'end':start+4,'selected_text':'NAME'}).status_code==201
+    with SessionLocal() as session:
+        version=session.get(TemplateVersion,uploaded['id'])
+        expected=publication_fingerprint(version,session)
+        original_all=Query.all
+        with patch.object(Query,'all',lambda query:list(reversed(original_all(query)))):
+            assert publication_fingerprint(version,session)==expected
+    changed=client.patch(base+f"/fields/{first['id']}",headers=headers,json={'field_key':'name','label':'Исправленное имя','field_type':'TEXT','position':1})
+    assert changed.status_code==200,changed.text
+    with SessionLocal() as session:
+        assert publication_fingerprint(session.get(TemplateVersion,uploaded['id']),session)!=expected
+
+
+def test_publication_rejects_binding_inside_hidden_word_field():
+    document=Document();paragraph=document.add_paragraph()
+    run=paragraph.add_run();begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');run._r.append(begin)
+    paragraph.add_run('SECRET')
+    run=paragraph.add_run();end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');run._r.append(end)
+    raw=io.BytesIO();document.save(raw)
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'MVP_HIDDEN_BINDING')
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('hidden.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':1}).json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'hidden','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'NEVER'}})
+    assert region.status_code==201,region.text
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':6,'selected_text':'SECRET'})
+    assert binding.status_code==201,binding.text
+    check=client.get(base+'/publication-check',headers=headers)
+    assert check.status_code==200 and any('внутри поля Word' in message for message in check.json()['errors']),check.text
+    assert client.post(base+'/publish',headers=headers).status_code==422
+
+
+def test_publication_rejects_invalid_group_binding_even_without_test_rows():
+    from app.db import RepeatingGroupField
+    client=TestClient(app);headers=auth(client);template,version,_,_,group=configure_repeating_platform(client,headers,'MVP_BAD_GROUP_BINDING')
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    with SessionLocal() as session:
+        field=session.query(RepeatingGroupField).filter_by(group_id=group['id']).first()
+        field.locator={**field.locator,'text_start':0,'text_end':0,'selected_text':''}
+        session.commit()
+    check=client.get(base+'/publication-check',headers=headers)
+    assert check.status_code==200 and any('Поле группы' in message for message in check.json()['errors']),check.text
+    assert client.post(base+'/publish',headers=headers).status_code==422
+
+
+def test_publication_rejects_incompatible_formats_but_accepts_text_date_and_money():
+    from app.contract_platform import validate_binding_format
+    text_field=type('Field',(),{'field_type':'TEXT','config':{}})()
+    boolean_field=type('Field',(),{'field_type':'BOOLEAN','config':{}})()
+    for name in ('DATE','DATE_WORDS','DATE_MONTH_SHORT','MONEY','MONEY_WORDS_RUB','MONEY_WITH_CURRENCY'):
+        validate_binding_format(name,text_field)
+        with pytest.raises(CalculationError):validate_binding_format(name,boolean_field)
+    assert ValueFormatter.format('2026-11-13','DATE_WORDS')
+    assert ValueFormatter.format('1250','MONEY_WORDS_RUB')
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'MVP_FORMAT_PREFLIGHT')
+    document=Document();document.add_paragraph('VALUE');raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('format.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'flag','label':'Флаг','field_type':'BOOLEAN','position':1}).json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).json()
+    with SessionLocal() as session:
+        stored=session.get(DocumentBinding,binding['id']);stored.format_config={'format':'DATE_WORDS','options':{}};session.commit()
+    check=client.get(base+'/publication-check',headers=headers)
+    assert any('Формат даты' in message for message in check.json()['errors']),check.text
+    assert client.post(base+'/publish',headers=headers).status_code==422
+
+
+def test_mvp_publication_reuses_current_test_docx_but_checks_bindings():
+    from app.contract_platform import validate_bindings, render_docx
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'MVP_REUSE_TEST')
+    document=Document();document.add_paragraph('Имя: Иванов');raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('reuse.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','required':True,'position':1}).json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0];start=node['text'].index('Иванов')
+    assert client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':start,'end':start+6,'selected_text':'Иванов'}).status_code==201
+    assert client.post(base+'/test-drive',headers=headers,json={'answers':{'name':'Петров'}}).status_code==201
+    with patch('app.contract_platform.render_docx',wraps=render_docx) as smoke,patch('app.contract_platform.validate_bindings',wraps=validate_bindings) as integrity:
+        published=client.post(base+'/publish',headers=headers)
+        assert published.status_code==200,published.text
+        assert smoke.call_count==0 and integrity.call_count>=1

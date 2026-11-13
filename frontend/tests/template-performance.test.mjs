@@ -20,6 +20,9 @@ test("large Word preview mounts distant blocks on demand and preserves visible i
     assert.ok(await page.locator(".preview-node").count() < 150);
     assert.equal(await page.locator(".docx-table").count(), 0);
     await page.getByRole("tab", { name: "Word" }).click();
+    assert.ok(await page.locator(".workspace-structure-list button").count() < 100);
+    await page.locator(".workspace-structure-list").evaluate(list => { list.scrollTop = list.scrollHeight; });
+    await page.waitForFunction(() => /3500|Ячейка/.test(document.querySelector(".workspace-structure-list button:last-of-type")?.textContent || ""));
     await page.getByLabel("Найти фрагмент").fill("Фрагмент договора 3500");
     await page.locator(".workspace-structure-list button").first().click();
     await page.locator('.docx-page [data-locator="word/document.xml#/p[3500]"]').waitFor();

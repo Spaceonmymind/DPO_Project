@@ -1,6 +1,6 @@
 """Deterministic, non-AI contract-template platform."""
 from __future__ import annotations
-import copy,hashlib,re,zipfile,uuid
+import copy,hashlib,json,re,zipfile,uuid
 from abc import ABC,abstractmethod
 from datetime import date
 from decimal import Decimal,InvalidOperation
@@ -136,8 +136,10 @@ def validate_binding_format(name,field):
  ValueFormatter.validate(name)
  if name=='GENITIVE' and (not field or field.field_type not in {'SINGLE_SELECT','MULTI_SELECT'} or not (field.config or {}).get('option_items')):
   raise CalculationError('Родительный падеж доступен для вопросов с настроенными вариантами ответа')
- if name=='DATE_MONTH_SHORT' and (not field or field.field_type!='DATE'):
-  raise CalculationError('Формат даты доступен только для вопроса типа «Дата»')
+ if name in {'DATE','DATE_WORDS','DATE_MONTH_SHORT'} and (not field or field.field_type not in {'DATE','TEXT','MULTILINE_TEXT'}):
+  raise CalculationError('Формат даты доступен для даты или текстового вопроса с датой')
+ if name in {'NUMBER','DECIMAL','MONEY','MONEY_WITH_CURRENCY','MONEY_WORDS_RUB','PERCENT'} and (not field or field.field_type not in {'INTEGER','DECIMAL','MONEY','TEXT','MULTILINE_TEXT'}):
+  raise CalculationError('Числовой формат доступен для числа, суммы или текстового вопроса с числом')
 def region_out(x): return {'id':x.id,'region_key':x.region_key,'region_type':x.region_type,'locator':x.locator,'include_when':x.include_when,'original_text':x.original_text,'status':x.status}
 def repeating_field_out(x): return {'id':x.id,'group_id':x.group_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator}
 def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x.name,'description':x.description,'min_items':x.min_items,'max_items':x.max_items,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator,'status':x.status,'fields':[repeating_field_out(f) for f in s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all()]}
@@ -480,7 +482,7 @@ def validate_repeating_answers(groups,s,questionnaire_fields,answers,complete=Tr
 def validate_bindings(v,s):
  preview=adapter.preview(safe_source(v))
  if preview['structure_fingerprint']!=v.structure_fingerprint: raise HTTPException(409,detail='DOCX изменился после создания версии')
- nodes={x['locator']:x for x in preview['nodes']}; occupied={}; bindings=s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE').all()
+ nodes={x['locator']:x for x in preview['nodes']}; occupied={}; roots={}; bindings=s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE').all()
  for b in bindings:
   loc=b.locator or {}; node=nodes.get(loc.get('node')); start,end=loc.get('text_start'),loc.get('text_end')
   if not node or loc.get('part')!=node['part'] or loc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Привязка «{b.binding_key}» устарела')
@@ -488,6 +490,11 @@ def validate_bindings(v,s):
   ranges=occupied.setdefault(node['locator'],[])
   if any(start<e and end>s0 for s0,e in ranges): raise HTTPException(422,detail='Диапазоны привязок пересекаются')
   ranges.append((start,end))
+  try:
+   part=node['part']
+   if part not in roots: roots[part]=_part_root(safe_source(v),part)
+   replace_range(copy.deepcopy(paragraph_for(roots[part],node['locator'])),start,end,'ПРОВЕРКА')
+  except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Привязка «{b.binding_key}» не может быть применена: {exc}')
  return bindings
 def _element_hash(node): return hashlib.sha256(ET.tostring(node,encoding='utf-8')).hexdigest()
 def _part_root(path,part):
@@ -660,6 +667,10 @@ def validate_regions(v,s,bindings=None):
   except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Границы области «{region.region_key}» устарели')
   hashes=loc.get('element_hashes') or [loc.get('element_hash')]
   if [_element_hash(x) for x in actual]!=hashes: raise HTTPException(422,detail=f'Locator области «{region.region_key}» устарел')
+  try:
+   if region.region_type=='CONDITIONAL_RUN': replace_range(copy.deepcopy(actual[0]),loc['text_start'],loc['text_end'],'')
+   elif region.region_type=='CONDITIONAL_TABLE_COLUMN': _remove_table_column(copy.deepcopy(actual[0]),loc['column'])
+  except (KeyError,IndexError,ValueError) as exc: raise HTTPException(422,detail=f'Условная область «{region.region_key}» не может быть применена: {exc}')
   for old in seen:
    if _regions_overlap(old,region): raise HTTPException(422,detail=f'Условные области «{old.region_key}» и «{region.region_key}» частично пересекаются либо имеют одинаковые границы')
   seen.append(region)
@@ -804,15 +815,23 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
   fields=s.query(RepeatingGroupField).filter_by(group_id=group.id).order_by(RepeatingGroupField.position).all()
   if not fields: raise HTTPException(422,detail=f'Добавьте поля в группу «{group.name}»')
   for field in fields:
-   if not field.locator: raise HTTPException(422,detail=f'Свяжите поле «{field.label}» с текстом в строке-образце')
+   if not field.locator:
+    if field.required: raise HTTPException(422,detail=f'Свяжите поле «{field.label}» с текстом в строке-образце')
+    continue
    floc=field.locator
    if not _field_in_primary_group_row(floc.get('node',''),group) or floc.get('structure_fingerprint')!=v.structure_fingerprint: raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
    try: p=paragraph_for(root,floc['node']); text=_paragraph_text(p)
    except (KeyError,IndexError,ValueError): raise HTTPException(422,detail=f'Привязка поля «{field.label}» не найдена')
    if text[floc['text_start']:floc['text_end']]!=floc.get('selected_text'): raise HTTPException(422,detail=f'Привязка поля «{field.label}» устарела')
+   try:
+    cfg=field.config or {};validate_binding_format(cfg.get('output_format','RAW'),field)
+    ValueFormatter.validate_options({'precision':cfg.get('precision',2),'rounding':cfg.get('rounding','HALF_UP')})
+    replace_range(copy.deepcopy(p),floc['text_start'],floc['text_end'],'ПРОВЕРКА')
+   except (CalculationError,ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Поле группы «{field.label}» не может быть подставлено: {exc}')
   ranges={}
   for field in fields:
-   locf=field.locator; ranges.setdefault(locf['node'],[]).append((locf['text_start'],locf['text_end']))
+   locf=field.locator
+   if locf: ranges.setdefault(locf['node'],[]).append((locf['text_start'],locf['text_end']))
   if any(any(a<d and b>c for i,(a,b) in enumerate(items) for c,d in items[i+1:]) for items in ranges.values()): raise HTTPException(422,detail=f'Привязки полей группы «{group.name}» пересекаются')
   for binding in bindings or []:
    if _field_in_group_row(binding.locator.get('node',''),group): raise HTTPException(422,detail=f'Обычная привязка пересекает строку-образец группы «{group.name}»')
@@ -823,6 +842,76 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
      fake=type('RowRegion',(),{'region_type':'CONDITIONAL_TABLE_ROW','locator':{**target,'row':row_number}})()
      if _regions_overlap(fake,region): raise HTTPException(422,detail=f'Условная область пересекает строку-образец группы «{group.name}»')
  return groups
+
+def publication_fingerprint(v,s):
+ """Digest of generation-relevant draft settings; test documents do not affect it."""
+ schema=schema_for(v.id,s)
+ fields=sorted(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(),key=lambda x:x.id) if schema else []
+ bindings=sorted(s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE').all(),key=lambda x:x.id)
+ regions=sorted(s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id,status='ACTIVE').all(),key=lambda x:x.id)
+ groups=sorted(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),key=lambda x:x.id)
+ payload={
+  'source':v.source_sha256,
+  'fields':[(x.id,x.field_key,x.label,x.field_type,x.required,x.position,x.config) for x in fields],
+  'bindings':[(x.id,x.field_id,x.binding_key,x.locator,x.selected_text,x.format_config) for x in bindings],
+  'regions':[(x.id,x.region_type,x.locator,x.include_when) for x in regions],
+  'groups':[(x.id,x.group_key,x.name,x.min_items,x.max_items,x.required,x.position,x.config,x.locator,
+             [(f.id,f.field_key,f.field_type,f.required,f.position,f.config,f.locator) for f in sorted(s.query(RepeatingGroupField).filter_by(group_id=x.id).all(),key=lambda f:f.id)]) for x in groups],
+ }
+ return hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()
+
+def publication_check(v,s):
+ """Keep integrity failures blocking; report configuration completeness separately."""
+ errors=[];warnings=[]
+ try: safe_source(v); source_valid=True
+ except HTTPException as exc: errors.append(str(exc.detail)); source_valid=False
+ schema=schema_for(v.id,s)
+ if not schema: errors.append('Создайте анкету')
+ fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+ if not fields: errors.append('Добавьте хотя бы одно поле анкеты')
+ bindings=[];regions=[];groups=[]
+ if schema and source_valid:
+  try:
+   bindings=validate_bindings(v,s)
+   regions=validate_regions(v,s,bindings)
+   groups=validate_repeating_groups(v,s,bindings,regions)
+   validate_condition_schema(fields)
+   validate_calculations(v.id,s)
+  except (HTTPException,ConditionConfigurationError,CalculationError) as exc: errors.append(str(exc.detail) if isinstance(exc,HTTPException) else str(exc))
+ if not errors:
+  known={field.id:field for field in fields}
+  for binding in bindings:
+   if binding.field_id not in known: errors.append(f'Привязка «{binding.binding_key}» ссылается на отсутствующий вопрос')
+   elif binding.binding_key!=known[binding.field_id].field_key: errors.append(f'Привязка «{binding.binding_key}» ссылается на другой ключ вопроса')
+   else:
+    try:
+     cfg=binding.format_config or {};validate_binding_format(cfg.get('format','RAW'),known[binding.field_id]);ValueFormatter.validate_options(cfg.get('options') or {})
+    except CalculationError as exc: errors.append(f'Привязка «{binding.binding_key}»: {exc}')
+ if not bindings: warnings.append('В документе нет прямых привязок к вопросам')
+ used={x.field_key for x in fields if x.id in {b.field_id for b in bindings}}
+ references=[]
+ for field in fields:
+  cfg=field.config or {}
+  references.extend(cfg.get(key) for key in ('visible_when','required_when','document_condition','expression','text_expression','default_source') if cfg.get(key))
+ references.extend(x.include_when for x in regions)
+ references.extend((x.config or {}).get('visible_when') for x in groups)
+ dependency_text=json.dumps(references,ensure_ascii=False,default=str)
+ for field in fields:
+  if field.field_key not in used and ('"'+field.field_key+'"') not in dependency_text:
+   warnings.append(f'Вопрос «{field.label}» не используется в документе или правилах')
+ for group in groups:
+  for field in s.query(RepeatingGroupField).filter_by(group_id=group.id).all():
+   if not field.locator and not field.required: warnings.append(f'Необязательное поле «{field.label}» группы «{group.name}» не связано с Word')
+ candidates=(v.preview_metadata or {}).get('binding_candidates',[])
+ unresolved=sum(1 for item in candidates if item.get('status') in {'CANDIDATE_FOUND','PENDING','REVIEW_REQUIRED','BLOCKED'})
+ if unresolved: warnings.append(f'Не завершена разметка кандидатов на привязку: {unresolved}')
+ revision=publication_fingerprint(v,s)
+ tested=False
+ for item in reversed((v.preview_metadata or {}).get('test_documents',[])):
+  if item.get('configuration_fingerprint')!=revision: continue
+  try: safe_file(item.get('path',''),'test_contracts',item.get('sha256','')); tested=True; break
+  except HTTPException: continue
+ return {'errors':errors,'warnings':warnings,'configuration_fingerprint':revision,'tested_current_revision':tested}
 def paragraph_for(root,locator):
  path=locator.split('#/',1)[1]; body=root.find('w:body',NS) if root.tag.endswith('document') else root
  m=re.fullmatch(r'p\[(\d+)\]',path)
@@ -893,6 +982,7 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
      for item_index,item in enumerate(items):
       clones=[copy.deepcopy(row) for row in rows];actions={}
       for field in fields:
+       if not field.locator: continue
        loc=field.locator; parsed=_table_parts(loc['node'])
        if not parsed: raise ValueError(f'Привязка поля «{field.label}» повреждена')
        _,_,source_row,cell_no,paragraph_no=parsed;row_offset=source_row-group.locator['row']
@@ -1183,7 +1273,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     paragraph=section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph();paragraph.text='ТЕСТОВЫЙ ДОКУМЕНТ · НЕ ДЛЯ ПОДПИСАНИЯ'
    marked.save(target)
   except (ValueError,IndexError,KeyError,CalculationError) as exc:raise HTTPException(422,detail=f'Не удалось сформировать тестовый DOCX: {exc}')
-  raw=target.read_bytes();checksum=hashlib.sha256(raw).hexdigest();metadata=copy.deepcopy(v.preview_metadata or {});documents=metadata.get('test_documents',[]);documents.append({'id':document_id,'path':str(target),'sha256':checksum,'created_by_id':u.id,'created_at':now().isoformat()});metadata['test_documents']=documents[-20:];v.preview_metadata=metadata
+  raw=target.read_bytes();checksum=hashlib.sha256(raw).hexdigest();metadata=copy.deepcopy(v.preview_metadata or {});documents=metadata.get('test_documents',[]);documents.append({'id':document_id,'path':str(target),'sha256':checksum,'configuration_fingerprint':publication_fingerprint(v,s),'created_by_id':u.id,'created_at':now().isoformat()});metadata['test_documents']=documents[-20:];v.preview_metadata=metadata
   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='DRAFT_TEST_DOCUMENT_GENERATED',metadata_json={'document_id':document_id,'sha256':checksum}));s.commit()
   return {'id':document_id,'test_only':True,'sha256':checksum,'download_url':f'{prefix}/{tid}/versions/{vid}/test-documents/{document_id}/download'}
  @r.get(prefix+'/{tid}/versions/{vid}/test-documents/{document_id}/download')
@@ -1609,79 +1699,33 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    target.unlink(missing_ok=True)
    raise
 
+ @r.get(prefix+'/{tid}/versions/{vid}/publication-check')
+ def check_publication(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  return publication_check(v,s)
+
  @r.post(prefix+'/{tid}/versions/{vid}/publish')
  def publish(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); require_publisher(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s)
-  if not schema: raise HTTPException(422,detail='Создайте анкету')
-  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all(); bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); groups=validate_repeating_groups(v,s,bindings,regions)
-  if not fields: raise HTTPException(422,detail='Добавьте хотя бы одно поле анкеты')
-  if not bindings: raise HTTPException(422,detail='Создайте хотя бы одну привязку к DOCX')
-  validate_condition_schema(fields)
-  validate_calculations(v.id,s)
-  bound={x.field_id for x in bindings}
-  from app.binding_materialization import candidate_is_resolved
-  import json as _json
-  candidates=(v.preview_metadata or {}).get('binding_candidates',[])
-  expressions=[
-   (f.config or {}).get('text_expression') or (f.config or {}).get('expression')
-   for f in fields if (f.config or {}).get('calculated')
-  ]
-  conditions=[
-   condition
-   for f in fields
-   for condition in (
-    (f.config or {}).get('visible_when'),
-    (f.config or {}).get('required_when'),
-    (f.config or {}).get('document_condition')
-   )
-   if condition
-  ]
-  conditions.extend(r.include_when for r in regions)
-  conditions.extend((g.config or {}).get('visible_when') for g in groups if (g.config or {}).get('visible_when'))
-  dependencies=_json.dumps(expressions+conditions,ensure_ascii=False)
-  missing=[]
-  for f in fields:
-   cfg=f.config or {}
-   if not (f.required or cfg.get('required_when') is not None):
-    continue
-   if f.id in bound or ('"'+f.field_key+'"') in dependencies:
-    continue
-   matching=[
-    c for c in candidates
-    if c.get('field_path')==f.field_key
-    and c.get('status') in {'BINDING_COVERAGE','REGION_BINDING_COVERAGE'}
-    and candidate_is_resolved(s,v,c,candidates)
-   ]
-   if matching:
-    continue
-   missing.append(f.field_key)
-  if missing:
-   raise HTTPException(422,detail={
-    'message':'Обязательные поля не подключены к формированию договора',
-    'fields':missing
-   })
-  if any(not x.field_id for x in bindings): raise HTTPException(422,detail='Найдены привязки без поля анкеты')
-  probe={x.field_key:('Да' if x.field_type=='BOOLEAN' else '2026-01-01' if x.field_type=='DATE' else '1') for x in fields if not (x.config or {}).get('calculated')}; temp=Path(v.source_path).parent/'publish-check.docx'
-  group_fields={x.id:s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all() for x in groups}
-  def samples(count):
-   def sample_value(field):
-    if field.field_type=='DATE': return '2026-01-01'
-    if field.field_type=='BOOLEAN': return True
-    if field.field_type in {'INTEGER','DECIMAL','MONEY'}: return 1
-    if field.field_type=='SINGLE_SELECT': return (field.config or {}).get('options',['Тест'])[0]
-    return 'Тест'
-   return {g.group_key:[{'_id':f'preflight-{i}',**{f.field_key:sample_value(f) for f in group_fields[g.id] if not (f.config or {}).get('calculated')}} for i in range(count)] for g in groups}
-  def checked_values(repeated):
-   source={**probe,**repeated}; _,values,rows=calculated_document_values(v.id,s,fields,source); return formatted_bindings(bindings,values),rows
-  try:
-   first=samples(1); values,rows=checked_values(first); render_docx(v,bindings,values,temp,regions,{x.id for x in regions},groups,rows,group_fields); temp.unlink(missing_ok=True)
-   zero_or_min={g.group_key:([] if g.min_items==0 and not g.required else samples(max(g.min_items,1))[g.group_key]) for g in groups}
-   values,rows=checked_values(zero_or_min); render_docx(v,bindings,values,temp,regions,set(),groups,rows,group_fields); temp.unlink(missing_ok=True)
-   three=samples(3); values,rows=checked_values(three); render_docx(v,bindings,values,temp,regions,{x.id for x in regions},groups,rows,group_fields); temp.unlink(missing_ok=True)
-   if groups:
-    maximum={g.group_key:samples(g.max_items)[g.group_key] for g in groups}
-    values,rows=checked_values(maximum); render_docx(v,bindings,values,temp,regions,{x.id for x in regions},groups,rows,group_fields); temp.unlink(missing_ok=True)
-  except (ValueError,IndexError,KeyError,CalculationError) as exc: raise HTTPException(422,detail=f'Проверка генерации не пройдена: {exc}')
+  require_manager(u); require_publisher(u); v,t=owned_version(vid,u,s); require_draft(v)
+  if t.id!=tid: raise HTTPException(404,detail='Версия не найдена')
+  assessment=publication_check(v,s)
+  if assessment['errors']: raise HTTPException(422,detail={'message':'Публикация невозможна','errors':assessment['errors'],'warnings':assessment['warnings']})
+  schema=schema_for(v.id,s)
+  if not assessment['tested_current_revision']:
+   # One structural smoke test exercises every binding and one prototype row per
+   # group. Empty values are not questionnaire answers or calculation inputs.
+   bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings)
+   groups=validate_repeating_groups(v,s,bindings,regions)
+   target=Path(v.source_path).parent/f'publish-check-{uuid.uuid4().hex}.docx'
+   try:
+    render_docx(v,bindings,{item.id:'' for item in bindings},target,regions,{item.id for item in regions},groups,
+                {group.group_key:[{'_id':'publish-check'}] for group in groups},
+                {group.id:s.query(RepeatingGroupField).filter_by(group_id=group.id).all() for group in groups})
+    validate_docx(target.name,DOCX_MIME,target.read_bytes())
+   except (ValueError,IndexError,KeyError,CalculationError,HTTPException) as exc:
+    raise HTTPException(422,detail=f'Проверка структуры DOCX не пройдена: {exc}')
+   finally: target.unlink(missing_ok=True)
   for old in s.query(TemplateVersion).filter(TemplateVersion.template_id==t.id,TemplateVersion.status=='PUBLISHED'): old.status='SUPERSEDED'
-  v.status='PUBLISHED'; v.published_by_id=u.id; v.published_at=now(); schema.status='PUBLISHED'; t.status='ACTIVE'; t.current_version_id=v.id; s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='VERSION_PUBLISHED')); s.commit(); return version_out(v)
+  v.status='PUBLISHED'; v.published_by_id=u.id; v.published_at=now(); schema.status='PUBLISHED'; t.status='ACTIVE'; t.current_version_id=v.id; s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='VERSION_PUBLISHED',metadata_json={'warnings':assessment['warnings']})); s.commit(); return {**version_out(v),'warnings':assessment['warnings']}
  return r

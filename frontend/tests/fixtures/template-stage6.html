@@ -23,6 +23,7 @@ const api=async(path,options={})=>{
   if(path.endsWith("/preview")){window.__previewRequests++;return{nodes};}
   if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group]};
   if(path.endsWith("/repeating-groups"))return[group];
+  if(path.endsWith("/publication-check"))return{errors:new URLSearchParams(location.search).has("errors")?["Привязка «Имя» ссылается на отсутствующий вопрос"]:[],warnings:new URLSearchParams(location.search).has("warnings")?["Вопрос «Служебный вопрос» не используется в документе или правилах"]:[],tested_current_revision:false};
   if(/\/(bindings|conditional-regions|binding-candidates)$/.test(path))return[];
   if(path.endsWith("/test-drive")&&options.method==="POST"){
     window.__testCalls++;window.__testAnswers=JSON.parse(options.body).answers;

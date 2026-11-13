@@ -7,7 +7,7 @@ import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 
 const newRowId = () => globalThis.crypto?.randomUUID?.() || `row-${Date.now()}-${Math.random()}`;
 
-export function TemplateQuestionnairePreview({ schema, answers, change, busy, published, document, error, notice, generate, publish }: any) {
+export function TemplateQuestionnairePreview({ schema, answers, change, busy, published, document, error, notice, publicationCheck, generate, publish }: any) {
   const [sectionIndex, setSectionIndex] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const fields = schema?.fields || [];
@@ -44,6 +44,8 @@ export function TemplateQuestionnairePreview({ schema, answers, change, busy, pu
       <header className="template-questionnaire-heading"><span>Проверка перед публикацией</span><h2>Предпросмотр анкеты</h2><p>Заполните вопросы так, как это сделает сотрудник, и сформируйте тестовый документ.</p></header>
       {steps.length > 1 && <nav className="questionnaire-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" className={index === sectionIndex ? "active" : ""} aria-current={index === sectionIndex ? "step" : undefined} onClick={() => setSectionIndex(index)}>{index + 1}. {step.name}</button>)}</nav>}
       {displayError && <div className="platform-error" role="alert">{displayError}</div>}
+      {publicationCheck?.errors?.length > 0 && !published && <div className="platform-error" role="alert"><b>Ошибки конфигурации</b><ul>{publicationCheck.errors.map((message: string, index: number) => <li key={index}>{message}</li>)}</ul></div>}
+      {publicationCheck?.warnings?.length > 0 && <div className="template-publication-warnings" role="status"><b>Предупреждения</b><p>Они не мешают публикации шаблона.</p><ul>{publicationCheck.warnings.map((message: string, index: number) => <li key={index}>{message}</li>)}</ul></div>}
       {notice && <div className="platform-success" role="status">{notice}</div>}
       {Object.entries(errors).some(([, message]) => !!message) && <div className="platform-error" role="alert"><b>Проверьте ответы:</b><ul>{Object.entries(errors).filter(([, message]) => !!message).map(([key, message]) => <li key={key}><b>{fields.find((field: any) => field.field_key === key)?.label || groups.find((group: any) => group.group_key === key)?.name || key}</b>: {message}</li>)}</ul></div>}
       <div className="dynamic-form" data-tour="tpl-preview-questionnaire">
@@ -62,7 +64,7 @@ export function TemplateQuestionnairePreview({ schema, answers, change, busy, pu
       {document && <a className="document-ready" href={document.download_url}><FileText size={20}/><span><b>Тестовый DOCX готов</b><small>Скачайте документ и проверьте результат</small></span><Download size={20}/></a>}
       <footer className="template-questionnaire-actions">
         <button type="button" className="secondary" disabled={busy || published} onClick={() => { if (checkAll()) generate(); }}><FileText size={16}/>Сформировать тестовый DOCX</button>
-        <button type="button" className="primary" disabled={busy || published} onClick={publish}><Send size={16}/>Опубликовать шаблон</button>
+        <button type="button" className="primary" disabled={busy || published || !publicationCheck || !!publicationCheck.errors?.length} onClick={publish}><Send size={16}/>{publicationCheck?.warnings?.length && !publicationCheck?.errors?.length ? "Опубликовать с предупреждениями" : "Опубликовать шаблон"}</button>
         {published && !notice && <p>Версия опубликована и доступна сотрудникам.</p>}
       </footer>
     </div>

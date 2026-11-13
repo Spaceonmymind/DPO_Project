@@ -27,6 +27,7 @@ import { layoutPreviewNodes } from "./docxPreviewLayout";
 import { useDocxVirtualPreview } from "./docxVirtualPreview";
 import { TemplateQuestionnairePreview } from "./TemplateQuestionnairePreview";
 import { TemplateOperationDialog, type TemplateOperation } from "./TemplateOperationDialog";
+import { WordStructureList } from "./WordStructureList";
 import { ConfirmAction } from "./ConfirmAction";
 import { QuestionCombobox } from "./QuestionCombobox";
 import { DefaultValueEditor } from "./DefaultValueEditor";
@@ -120,6 +121,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
   const dragLineRef = useRef<HTMLDivElement | null>(null);
   const runningRef = useRef(false);
   const [operation, setOperation] = useState<TemplateOperation | null>(null);
+  const [publicationCheck, setPublicationCheck] = useState<{ errors: string[]; warnings: string[]; tested_current_revision: boolean } | null>(null);
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
   const [paneAvailable, setPaneAvailable] = useState(0);
   const [requisiteSets, setRequisiteSets] = useState<any[]>([]);
@@ -545,7 +547,13 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил сохранение вопроса.");
+      const previous = schema?.fields?.find((item: any) => item.id === saved.id);
+      setSchema((current: any) => ({ ...current, fields: [...(current?.fields || []).filter((item: any) => item.id !== saved.id), saved].sort((a: any, b: any) => a.position - b.position) }));
+      if (previous && previous.field_key !== saved.field_key) {
+        setBindings((current: any[]) => current.map(item => item.field_id === saved.id ? { ...item, binding_key: saved.field_key } : item));
+        setTestAnswers((current: any) => { const next = { ...current, [saved.field_key]: current[previous.field_key] }; delete next[previous.field_key]; return next; });
+      }
       setFieldOptionsText((payload.options || []).join(", "));
       setField({ ...payload, group: saved?.config?.group || payload.group });
       if (selectionDraft && saved?.id) {
@@ -628,12 +636,14 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
   }
   async function changeBindingFormat(binding: any, output_format: string) {
     await run(async () => {
-      await api(`/document-templates/${selected.id}/versions/${version.id}/bindings/${binding.id}/format`, {
+      const saved = await api(`/document-templates/${selected.id}/versions/${version.id}/bindings/${binding.id}/format`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ output_format, format_options: binding.format_config?.options || { precision: 2, rounding: "HALF_UP" } }),
       });
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил формат привязки.");
+      setBindings((current: any[]) => current.map(item => item.id === saved.id ? saved : item));
+      setActiveBinding((current: any) => current?.id === saved.id ? saved : current);
       setNotice("Формат привязки сохранён.");
     });
   }
@@ -665,7 +675,8 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         `/document-templates/${selected.id}/versions/${version.id}/bindings/${id}`,
         { method: "DELETE" },
       );
-      await openVersion(version);
+      setBindings((current: any[]) => current.filter(item => item.id !== id));
+      setActiveBinding((current: any) => current?.id === id ? null : current);
     });
   }
   function draftRegion(
@@ -742,12 +753,14 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
               include_when: regionDraft.include_when,
             }
           : regionDraft;
-      await api(path, {
+      const saved = await api(path, {
         method: editingRegion ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил условную область.");
+      setRegions((current: any[]) => [...current.filter(item => item.id !== saved.id), saved]);
+      setRegionDraft(null);
       setNotice(
         editingRegion
           ? "Условие области изменено."
@@ -761,7 +774,8 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         `/document-templates/${selected.id}/versions/${version.id}/conditional-regions/${id}`,
         { method: "DELETE" },
       );
-      await openVersion(version);
+      setRegions((current: any[]) => current.filter(item => item.id !== id));
+      setRegionDraft(null);
       setNotice("Условная область удалена.");
     });
   }
@@ -799,12 +813,15 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       delete payload.locator;
       delete payload.status;
       if (editing) delete payload.row_locator;
-      await api(path, {
+      const saved = await api(path, {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил повторяемую группу.");
+      setRepeatingGroups((current: any[]) => [...current.filter(item => item.id !== saved.id), saved].sort((a, b) => a.position - b.position));
+      setSchema((current: any) => current ? { ...current, repeating_groups: [...(current.repeating_groups || []).filter((item: any) => item.id !== saved.id), saved].sort((a: any, b: any) => a.position - b.position) } : current);
+      setGroupDraft(null);
       setNotice("Повторяемая группа сохранена.");
     });
   }
@@ -814,7 +831,8 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${id}`,
         { method: "DELETE" },
       );
-      await openVersion(version);
+      setRepeatingGroups((current: any[]) => current.filter(item => item.id !== id));
+      setSchema((current: any) => current ? { ...current, repeating_groups: (current.repeating_groups || []).filter((item: any) => item.id !== id) } : current);
       setNotice("Повторяемая группа удалена.");
     });
   }
@@ -852,12 +870,15 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       delete payload.id;
       delete payload.group_id;
       delete payload.locator;
-      await api(path, {
+      const saved = await api(path, {
         method: groupField.id ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил поле строки.");
+      setRepeatingGroups((current: any[]) => current.map(group => group.id === groupField.group_id ? { ...group, fields: [...group.fields.filter((item: any) => item.id !== saved.id), saved].sort((a: any, b: any) => a.position - b.position) } : group));
+      setSchema((current: any) => current ? { ...current, repeating_groups: (current.repeating_groups || []).map((group: any) => group.id === groupField.group_id ? { ...group, fields: [...(group.fields || []).filter((item: any) => item.id !== saved.id), saved].sort((a: any, b: any) => a.position - b.position) } : group) } : current);
+      setGroupField(null);
       setNotice("Поле строки сохранено.");
     });
   }
@@ -867,7 +888,8 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${groupId}/fields/${id}`,
         { method: "DELETE" },
       );
-      await openVersion(version);
+      setRepeatingGroups((current: any[]) => current.map(group => group.id === groupId ? { ...group, fields: group.fields.filter((item: any) => item.id !== id) } : group));
+      setSchema((current: any) => current ? { ...current, repeating_groups: (current.repeating_groups || []).map((group: any) => group.id === groupId ? { ...group, fields: (group.fields || []).filter((item: any) => item.id !== id) } : group) } : current);
     });
   }
   async function bindGroupField() {
@@ -876,7 +898,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       .find((x: any) => x.field.id === repeatingBinding);
     if (!target) return;
     await run(async () => {
-      await api(
+      const saved = await api(
         `/document-templates/${selected.id}/versions/${version.id}/repeating-groups/${target.group.id}/fields/${target.field.id}/binding`,
         {
           method: "PUT",
@@ -884,7 +906,11 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
           body: JSON.stringify(selection),
         },
       );
-      await openVersion(version);
+      if (!saved?.id) throw new Error("Сервер не подтвердил привязку поля строки.");
+      setRepeatingGroups((current: any[]) => current.map(group => group.id === target.group.id ? { ...group, fields: group.fields.map((item: any) => item.id === saved.id ? saved : item) } : group));
+      setSchema((current: any) => current ? { ...current, repeating_groups: (current.repeating_groups || []).map((group: any) => group.id === target.group.id ? { ...group, fields: (group.fields || []).map((item: any) => item.id === saved.id ? saved : item) } : group) } : current);
+      setSelection(null);
+      setRepeatingBinding("");
       setNotice("Фрагмент строки привязан к полю группы.");
     });
   }
@@ -923,12 +949,22 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         `/document-templates/${selected.id}/versions/${version.id}/publish`,
         { method: "POST" },
       );
+      setPublicationCheck({ errors: [], warnings: x.warnings || [], tested_current_revision: true });
       await openVersion(x, { stage: 6, skipPreview: true });
       await load();
       setSelected({ ...selected, status: "ACTIVE" });
       setNotice("Версия опубликована и доступна сотрудникам.");
     }, { title: "Публикуем шаблон", description: "Проверяем настройки и открываем опубликованную версию для сотрудников." });
   }
+  useEffect(() => {
+    if (stage !== 6 || !selected?.id || !version?.id || version.status !== "DRAFT") return;
+    let current = true;
+    setPublicationCheck(null);
+    api(`/document-templates/${selected.id}/versions/${version.id}/publication-check`)
+      .then(result => { if (current) setPublicationCheck(result); })
+      .catch(() => { if (current) setPublicationCheck({ errors: ["Не удалось проверить готовность шаблона. Повторите попытку после обновления страницы."], warnings: [], tested_current_revision: false }); });
+    return () => { current = false; };
+  }, [api, stage, selected?.id, version?.id, version?.status, schema, bindings, regions, repeatingGroups]);
   async function manageTemplate() {
     if (!selected || !pendingAction) return;
     const action = pendingAction;
@@ -1255,7 +1291,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   </button>
                 ))}
               </nav>
-              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (
@@ -1311,7 +1347,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                           </> : <>
                             <div className="workspace-panel-heading"><h3>Структура Word</h3><span>{preview.nodes.length}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label>
-                            <nav className="workspace-structure-list" aria-label="Структура документа">{visibleStructureItems.map((item: any) => <button key={item.locator} type="button" onClick={() => virtualPreview.scrollToLocator(item.locator)} title={item.description}><span>{item.kind === "table_cell" ? "Ячейка" : "Абзац"} {item.number}</span><b>{item.description}</b></button>)}{visibleStructureItems.length === 0 && <p className="workspace-empty">Фрагменты не найдены.</p>}</nav>
+                            <WordStructureList items={visibleStructureItems} onSelect={virtualPreview.scrollToLocator} />
                           </>}
                         </aside>
                         {paneDivider("questions")}
@@ -1928,44 +1964,6 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                             </form>
                           )}
                           {stage === 4 && !showFieldEditor && !selection && !regionDraft && !groupDraft && <div className="workspace-inspector-empty"><FileText size={26}/><h3>Выберите вопрос</h3><p>Откройте вопрос слева, чтобы изменить его настройки, или добавьте новый.</p>{version.status === "DRAFT" && <button type="button" className="secondary" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}</div>}
-                          <div className="field-list panel-fields">
-                            {schema?.fields.map((x: any) => (
-                              <article key={x.id}>
-                                <div>
-                                  <b>{x.label}</b>
-                                  <small>
-                                    {TYPES[x.field_type]} ·{" "}
-                                    {
-                                      bindings.filter(
-                                        (b) => b.field_id === x.id,
-                                      ).length
-                                    }{" "}
-                                    вхождений
-                                    {x.config?.visible_when ||
-                                    x.config?.required_when
-                                      ? " · Есть условия"
-                                      : ""}
-                                  </small>
-                                </div>
-                                {version.status === "DRAFT" && (
-                                  <span>
-                                    <button
-                                      aria-label="Изменить вопрос"
-                                      onClick={() => editField(x)}
-                                    >
-                                      <Pencil size={14} />
-                                    </button>
-                                    <button
-                                      aria-label="Удалить вопрос"
-                                      onClick={() => prepareFieldDelete(x)}
-                                    >
-                                      <Trash2 size={14} />
-                                    </button>
-                                  </span>
-                                )}
-                              </article>
-                            ))}
-                          </div>
                           <h3 className="panel-bindings">Привязки</h3>
                           <div className="binding-list panel-bindings">
                             {bindings.length === 0 && <p className="region-empty">Привязок пока нет. Выделите текст в документе и выберите вопрос анкеты.</p>}
@@ -2272,7 +2270,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                           {version.status === "DRAFT" && (
                             <button
                               className="publish panel-publish"
-                              onClick={publish}
+                              onClick={() => setStage(6)}
                               disabled={busy}
                             >
                               <Send size={15} />

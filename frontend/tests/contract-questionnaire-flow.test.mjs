@@ -44,9 +44,12 @@ test("sections block incomplete answers, preserve answers on back, and reveal hi
     assert.match(dom.window.document.body.textContent, /Обязательное поле/);
     const hint = dom.window.document.querySelector(".question-hint-trigger");
     assert.ok(hint);
-    const questionTitle = dom.window.document.querySelector("#field-f1").previousElementSibling;
+    const questionTitle = dom.window.document.querySelector("#field-f1").previousElementSibling.previousElementSibling;
     assert.match(questionTitle.textContent, /Полное наименование стороны договора/);
-    assert.equal(questionTitle.querySelector(".question-hint")?.previousSibling?.nodeType, dom.window.Node.TEXT_NODE, "hint follows the question text directly");
+    assert.match(dom.window.document.querySelector("#field-f1-help").textContent, /Укажите полное имя/);
+    assert.equal(dom.window.document.querySelector("#field-f1").getAttribute("placeholder"), null);
+    assert.equal(dom.window.document.querySelector("#field-f1").getAttribute("aria-describedby")?.includes("field-f1-help"), true);
+    assert.equal(questionTitle.querySelector(".question-hint")?.previousElementSibling?.className, "question-required", "hint follows the required marker beside the question text");
     assert.equal(dom.window.getComputedStyle(questionTitle).display, "block", "long titles wrap as inline text, not spaced flex columns");
     assert.equal(dom.window.getComputedStyle(questionTitle.querySelector(".question-hint")).display, "inline-flex");
     assert.equal(dom.window.document.querySelector(".dynamic-form i"), null, "required badge is not rendered");

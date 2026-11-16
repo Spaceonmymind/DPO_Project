@@ -2280,3 +2280,183 @@ def test_mvp_publication_reuses_current_test_docx_but_checks_bindings():
         published=client.post(base+'/publish',headers=headers)
         assert published.status_code==200,published.text
         assert smoke.call_count==0 and integrity.call_count>=1
+
+
+def test_question_order_is_atomic_persisted_and_preserves_bindings_and_conditions():
+    from app.contract_platform import publication_fingerprint
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'ORDER_FIELDS')
+    document=Document();document.add_paragraph('NAME');raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('order.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    payloads=[('first','Первый','Раздел А'),('second','Второй','Раздел А'),('third','Третий','Раздел А'),('other','Другой','Раздел Б')]
+    fields=[]
+    for position,(key,label,group) in enumerate(payloads,1):
+        body={'field_key':key,'label':label,'field_type':'TEXT','position':position,'group':group}
+        if key=='third':body['visible_when']={'operator':'IS_NOT_EMPTY','field_key':'first'}
+        response=client.post(base+'/fields',headers=headers,json=body)
+        assert response.status_code==201,response.text
+        fields.append(response.json())
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':fields[0]['id'],'locator':node['locator'],'start':0,'end':4,'selected_text':'NAME'})
+    assert binding.status_code==201,binding.text
+    with SessionLocal() as session:before=publication_fingerprint(session.get(TemplateVersion,uploaded['id']),session)
+    ids=[field['id'] for field in fields]
+    invalid=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[3],ids[0],ids[1],ids[2]]})
+    assert invalid.status_code==422
+    assert [field['id'] for field in client.get(base+'/questionnaire',headers=headers).json()['fields']]==ids
+    changed=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[2],ids[0],ids[1],ids[3]]})
+    assert changed.status_code==200,changed.text
+    expected=[ids[2],ids[0],ids[1],ids[3]]
+    reader=TestClient(app);reader_headers=auth(reader)
+    restored=reader.get(base+'/questionnaire',headers=reader_headers).json()['fields']
+    assert [field['id'] for field in restored]==expected
+    assert [field['field_key'] for field in restored]==['third','first','second','other']
+    assert restored[0]['config']['visible_when']=={'operator':'IS_NOT_EMPTY','field_key':'first'}
+    assert reader.get(base+'/bindings',headers=reader_headers).json()[0]['field_id']==ids[0]
+    with SessionLocal() as session:assert publication_fingerprint(session.get(TemplateVersion,uploaded['id']),session)!=before
+    published=client.post(base+'/publish',headers=headers)
+    assert published.status_code==200,published.text
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    assert [field['id'] for field in draft.json()['schema']['fields']]==expected
+    assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':ids}).status_code==409
+
+
+def test_contract_stages_filter_questions_regions_and_restore_draft():
+    from app.contract_platform import publication_fingerprint
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'CONTRACT_STAGES')
+    source=Document();source.add_paragraph('COMMON');source.add_paragraph('STAGE A');source.add_paragraph('STAGE B');raw=io.BytesIO();source.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    with SessionLocal() as session:before=publication_fingerprint(session.get(TemplateVersion,uploaded.json()['id']),session)
+    a=manager.post(base+'/stages',headers=mh,json={'name':'Этап А'}).json();b=manager.post(base+'/stages',headers=mh,json={'name':'Этап Б'}).json()
+    assert [x['id'] for x in manager.get(base+'/stages',headers=mh).json()]==[a['id'],b['id']]
+    assert manager.patch(base+'/stages/order',headers=mh,json={'stage_ids':[b['id'],a['id']]}).status_code==200
+    with SessionLocal() as session:assert publication_fingerprint(session.get(TemplateVersion,uploaded.json()['id']),session)!=before
+    fields=[]
+    for position,(key,stages) in enumerate([('common',[]),('only_a',[a['id']]),('only_b',[b['id']]),('shared',[a['id'],b['id']])],1):
+        response=manager.post(base+'/fields',headers=mh,json={'field_key':key,'label':key,'field_type':'TEXT','required':True,'position':position,'stage_ids':stages})
+        assert response.status_code==201,response.text
+        fields.append(response.json())
+    assert manager.delete(base+f"/stages/{a['id']}",headers=mh).status_code==409
+    assert manager.post(base+'/fields',headers=mh,json={'field_key':'bad_stage','label':'Неверный этап','field_type':'TEXT','position':6,'stage_ids':['unknown']}).status_code==422
+    flag=manager.post(base+'/fields',headers=mh,json={'field_key':'show_a','label':'Показать А','field_type':'BOOLEAN','required':False,'position':5})
+    assert flag.status_code==201,flag.text
+    nodes=manager.get(base+'/preview',headers=mh).json()['nodes']
+    binding=manager.post(base+'/bindings',headers=mh,json={'field_id':fields[0]['id'],'locator':nodes[0]['locator'],'start':0,'end':6,'selected_text':'COMMON'})
+    assert binding.status_code==201,binding.text
+    for key,node,stage in [('part_a',nodes[1],a),('part_b',nodes[2],b)]:
+        region=manager.post(base+'/conditional-regions',headers=mh,json={'region_key':key,'region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'EQUALS','field_key':'show_a','value':True} if key=='part_a' else {'operator':'ALWAYS'},'stage_ids':[stage['id']]})
+        assert region.status_code==201,region.text
+    test_answers={'common':'C','only_a':'A','shared':'S','show_a':True}
+    assert manager.post(base+'/test-drive',headers=mh,json={'answers':test_answers}).status_code==422
+    tested=manager.post(base+'/test-drive',headers=mh,json={'answers':test_answers,'selected_stage_ids':[a['id']]})
+    assert tested.status_code==201,tested.text
+    test_document=Document(io.BytesIO(manager.get(tested.json()['download_url'],headers=mh).content))
+    assert 'STAGE A' in ' '.join(p.text for p in test_document.paragraphs)
+    assert 'STAGE B' not in ' '.join(p.text for p in test_document.paragraphs)
+    assert not manager.get(base+'/publication-check',headers=mh).json()['errors']
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    assert manager.patch(base+f"/stages/{a['id']}",headers=mh,json={'name':'Changed'}).status_code==409
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
+    assert created.status_code==201,created.text
+    did=created.json()['id'];path=f'/api/v1/contract-drafts/{did}'
+    assert len(created.json()['schema']['stages'])==2
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':['unknown']}).status_code==422
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    assert employee.patch(path,headers=eh,json={'answers':{'common':'C','only_a':'A','shared':'S','show_a':True}}).status_code==200
+    first=employee.post(path+'/generate',headers=eh)
+    assert first.status_code==201,first.text
+    content=Document(io.BytesIO(employee.get(first.json()['download_url']).content))
+    text=' '.join(p.text for p in content.paragraphs)
+    assert 'STAGE A' in text and 'STAGE B' not in text
+    assert employee.patch(path,headers=eh,json={'answers':{'show_a':False}}).status_code==200
+    hidden=employee.post(path+'/generate',headers=eh)
+    assert hidden.status_code==201,hidden.text
+    assert 'STAGE A' not in ' '.join(p.text for p in Document(io.BytesIO(employee.get(hidden.json()['download_url']).content)).paragraphs)
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
+    assert employee.post(path+'/generate',headers=eh).status_code==422
+    assert employee.patch(path,headers=eh,json={'answers':{'only_b':'B'}}).status_code==200
+    second=employee.post(path+'/generate',headers=eh)
+    assert second.status_code==201,second.text
+    content=Document(io.BytesIO(employee.get(second.json()['download_url']).content))
+    text=' '.join(p.text for p in content.paragraphs)
+    assert 'STAGE A' not in text and 'STAGE B' in text
+    restored=employee.get(path).json()
+    assert restored['selected_stage_ids']==[b['id']] and restored['answers']['only_a']=='A'
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==200
+    both=employee.post(path+'/generate',headers=eh)
+    assert both.status_code==201,both.text
+    both_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(both.json()['download_url']).content)).paragraphs)
+    assert 'STAGE B' in both_text and 'STAGE A' not in both_text  # Existing false business condition still applies.
+    assert employee.patch(path,headers=eh,json={'answers':{'show_a':True}}).status_code==200
+    both=employee.post(path+'/generate',headers=eh)
+    both_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(both.json()['download_url']).content)).paragraphs)
+    assert 'STAGE A' in both_text and 'STAGE B' in both_text
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    only_a=employee.post(path+'/generate',headers=eh)
+    assert only_a.status_code==201,only_a.text
+    only_a_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(only_a.json()['download_url']).content)).paragraphs)
+    assert 'STAGE A' in only_a_text and 'STAGE B' not in only_a_text
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==200
+    assert employee.get(path).json()['answers']['only_b']=='B'
+    restored_both=employee.post(path+'/generate',headers=eh)
+    assert restored_both.status_code==201,restored_both.text
+    assert 'STAGE B' in ' '.join(p.text for p in Document(io.BytesIO(employee.get(restored_both.json()['download_url']).content)).paragraphs)
+    cloned=manager.post(base+'/clone',headers=mh)
+    assert cloned.status_code==201,cloned.text
+    clone_schema=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{cloned.json()['id']}/questionnaire",headers=mh).json()
+    clone_ids={stage['id'] for stage in clone_schema['stages']}
+    assert clone_ids.isdisjoint({a['id'],b['id']})
+    assert set(clone_schema['fields'][1]['config']['stage_ids']) <= clone_ids
+    assert employee.get(path).json()['schema']['stages'][0]['id'] in {a['id'],b['id']}
+
+
+def test_contract_stage_excludes_unselected_repeating_row():
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'STAGE_REPEATING')
+    source=Document();source.add_paragraph('NAME');table=source.add_table(rows=2,cols=1);table.cell(0,0).text='Заголовок';table.cell(1,0).text='VALUE';raw=io.BytesIO();source.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('rows.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    a=manager.post(base+'/stages',headers=mh,json={'name':'С услугами'}).json();b=manager.post(base+'/stages',headers=mh,json={'name':'Без услуг'}).json()
+    field=manager.post(base+'/fields',headers=mh,json={'field_key':'name','label':'Имя','field_type':'TEXT','required':True,'position':1}).json()
+    nodes=manager.get(base+'/preview',headers=mh).json()['nodes'];name_node=next(x for x in nodes if x['text']=='NAME');row_node=next(x for x in nodes if x['text']=='VALUE')
+    assert manager.post(base+'/bindings',headers=mh,json={'field_id':field['id'],'locator':name_node['locator'],'start':0,'end':4,'selected_text':'NAME'}).status_code==201
+    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'services','name':'Услуги','position':1,'row_locator':row_node['locator'],'stage_ids':[a['id']]}).json()
+    row_field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=mh,json={'field_key':'value','label':'Услуга','field_type':'TEXT','required':True,'position':1}).json()
+    assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{row_field['id']}/binding",headers=mh,json={'locator':row_node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).status_code==200
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    employee=TestClient(app);eh=auth(employee,'petrova');draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{draft['id']}"
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
+    assert employee.patch(path,headers=eh,json={'answers':{'name':'Иван'}}).status_code==200
+    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
+    table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
+    assert len(table.rows)==1
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    assert employee.patch(path,headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Кейтеринг'}]}}).status_code==200
+    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
+    table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
+    assert len(table.rows)==2 and table.cell(1,0).text=='Кейтеринг'
+
+
+def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
+    from app.db import ContractStage
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'STAGE_ORDER_REVERSE')
+    document=Document();document.add_paragraph('Тест');raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('order.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    ids=[]
+    for index in range(5):
+        response=client.post(base+'/stages',headers=headers,json={'name':f'Этап {index+1}'})
+        assert response.status_code==201,response.text
+        ids.append(response.json()['id'])
+    for order in (list(reversed(ids)),[ids[2],ids[4],ids[0],ids[3],ids[1]],ids):
+        result=client.patch(base+'/stages/order',headers=headers,json={'stage_ids':order})
+        assert result.status_code==200,result.text
+        assert [item['id'] for item in result.json()]==order
+        with SessionLocal() as session:
+            rows=session.query(ContractStage).filter_by(template_version_id=uploaded.json()['id']).all()
+            assert sorted(row.position for row in rows)==[1,2,3,4,5]

@@ -10,11 +10,11 @@ export function questionnaireSteps(fields: any[], groups: any[] = []): Questionn
     if (!steps.has(name)) steps.set(name, { name, fields: [], groups: [] });
     return steps.get(name)!;
   };
-  for (const field of fields) {
+  for (const field of [...fields].sort((a, b) => a.position - b.position || String(a.id).localeCompare(String(b.id)))) {
     if (field.config?.calculated) continue;
     add(field.config?.group?.trim() || "Общие вопросы").fields.push(field);
   }
-  for (const group of groups) add(group.config?.group?.trim() || "Общие вопросы").groups.push(group);
+  for (const group of [...groups].sort((a, b) => a.position - b.position || String(a.id).localeCompare(String(b.id)))) add(group.config?.group?.trim() || "Общие вопросы").groups.push(group);
   return [...steps.values()];
 }
 

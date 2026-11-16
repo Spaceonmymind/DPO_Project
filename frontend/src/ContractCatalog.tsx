@@ -17,6 +17,8 @@ import { evaluateCondition, fieldState } from "./conditions";
 import { calculateAnswers } from "./calculations";
 import { ProductQuestionnaire } from "./ProductQuestionnaire";
 import { QuestionHint } from "./QuestionHint";
+import { questionHelp } from "./questionHelp";
+import { selectedQuestionnaire } from "./contractStages";
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 import { OTHER, choiceAnswer, choiceComplete, choiceOtherValues, choiceText, isStructuredChoice } from "./choices";
 import { textRuleHint } from "./textRules";
@@ -50,6 +52,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [productDraft, setProductDraft] = useState<any>(),
     [drafts, setDrafts] = useState<any[]>([]),
     [draft, setDraft] = useState<any>(),
+    [selectedStageIds, setSelectedStageIds] = useState<string[]>([]),
+    [choosingStages, setChoosingStages] = useState(false),
     [answers, setAnswers] = useState<any>({}),
     [errors, setErrors] = useState<any>({}),
     [query, setQuery] = useState(""),
@@ -143,6 +147,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   function open(x: any) {
     autosaveReady.current = false;
     setDraft(x);
+    setSelectedStageIds(x.selected_stage_ids || []);
+    setChoosingStages((x.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && !(x.selected_stage_ids || []).length);
     setAnswers(x.answers || {});
     savedSnapshot.current = JSON.stringify(x.answers || {});
     setErrors({});
@@ -154,14 +160,16 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     }, 0);
   }
   function groupActive(g: any) {
-    const activeAnswers = Object.fromEntries((draft?.schema.fields || []).filter((f: any) => fieldState(f, answers).visible).map((f: any) => [f.field_key, answers[f.field_key]]));
+    const activeAnswers = Object.fromEntries(selectedSchema.fields.filter((f: any) => fieldState(f, relevantAnswers).visible).map((f: any) => [f.field_key, relevantAnswers[f.field_key]]));
     return evaluateCondition(g.config?.visible_when, activeAnswers);
   }
-  const steps = draft ? questionnaireSteps(draft.schema.fields, draft.schema.repeating_groups || []) : [];
+  const selectedSchema = draft ? selectedQuestionnaire(draft.schema, selectedStageIds) : { fields: [], groups: [] };
+  const relevantAnswers = Object.fromEntries([...selectedSchema.fields.map((field: any) => field.field_key), ...selectedSchema.groups.map((group: any) => group.group_key)].filter(key => key in answers).map(key => [key, answers[key]]));
+  const steps = draft ? questionnaireSteps(selectedSchema.fields, selectedSchema.groups) : [];
   const currentStep = steps[Math.min(stepIndex, Math.max(steps.length - 1, 0))];
   function checkCurrentStep() {
     if (!draft || !currentStep) return true;
-    const nextErrors = validateStep(currentStep, answers, draft.schema.fields);
+    const nextErrors = validateStep(currentStep, relevantAnswers, selectedSchema.fields);
     setErrors(nextErrors);
     setError(Object.keys(nextErrors).length ? "Исправьте поля текущего раздела." : "");
     return !Object.keys(nextErrors).length;
@@ -172,7 +180,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     else if (validate()) setReview(true);
   }
   function validate() {
-    const e = Object.assign({}, ...steps.map((step) => validateStep(step, answers, draft.schema.fields)));
+    const e = Object.assign({}, ...steps.map((step) => validateStep(step, relevantAnswers, selectedSchema.fields)));
     setErrors(e);
     if (Object.keys(e).length) {
       setReview(false);
@@ -193,6 +201,18 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       savedSnapshot.current = JSON.stringify(answers);
       setNotice("Ответы сохранены. Можно продолжить позже.");
       await load();
+    });
+  }
+  async function confirmStages() {
+    if (!selectedStageIds.length) { setError("Выберите хотя бы один этап договора."); return; }
+    await run(async () => {
+      const result = await api(`/contract-drafts/${draft.id}/stages`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected_stage_ids: selectedStageIds }) });
+      setDraft((current: any) => ({ ...current, selected_stage_ids: result.selected_stage_ids }));
+      setDocument(null);
+      setChoosingStages(false);
+      setReview(false);
+      setStepIndex(0);
+      setErrors({});
     });
   }
   async function generate(e: FormEvent) {
@@ -244,13 +264,13 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [catalog, query],
   );
   const calculated: any = draft
-    ? calculateAnswers(draft.schema, answers)
+    ? calculateAnswers({ ...draft.schema, fields: selectedSchema.fields, repeating_groups: selectedSchema.groups }, relevantAnswers)
     : { values: {}, groups: {}, errors: {} };
   const activeFields = draft
-    ? draft.schema.fields.filter((f: any) => fieldState(f, answers).visible && !f.config?.calculated)
+    ? selectedSchema.fields.filter((f: any) => fieldState(f, relevantAnswers).visible && !f.config?.calculated)
     : [];
   const requiredFields = activeFields.filter(
-    (f: any) => fieldState(f, answers).required
+    (f: any) => fieldState(f, relevantAnswers).required
   );
   const completedFields = requiredFields.filter((f: any) => {
     const value = answers[f.field_key];
@@ -268,6 +288,10 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     : 100;
   if (productDraft)
     return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
+  if (draft && choosingStages) {
+    const stages = (draft.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE");
+    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>Выберите один или несколько этапов. Ответы сохранятся, если вы измените выбор позже.</p><fieldset><legend>Что включить в договор</legend><button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>{stages.map((stage: any) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} onChange={event => setSelectedStageIds(current => event.target.checked ? [...current, stage.id] : current.filter(id => id !== stage.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || !selectedStageIds.length} onClick={() => void confirmStages()}>Продолжить к вопросам</button></section></div>;
+  }
   if (draft)
     return (
       <div className="page contract-questionnaire">
@@ -281,10 +305,11 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
+        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
         <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
-          <nav className="questionnaire-steps" data-tour="q-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], answers, draft.schema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
+          <nav className="questionnaire-steps" data-tour="q-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], relevantAnswers, selectedSchema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
         </section>
         {error && (
           <div className="platform-error" role="alert">
@@ -324,11 +349,11 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           {!review && <>
           {currentStep && <fieldset key={currentStep.name}>
               <legend>{currentStep.name}</legend>
-              {currentStep.fields.filter((f:any) => fieldState(f, answers).visible).map((f: any) => (
+              {currentStep.fields.filter((f:any) => fieldState(f, relevantAnswers).visible).map((f: any) => (
                 <Question
                   key={f.id}
                   field={f}
-                  required={fieldState(f, answers).required}
+                  required={fieldState(f, relevantAnswers).required}
                   value={
                     f.config?.calculated
                       ? calculated.values[f.field_key]
@@ -580,14 +605,20 @@ function selectLabel(value: string): string {
 
 export function Question({ field, value, error, change, required }: any) {
   let id = `field-${field.id}`,
+    help = questionHelp(field),
+    helpId = help.help ? `${id}-help` : undefined,
+    describedBy = [helpId, error ? `${id}-error` : undefined].filter(Boolean).join(" ") || undefined,
+    caption = <>{field.label}{required && <span className="question-required" aria-label="Обязательное поле"> *</span>}<QuestionHint text={field.config?.description} id={id}/></>,
+    helpText = help.help ? <small className="question-help-text" id={helpId}>{help.help}</small> : null,
     common = {
       id,
       value: value ?? "",
       onChange: (e: any) => change(e.target.value),
-      placeholder: field.config?.placeholder,
+      placeholder: help.placeholder,
       required,
+      "aria-label": field.label,
       "aria-invalid": !!error,
-      "aria-describedby": error ? id + "-error" : undefined,
+      "aria-describedby": describedBy,
     };
   if (field.config?.calculated)
     return null;
@@ -607,19 +638,18 @@ export function Question({ field, value, error, change, required }: any) {
       </output>
     );
   */
-  if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend>{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
-  if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend><CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
+  if(field.field_type==="LIST"){let items=Array.isArray(value)?value:[];return <fieldset className={error?"invalid":""} aria-describedby={describedBy}><legend>{caption}</legend>{helpText}{items.map((x:string,i:number)=><div key={i} className="repeat-item"><input value={x} onChange={e=>change(items.map((v:string,n:number)=>n===i?e.target.value:v))}/><button type="button" onClick={()=>change(items.filter((_:string,n:number)=>n!==i))}>Удалить</button><button type="button" disabled={i===0} onClick={()=>{let a=[...items];[a[i-1],a[i]]=[a[i],a[i-1]];change(a)}}>Выше</button></div>)}<button type="button" onClick={()=>change([...items,""])} disabled={items.length>=(field.config?.item_config?.max_items??20)}>Добавить</button>{error&&<b>{error}</b>}</fieldset>}
+  if(field.field_type==="COMPOSITE"){let object=value&&typeof value==="object"?value:{};return <fieldset className={error?"invalid":""} aria-describedby={describedBy}><legend>{caption}</legend>{helpText}<CompositeInputs components={field.config?.components||[]} value={object} change={change}/>{error&&<b>{error}</b>}</fieldset>}
   if (isStructuredChoice(field)) {
     const answer = choiceAnswer(value);
     const multiple = field.field_type === "MULTI_SELECT";
     const options = [...field.config.option_items, ...(field.config.allow_other ? [{ key: OTHER, label: "Иное" }] : [])];
-    return <fieldset className={error ? "invalid" : ""}><legend>{field.label}<QuestionHint text={field.config?.description} id={id}/></legend><div className="contract-choice-options" role="group" aria-label={field.label}>{options.map((option: any) => <label className={`contract-choice ${answer.selected.includes(option.key) ? "contract-choice-selected" : ""}`} key={option.key}><input type={multiple ? "checkbox" : "radio"} name={id} checked={answer.selected.includes(option.key)} onChange={event => { const selected = multiple ? event.target.checked ? [...answer.selected, option.key] : answer.selected.filter(key => key !== option.key) : [option.key]; change({ ...answer, selected }); }}/><span>{option.label}</span></label>)}</div>{answer.selected.includes(OTHER) && (multiple ? <div className="contract-other-values">{choiceOtherValues(answer).map((text,index)=><div className="contract-other-row" key={index}><input aria-label={`Свой вариант ${index+1}`} placeholder={`Свой вариант ${index+1}`} value={text} onChange={event=>{const other_texts=[...choiceOtherValues(answer)];other_texts[index]=event.target.value;change({...answer,other_text:other_texts[0]||"",other_texts});}}/><button type="button" className="secondary" aria-label={`Удалить свой вариант ${index+1}`} onClick={()=>{const other_texts=choiceOtherValues(answer).filter((_,position)=>position!==index);change({...answer,other_text:other_texts[0]||"",other_texts});}}>Удалить</button></div>)}<button type="button" className="secondary" disabled={choiceOtherValues(answer).length>=20} onClick={()=>change({...answer,other_texts:[...choiceOtherValues(answer),""]})}>+ Добавить ещё вариант</button></div> : <input aria-label="Укажите свой вариант" placeholder="Укажите свой вариант" value={answer.other_text} onChange={event => change({ ...answer, other_text: event.target.value })}/>)}{error && <b role="alert">{error}</b>}</fieldset>;
+    return <fieldset className={error ? "invalid" : ""} aria-describedby={describedBy}><legend>{caption}</legend>{helpText}<div className="contract-choice-options" role="group" aria-label={field.label}>{options.map((option: any) => <label className={`contract-choice ${answer.selected.includes(option.key) ? "contract-choice-selected" : ""}`} key={option.key}><input type={multiple ? "checkbox" : "radio"} name={id} checked={answer.selected.includes(option.key)} onChange={event => { const selected = multiple ? event.target.checked ? [...answer.selected, option.key] : answer.selected.filter(key => key !== option.key) : [option.key]; change({ ...answer, selected }); }}/><span>{option.label}</span></label>)}</div>{answer.selected.includes(OTHER) && (multiple ? <div className="contract-other-values">{choiceOtherValues(answer).map((text,index)=><div className="contract-other-row" key={index}><input aria-label={`Свой вариант ${index+1}`} placeholder={`Свой вариант ${index+1}`} value={text} onChange={event=>{const other_texts=[...choiceOtherValues(answer)];other_texts[index]=event.target.value;change({...answer,other_text:other_texts[0]||"",other_texts});}}/><button type="button" className="secondary" aria-label={`Удалить свой вариант ${index+1}`} onClick={()=>{const other_texts=choiceOtherValues(answer).filter((_,position)=>position!==index);change({...answer,other_text:other_texts[0]||"",other_texts});}}>Удалить</button></div>)}<button type="button" className="secondary" disabled={choiceOtherValues(answer).length>=20} onClick={()=>change({...answer,other_texts:[...choiceOtherValues(answer),""]})}>+ Добавить ещё вариант</button></div> : <input aria-label="Укажите свой вариант" placeholder="Укажите свой вариант" value={answer.other_text} onChange={event => change({ ...answer, other_text: event.target.value })}/>)}{error && <b role="alert">{error}</b>}</fieldset>;
   }
   return (
     <label className={error ? "invalid" : ""}>
-      <span>
-        {field.label}<QuestionHint text={field.config?.description} id={id}/>
-      </span>
+      <span>{caption}</span>
+      {helpText}
       {field.field_type === "MULTILINE_TEXT" ? (
         <textarea {...common} maxLength={field.config?.validation?.max_length} />
       ) : field.field_type === "BOOLEAN" ||

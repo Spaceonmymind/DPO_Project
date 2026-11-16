@@ -34,12 +34,34 @@
 .template-open .workspace-structure-list button:hover,.template-open .workspace-structure-list button:focus-visible{border-color:#d8e9e1;background:#f0f8f4}
 .template-open .workspace-structure-list button span{display:block;line-height:1.3;font-size:10px;font-weight:750;text-transform:uppercase}
 .template-open .workspace-structure-list button b{display:block;margin-top:4px;overflow:hidden;line-height:1.35;font-size:11px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
-.template-open .workspace-question-list button{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:76px;flex-shrink:0;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;overflow:visible;text-align:left;background:transparent}
-.template-open .workspace-question-list button:hover,.template-open .workspace-question-list button.active{border-color:#b8dfd0;background:#eff8f4}
-.template-open .workspace-question-list button span{font-size:10px;text-transform:none}
-.template-open .workspace-question-list button b{margin-top:4px;overflow-wrap:anywhere;white-space:normal;line-height:1.35;font-size:12px}
-.template-open .workspace-question-list button small{display:block;margin-top:5px;color:#6e8179;font-size:10px}
-.template-open .workspace-question-list button svg{position:absolute;right:5px;top:calc(50% - 7px);color:#729084}
+.template-open .workspace-question-card{position:relative;display:flex;align-items:center;min-width:0;border-radius:8px}
+.template-open .workspace-question-card.dragging{opacity:.5}
+.template-open .workspace-question-card.drop-before::before,.template-open .workspace-question-card.drop-after::after{position:absolute;z-index:2;right:4px;left:4px;height:3px;border-radius:3px;background:#07856b;content:""}
+.template-open .workspace-question-card.drop-before::before{top:-3px}
+.template-open .workspace-question-card.drop-after::after{bottom:-3px}
+.template-open .workspace-question-open{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:76px;flex-shrink:0;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;overflow:visible;text-align:left;background:transparent}
+.template-open .workspace-question-open:hover,.template-open .workspace-question-open.active{border-color:#b8dfd0;background:#eff8f4}
+.template-open .workspace-question-open span{font-size:10px;text-transform:none}
+.template-open .workspace-question-open b{margin-top:4px;overflow-wrap:anywhere;white-space:normal;line-height:1.35;font-size:12px}
+.template-open .workspace-question-open small{display:block;margin-top:5px;color:#6e8179;font-size:10px}
+.template-open .workspace-question-open>svg{position:absolute;right:5px;top:calc(50% - 7px);color:#729084}
+.template-open .workspace-question-order{display:flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 24px;color:#729084}
+.template-open .workspace-question-order button{display:grid;place-items:center;width:22px;height:22px;padding:0;border:1px solid #d8e9e1;border-radius:5px;background:#fff;color:#376b5d;cursor:pointer}
+.template-open .workspace-question-order button:disabled{opacity:.35;cursor:default}
+.template-open .contract-stage-manager{flex:none;margin:8px 0;padding:8px;border:1px solid #d4e7dc;border-radius:9px;background:#f7fbf8;color:#244a3b;font-size:11px}
+.template-open .contract-stage-manager summary{cursor:pointer;font-weight:750}
+.template-open .contract-stage-manager-body{display:grid;gap:8px;max-height:210px;overflow:auto;margin-top:8px}
+.template-open .contract-stage-manager-body p{margin:0;color:#60786b;line-height:1.4}
+.template-open .contract-stage-row{display:grid;gap:4px;padding:6px;border-radius:6px;background:#fff}
+.template-open .contract-stage-row>div{display:flex;gap:4px;flex-wrap:wrap}
+.template-open .contract-stage-row button,.template-open .contract-stage-form button{min-height:25px;padding:3px 6px;border:1px solid #c7ded1;border-radius:5px;background:#fff;color:#145d49;font-size:10px;cursor:pointer}
+.template-open .contract-stage-form{display:grid;gap:6px}
+.template-open .contract-stage-form label{display:grid;gap:3px}
+.template-open .contract-stage-form input,.template-open .contract-stage-form select{min-width:0;width:100%;min-height:30px;border:1px solid #c7ded1;border-radius:5px;background:#fff}
+.template-open .contract-stage-picker{display:grid;gap:5px;margin:8px 0;padding:9px;border:1px solid #d4e7dc;border-radius:7px}
+.template-open .contract-stage-picker legend{padding:0 4px;font-weight:700}
+.template-open .contract-stage-picker p{margin:0 0 4px;color:#627a6e;font-size:11px}
+.template-open .contract-stage-picker label{display:flex;align-items:center;gap:7px;font-size:12px}
 .template-open .workspace-empty{margin:16px 5px;color:#71847c;font-size:12px;line-height:1.5}
 .template-open .workspace-canvas-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;margin-bottom:10px;border:1px solid #dce9e3;border-radius:10px;background:#fff}
 .template-open .workspace-canvas-toolbar b,.template-open .workspace-canvas-toolbar span{display:block}

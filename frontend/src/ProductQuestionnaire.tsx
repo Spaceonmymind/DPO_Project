@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, Download, Plus, Save, Trash2 } from "lucide-re
 import { evaluateCondition, fieldState } from "./conditions";
 import { calculateAnswers } from "./calculations";
 import { QuestionHint } from "./QuestionHint";
+import { questionHelp } from "./questionHelp";
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 
 const rowId = () => globalThis.crypto?.randomUUID?.() || `row-${Date.now()}-${Math.random()}`;
@@ -123,15 +124,19 @@ function Decision({ decision }: any) {
 function Input({ field, value, change, required, error }: any) {
   const id = `product-field-${field.id}`;
   if (field.config?.calculated) return null;
-  const props: any = { value: value ?? "", onChange: (event: any) => change(event.target.value), "aria-invalid": !!error, "aria-describedby": error ? `${id}-error` : undefined, disabled: field.config?.calculated };
-  const caption = <>{field.label}<QuestionHint text={field.config?.description} id={id}/></>;
+  const help = questionHelp(field);
+  const helpId = help.help ? `${id}-help` : undefined;
+  const describedBy = [helpId, error ? `${id}-error` : undefined].filter(Boolean).join(" ") || undefined;
+  const helpText = help.help ? <small className="question-help-text" id={helpId}>{help.help}</small> : null;
+  const props: any = { id, value: value ?? "", onChange: (event: any) => change(event.target.value), placeholder: help.placeholder, "aria-invalid": !!error, "aria-describedby": describedBy, disabled: field.config?.calculated };
+  const caption = <>{field.label}{required && <span className="question-required" aria-label="Обязательное поле"> *</span>}<QuestionHint text={field.config?.description} id={id}/></>;
   if (field.field_type === "LIST") {
     const items = Array.isArray(value) ? value : [];
-    return <fieldset><legend>{caption}</legend>{items.map((item: string, index: number) => <div key={index}><input value={item} onChange={(event) => change(items.map((old: string, n: number) => n === index ? event.target.value : old))}/><button type="button" onClick={() => change(items.filter((_: string, n: number) => n !== index))}>Удалить</button></div>)}<button type="button" onClick={() => change([...items, ""])} disabled={items.length >= (field.config?.item_config?.max_items ?? 20)}>Добавить</button>{error && <b id={`${id}-error`}>{error}</b>}</fieldset>;
+    return <fieldset aria-describedby={describedBy}><legend>{caption}</legend>{helpText}{items.map((item: string, index: number) => <div key={index}><input value={item} onChange={(event) => change(items.map((old: string, n: number) => n === index ? event.target.value : old))}/><button type="button" onClick={() => change(items.filter((_: string, n: number) => n !== index))}>Удалить</button></div>)}<button type="button" onClick={() => change([...items, ""])} disabled={items.length >= (field.config?.item_config?.max_items ?? 20)}>Добавить</button>{error && <b id={`${id}-error`}>{error}</b>}</fieldset>;
   }
   if (field.field_type === "COMPOSITE") {
     const object = value && typeof value === "object" ? value : {};
-    return <fieldset><legend>{caption}</legend>{(field.config?.components || []).map((component: any) => <label key={component.key}><span>{component.label}</span><input value={object[component.key] ?? ""} onChange={(event) => change({ ...object, [component.key]: event.target.value })}/></label>)}{error && <b id={`${id}-error`}>{error}</b>}</fieldset>;
+    return <fieldset aria-describedby={describedBy}><legend>{caption}</legend>{helpText}{(field.config?.components || []).map((component: any) => <label key={component.key}><span>{component.label}</span><input value={object[component.key] ?? ""} onChange={(event) => change({ ...object, [component.key]: event.target.value })}/></label>)}{error && <b id={`${id}-error`}>{error}</b>}</fieldset>;
   }
-  return <label className={error ? "invalid" : ""}><span>{caption}</span>{field.field_type === "BOOLEAN" ? <select value={value === true ? "true" : value === false ? "false" : ""} onChange={(event) => change(event.target.value === "" ? null : event.target.value === "true")}><option value="">Выберите</option><option value="true">Да</option><option value="false">Нет</option></select> : field.field_type === "SINGLE_SELECT" ? <select {...props}><option value="">Выберите</option>{(field.config?.options || []).map((option: string) => <option key={option} value={option}>{option}</option>)}</select> : field.field_type === "MULTILINE_TEXT" ? <textarea {...props}/> : <input {...props} type={field.field_type === "DATE" ? "date" : ["INTEGER", "DECIMAL", "MONEY"].includes(field.field_type) ? "number" : "text"} step={field.field_type === "INTEGER" ? "1" : "any"}/>}{error && <b id={`${id}-error`}>{error}</b>}</label>;
+  return <label className={error ? "invalid" : ""}><span>{caption}</span>{helpText}{field.field_type === "BOOLEAN" ? <select id={id} aria-describedby={describedBy} value={value === true ? "true" : value === false ? "false" : ""} onChange={(event) => change(event.target.value === "" ? null : event.target.value === "true")}><option value="">Выберите</option><option value="true">Да</option><option value="false">Нет</option></select> : field.field_type === "SINGLE_SELECT" ? <select {...props}><option value="">Выберите</option>{(field.config?.options || []).map((option: string) => <option key={option} value={option}>{option}</option>)}</select> : field.field_type === "MULTILINE_TEXT" ? <textarea {...props}/> : <input {...props} type={field.field_type === "DATE" ? "date" : ["INTEGER", "DECIMAL", "MONEY"].includes(field.field_type) ? "number" : "text"} step={field.field_type === "INTEGER" ? "1" : "any"}/>}{error && <b id={`${id}-error`}>{error}</b>}</label>;
 }

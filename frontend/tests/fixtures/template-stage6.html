@@ -7,26 +7,45 @@ import "/src/enhancements.css";
 const template={id:"template-1",name:"Тестовый договор",category:"Договоры",status:"DRAFT",version_count:1};
 let version={id:"version-1",template_id:template.id,version_number:1,status:"DRAFT",original_filename:"test.docx"};
 const fields=[
-  {id:"payment",field_key:"payment",label:"Порядок оплаты",field_type:"SINGLE_SELECT",required:true,position:1,config:{group:"Оплата",options:["POST","PARTIAL"],default_value:"POST"}},
-  {id:"percent",field_key:"percent",label:"Процент предоплаты",field_type:"INTEGER",required:false,position:2,config:{group:"Оплата",default_value:30,visible_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"},required_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"}}},
-  {id:"services",field_key:"services",label:"Услуги",field_type:"MULTI_SELECT",required:false,position:3,config:{group:"Дополнительно",option_items:[{key:"food",label:"Кейтеринг"}],allow_other:true,other_required:true}},
+  {id:"payment",field_key:"payment",label:"Порядок оплаты",field_type:"SINGLE_SELECT",required:true,position:1,config:{group:"Оплата",options:["POST","PARTIAL"],default_value:"POST",placeholder:"Выберите порядок расчётов"}},
+  {id:"percent",field_key:"percent",label:"Процент предоплаты",field_type:"INTEGER",required:false,position:2,config:{group:"Оплата",default_value:30,placeholder:"Укажите процент от общей суммы",visible_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"},required_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"}}},
+  {id:"services",field_key:"services",label:"Услуги",field_type:"MULTI_SELECT",required:false,position:3,config:{group:"Дополнительно",option_items:[{key:"food",label:"Кейтеринг"}],allow_other:true,other_required:true,placeholder:"Отметьте все подходящие услуги"}},
   {id:"calculated",field_key:"calculated",label:"Расчёт",field_type:"INTEGER",required:false,position:4,config:{group:"Оплата",calculated:true,expression:{operation:"MULTIPLY",operands:[{source:"FIELD",field_key:"percent"},{source:"CONSTANT",value:2}]}}},
-  ...Array.from({length:156},(_,index)=>({id:`extra-${index}`,field_key:`extra_${index}`,label:`Дополнительный вопрос ${index+1}`,field_type:"TEXT",required:false,position:index+5,config:{group:"Дополнительно"}})),
+  {id:"event-date",field_key:"event_date",label:"Дата мероприятия",field_type:"DATE",required:false,position:5,config:{group:"Оплата",placeholder:"ДД.ММ.ГГГГ",placeholder_mode:"EXAMPLE"}},
+  {id:"budget",field_key:"budget",label:"Бюджет",field_type:"MONEY",required:false,position:6,config:{group:"Оплата",placeholder:"Укажите общую сумму в рублях"}},
+  ...Array.from({length:156},(_,index)=>({id:`extra-${index}`,field_key:`extra_${index}`,label:`Дополнительный вопрос ${index+1}`,field_type:"TEXT",required:false,position:index+7,config:{group:"Дополнительно",placeholder:index===0?"Укажите краткое описание":""}})),
 ];
+const staged=new URLSearchParams(location.search).has("stages");
+const contractStages=staged?[{id:"stage-a",name:"Подготовка",description:"Первый этап",position:1,status:"ACTIVE"},{id:"stage-b",name:"Проведение",description:"Второй этап",position:2,status:"ACTIVE"}]:[];
+if(staged){fields.find(field=>field.id==="percent").config.stage_ids=["stage-a"];fields.find(field=>field.id==="services").config.stage_ids=["stage-b"];}
+const savedOrder=JSON.parse(localStorage.getItem("question-order-fixture")||"null");
+if(savedOrder){const index=new Map(savedOrder.map((id,position)=>[id,position]));fields.sort((a,b)=>(index.get(a.id)??a.position)-(index.get(b.id)??b.position));fields.forEach((field,position)=>field.position=position+1);}
 const group={id:"group-1",group_key:"extras",name:"Иные услуги",required:false,min_items:0,max_items:5,position:1,config:{group:"Дополнительно"},fields:[{id:"row-description",field_key:"description",label:"Описание услуги",field_type:"TEXT",required:true,position:1,config:{}}]};
 const nodes=Array.from({length:3500},(_,index)=>({locator:`word/document.xml#/p[${index+1}]`,kind:"paragraph",text:`Фрагмент ${index+1}`}));
-window.__previewRequests=0;window.__testAnswers=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;
+window.__previewRequests=0;window.__testAnswers=null;window.__testStageIds=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;window.__orderCalls=0;
 const api=async(path,options={})=>{
   if(path==="/requisite-sets?include_archived=true")return [];
   if(path==="/document-templates")return [template];
   if(path.endsWith("/versions"))return [version];
   if(path.endsWith("/preview")){window.__previewRequests++;return{nodes};}
-  if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group]};
+  if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group],stages:contractStages};
+  if(path.endsWith("/stages")&&options.method==="POST"){const item={id:`stage-${contractStages.length+1}`,...JSON.parse(options.body),position:contractStages.length+1};contractStages.push(item);return item;}
+  if(path.endsWith("/stages/order")&&options.method==="PATCH"){const ids=JSON.parse(options.body).stage_ids;contractStages.sort((a,b)=>ids.indexOf(a.id)-ids.indexOf(b.id));contractStages.forEach((item,index)=>item.position=index+1);return [...contractStages];}
+  if(/\/stages\/[^/]+$/.test(path)&&options.method==="PATCH"){const item=contractStages.find(stage=>path.endsWith(stage.id));Object.assign(item,JSON.parse(options.body));return item;}
+  if(/\/stages\/[^/]+$/.test(path)&&options.method==="DELETE"){contractStages.splice(contractStages.findIndex(stage=>path.endsWith(stage.id)),1);return null;}
+  if(path.endsWith("/fields/order")&&options.method==="PATCH"){
+    const {field_ids}=JSON.parse(options.body);window.__orderCalls++;
+    const byId=new Map(fields.map(field=>[field.id,field]));
+    fields.splice(0,fields.length,...field_ids.map(id=>byId.get(id)));
+    fields.forEach((field,index)=>field.position=index+1);
+    localStorage.setItem("question-order-fixture",JSON.stringify(field_ids));
+    return{fields:[...fields]};
+  }
   if(path.endsWith("/repeating-groups"))return[group];
   if(path.endsWith("/publication-check"))return{errors:new URLSearchParams(location.search).has("errors")?["Привязка «Имя» ссылается на отсутствующий вопрос"]:[],warnings:new URLSearchParams(location.search).has("warnings")?["Вопрос «Служебный вопрос» не используется в документе или правилах"]:[],tested_current_revision:false};
   if(/\/(bindings|conditional-regions|binding-candidates)$/.test(path))return[];
   if(path.endsWith("/test-drive")&&options.method==="POST"){
-    window.__testCalls++;window.__testAnswers=JSON.parse(options.body).answers;
+    window.__testCalls++;window.__testAnswers=JSON.parse(options.body).answers;window.__testStageIds=JSON.parse(options.body).selected_stage_ids;
     if(new URLSearchParams(location.search).has("slow"))return new Promise((resolve,reject)=>{window.__completeTest=()=>resolve({download_url:"/test.docx"});window.__failTest=()=>reject(new Error("Ошибка тестовой генерации"));});
     return{download_url:"/test.docx"};
   }

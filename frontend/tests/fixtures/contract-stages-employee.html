@@ -1,0 +1,28 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Contract stage selection</title></head><body><div id="root"></div><script type="module">
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { ContractCatalog } from "/src/ContractCatalog.tsx";
+import "/src/styles.css";
+import "/src/enhancements.css";
+const template={id:"template-1",name:"Договор по этапам",category:"Договоры",description:""};
+const schema={stages:[{id:"stage-a",name:"Подготовка",description:"Начало работ",position:1,status:"ACTIVE"},{id:"stage-b",name:"Проведение",description:"Основной этап",position:2,status:"ACTIVE"}],fields:[
+  {id:"common",field_key:"common",label:"Общий вопрос",field_type:"TEXT",required:true,position:1,config:{group:"Основные сведения"}},
+  {id:"a",field_key:"only_a",label:"Вопрос подготовки",field_type:"TEXT",required:true,position:2,config:{group:"Основные сведения",stage_ids:["stage-a"]}},
+  {id:"b",field_key:"only_b",label:"Вопрос проведения",field_type:"TEXT",required:true,position:3,config:{group:"Основные сведения",stage_ids:["stage-b"]}},
+  {id:"shared",field_key:"shared",label:"Общий для этапов",field_type:"TEXT",required:false,position:4,config:{group:"Основные сведения",stage_ids:["stage-a","stage-b"]}},
+],repeating_groups:[]};
+let draft=null;window.__selectedStages=[];window.__savedAnswers={};
+const api=async(path,options={})=>{
+  if(path==="/contract-catalog")return[template];
+  if(path==="/contract-drafts"&&options.method==="POST"){draft={id:"draft-1",template,schema,answers:{},selected_stage_ids:[],status:"DRAFT"};return draft;}
+  if(path==="/contract-drafts"&&!options.method)return draft?[{id:draft.id,title:template.name,template_name:template.name,status:draft.status}]:[];
+  if(path==="/contract-drafts/draft-1"){
+    if(options.method==="PATCH"){draft.answers={...draft.answers,...JSON.parse(options.body).answers};window.__savedAnswers=draft.answers;return draft;}
+    return draft;
+  }
+  if(path==="/contract-drafts/draft-1/stages"&&options.method==="PATCH"){draft.selected_stage_ids=JSON.parse(options.body).selected_stage_ids;window.__selectedStages=draft.selected_stage_ids;return{id:draft.id,selected_stage_ids:draft.selected_stage_ids};}
+  if(path==="/contract-drafts/draft-1/autosave"&&options.method==="PATCH"){draft.answers={...draft.answers,...JSON.parse(options.body).answers};window.__savedAnswers=draft.answers;return draft;}
+  throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
+};
+createRoot(document.getElementById("root")).render(React.createElement(ContractCatalog,{api}));
+</script></body></html>

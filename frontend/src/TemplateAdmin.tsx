@@ -15,6 +15,9 @@ import {
   GitBranch,
   Search,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
+  GripVertical,
   ChevronRight,
   EyeOff,
 } from "lucide-react";
@@ -76,6 +79,8 @@ const blank = (position = 1) => ({
   description: "",
   group: "Основные сведения",
   placeholder: "",
+  placeholder_mode: "HELP",
+  stage_ids: [],
   validation: {},
   options: [],
   option_items: [],
@@ -175,6 +180,10 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
 
     [docQuery, setDocQuery] = useState(""),
     [questionQuery, setQuestionQuery] = useState(""),
+    [stageDraft, setStageDraft] = useState<any>(null),
+    [testStageIds, setTestStageIds] = useState<string[]>([]),
+    [draggedQuestion, setDraggedQuestion] = useState<string | null>(null),
+    [questionDrop, setQuestionDrop] = useState<{ id: string; after: boolean } | null>(null),
     [workspaceTab, setWorkspaceTab] = useState<"questions" | "structure">("questions"),
     [showFieldEditor, setShowFieldEditor] = useState(false),
     [zoom, setZoom] = useState(100);
@@ -367,6 +376,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     setRepeatingBinding("");
     setRegionDraft(null);
     setGroupDraft(null);
+    setStageDraft(null);
     setGroupField(null);
     setBlockStart(undefined);
     setBlockHover(undefined);
@@ -383,6 +393,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       ]);
     setPreview(p && !sameDocument ? { ...p, documentKey: x.id } : p);
     setSchema(q);
+    setTestStageIds(current => sameDocument ? current.filter(id => (q.stages || []).some((stage: any) => stage.id === id && stage.status === "ACTIVE")) : []);
     setTestAnswers((current:any) => {
       const previous = testAnswerVersionRef.current === x.id ? current : {};
       testAnswerVersionRef.current = x.id;
@@ -441,7 +452,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     await run(async()=>{
       setTestDocument(null);
       const start = performance.now();
-      const result=await api(`/document-templates/${version.template_id}/versions/${version.id}/test-drive`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answers:testAnswers})});
+      const result=await api(`/document-templates/${version.template_id}/versions/${version.id}/test-drive`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answers:testAnswers,selected_stage_ids:testStageIds})});
       const responseAt = performance.now();
       if (!result?.download_url) throw new Error("Сервер не вернул ссылку на тестовый DOCX.");
       const filename = `ТЕСТОВЫЙ_${selected.name}.docx`;
@@ -590,6 +601,8 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       other_required: x.config.other_required || false,
       default_value: x.config.default_value ?? null,
       default_source: x.config.default_source ?? null,
+      placeholder_mode: x.config.placeholder_mode || "AUTO",
+      stage_ids: x.config.stage_ids || [],
       visible_when: x.config.visible_when || null,
       required_when: x.config.required_when || null,
     });
@@ -751,6 +764,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
           ? {
               region_key: regionDraft.region_key,
               include_when: regionDraft.include_when,
+              stage_ids: regionDraft.stage_ids || regionDraft.locator?.stage_ids || [],
             }
           : regionDraft;
       const saved = await api(path, {
@@ -808,6 +822,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       let editing = groupDraft.id,
         path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups${editing ? "/" + editing : ""}`;
       let payload = { ...groupDraft };
+      payload.stage_ids = groupDraft.stage_ids || groupDraft.config?.stage_ids || [];
       delete payload.id;
       delete payload.fields;
       delete payload.locator;
@@ -988,7 +1003,63 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     setStage(next);
   }
   const selectedCopyFields=copyFields.filter(item=>copySelected.includes(item.id));
+  const contractStages: any[] = schema?.stages || [];
+  async function saveContractStage() {
+    if (!selected || !version || !stageDraft?.name?.trim()) return;
+    await run(async () => {
+      const saved = await api(`/document-templates/${selected.id}/versions/${version.id}/stages${stageDraft.id ? `/${stageDraft.id}` : ""}`, { method: stageDraft.id ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: stageDraft.name.trim(), description: stageDraft.description || "", status: stageDraft.status || "ACTIVE" }) });
+      setSchema((old: any) => ({ ...old, stages: [...(old?.stages || []).filter((item: any) => item.id !== saved.id), saved].sort((a: any, b: any) => a.position - b.position) }));
+      if (saved.status !== "ACTIVE") setTestStageIds(current => current.filter(id => id !== saved.id));
+      setTestDocument(null);
+      setStageDraft(null);
+      setNotice("Этап сохранён.");
+    });
+  }
+  async function moveContractStage(id: string, offset: number) {
+    const ids = contractStages.map(item => item.id), index = ids.indexOf(id), target = index + offset;
+    if (index < 0 || target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    await run(async () => {
+      const stages = await api(`/document-templates/${selected.id}/versions/${version.id}/stages/order`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage_ids: ids }) });
+      setSchema((old: any) => ({ ...old, stages }));
+      setTestDocument(null);
+    });
+  }
+  async function removeContractStage(id: string) {
+    await run(async () => {
+      await api(`/document-templates/${selected.id}/versions/${version.id}/stages/${id}`, { method: "DELETE" });
+      setSchema((old: any) => ({ ...old, stages: (old?.stages || []).filter((item: any) => item.id !== id) }));
+      setTestStageIds(current => current.filter(item => item !== id));
+      setTestDocument(null);
+      setStageDraft(null);
+    });
+  }
+  const stagePicker = (selectedIds: string[], change: (ids: string[]) => void, label = "Этапы договора") => contractStages.length > 0 && <fieldset className="contract-stage-picker"><legend>{label}</legend><p>Без выбора — для всех этапов.</p>{contractStages.map(item => <label key={item.id}><input type="checkbox" disabled={version?.status !== "DRAFT"} checked={selectedIds.includes(item.id)} onChange={event => change(event.target.checked ? [...selectedIds, item.id] : selectedIds.filter(id => id !== item.id))}/>{item.name}{item.status !== "ACTIVE" ? " · неактивен" : ""}</label>)}</fieldset>;
   const questionGroup=(item:any)=>editing===item.id&&showFieldEditor ? field.group : item.config?.group || "Основные сведения";
+  const savedQuestionGroup=(item:any)=>item.config?.group || "Основные сведения";
+  async function saveQuestionOrder(ids: string[]) {
+    if (!selected || !version || !schema || busy) return;
+    const current = schema.fields || [];
+    if (ids.every((id, index) => current[index]?.id === id)) return;
+    await run(async () => {
+      const result = await api(`/document-templates/${selected.id}/versions/${version.id}/fields/order`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ field_ids: ids }),
+      });
+      setSchema((old: any) => ({ ...old, fields: result.fields }));
+      setNotice("Порядок вопросов сохранён.");
+    });
+  }
+  function moveQuestion(sourceId: string, targetId: string, after = false) {
+    const items: any[] = schema?.fields || [];
+    const source = items.find(item => item.id === sourceId);
+    const target = items.find(item => item.id === targetId);
+    if (!source || !target || sourceId === targetId || savedQuestionGroup(source) !== savedQuestionGroup(target)) return;
+    const ids = items.map(item => item.id).filter(id => id !== sourceId);
+    ids.splice(ids.indexOf(targetId) + (after ? 1 : 0), 0, sourceId);
+    const groupAt = (id: string) => savedQuestionGroup(items.find(item => item.id === id));
+    if (ids.some((id, index) => groupAt(id) !== groupAt(items[index].id))) return;
+    void saveQuestionOrder(ids);
+  }
   const questionActions = useRef({ editField });
   questionActions.current = { editField };
   const filteredQuestions = useMemo(() => {
@@ -1002,8 +1073,33 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
   }, [bindings]);
   const questionCards = useMemo(() => filteredQuestions.map((item:any) => {
     const count = bindingCounts.get(item.id) || 0;
-    return <button key={item.id} type="button" className={editing === item.id && showFieldEditor ? "active" : ""} onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>;
-  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group]);
+    const all: any[] = schema?.fields || [];
+    const index = all.findIndex(question => question.id === item.id);
+    const canReorder = stage === 4 && version?.status === "DRAFT" && !questionQuery.trim() && !busy;
+    const previous = all[index - 1], next = all[index + 1];
+    const same = (other: any) => other && savedQuestionGroup(other) === savedQuestionGroup(item);
+    const marker = questionDrop?.id === item.id ? (questionDrop?.after ? "drop-after" : "drop-before") : "";
+    return <div key={item.id} className={`workspace-question-card ${marker} ${draggedQuestion === item.id ? "dragging" : ""}`} draggable={canReorder} onDragStart={event => {
+      if (!canReorder) return;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.id);
+      setDraggedQuestion(item.id);
+    }} onDragOver={event => {
+      const source = all.find(question => question.id === draggedQuestion);
+      if (!canReorder || !source || source.id === item.id || !same(source)) return;
+      event.preventDefault();
+      const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.clientHeight / 2;
+      setQuestionDrop(current => current?.id === item.id && current?.after === after ? current : { id: item.id, after });
+    }} onDrop={event => {
+      event.preventDefault();
+      const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.clientHeight / 2;
+      if (draggedQuestion) moveQuestion(draggedQuestion, item.id, after);
+      setDraggedQuestion(null); setQuestionDrop(null);
+    }} onDragEnd={() => { setDraggedQuestion(null); setQuestionDrop(null); }}>
+      <button className={`workspace-question-open ${editing === item.id && showFieldEditor ? "active" : ""}`} type="button" onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>
+      {canReorder && <div className="workspace-question-order"><GripVertical size={14} aria-hidden="true"/><button type="button" aria-label={`Переместить «${item.label}» вверх`} disabled={!same(previous)} onClick={() => moveQuestion(item.id, previous.id)}><ArrowUp size={13}/></button><button type="button" aria-label={`Переместить «${item.label}» вниз`} disabled={!same(next)} onClick={() => moveQuestion(item.id, next.id, true)}><ArrowDown size={13}/></button></div>}
+    </div>;
+  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
   const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
   const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
   const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
@@ -1291,7 +1387,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   </button>
                 ))}
               </nav>
-              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (
@@ -1337,6 +1433,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                           </div>
                           {workspaceTab === "questions" ? <>
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
+                            {stage === 4 && <details className="contract-stage-manager"><summary>Этапы договора · {contractStages.length}</summary><div className="contract-stage-manager-body"><p>Создайте этапы и назначьте им вопросы и области Word. Без этапов анкета работает как прежде.</p>{contractStages.map((item, index) => <div className="contract-stage-row" key={item.id}><span>{item.position}. {item.name}{item.status !== "ACTIVE" ? " · неактивен" : ""}</span>{version.status === "DRAFT" && <div><button type="button" aria-label={`Поднять этап «${item.name}»`} disabled={index === 0 || busy} onClick={() => void moveContractStage(item.id, -1)}>↑</button><button type="button" aria-label={`Опустить этап «${item.name}»`} disabled={index === contractStages.length - 1 || busy} onClick={() => void moveContractStage(item.id, 1)}>↓</button><button type="button" onClick={() => setStageDraft({ ...item })}>Изменить</button><button type="button" onClick={() => void removeContractStage(item.id)}>Удалить</button></div>}</div>)}{version.status === "DRAFT" && (stageDraft ? <div className="contract-stage-form"><label>Название этапа<input value={stageDraft.name} onChange={event => setStageDraft({ ...stageDraft, name: event.target.value })}/></label><label>Описание<input value={stageDraft.description || ""} onChange={event => setStageDraft({ ...stageDraft, description: event.target.value })}/></label><label>Состояние<select value={stageDraft.status || "ACTIVE"} onChange={event => setStageDraft({ ...stageDraft, status: event.target.value })}><option value="ACTIVE">Активен</option><option value="INACTIVE">Неактивен</option></select></label><button type="button" disabled={busy || !stageDraft.name?.trim()} onClick={() => void saveContractStage()}>Сохранить этап</button><button type="button" onClick={() => setStageDraft(null)}>Отмена</button></div> : <button type="button" className="secondary" onClick={() => setStageDraft({ name: "", description: "", status: "ACTIVE" })}>+ Добавить этап</button>)}</div></details>}
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
@@ -1536,6 +1633,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                   : "Новая условная область"}
                               </h3>
                               <p>{REGION_LABELS[regionDraft.region_type]}</p>
+                              {stagePicker(regionDraft.stage_ids || regionDraft.locator?.stage_ids || [], ids => setRegionDraft({ ...regionDraft, stage_ids: ids }), "Включать область на этапах")}
                               <label>Отображение в готовом документе
                                 <select aria-label="Отображение в готовом документе" value={regionMode(regionDraft.include_when)} onChange={e => changeRegionMode(e.target.value as "ALWAYS" | "CONDITIONAL" | "NEVER")}>
                                   <option value="ALWAYS">Всегда показывать</option>
@@ -1694,6 +1792,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                 />
                                 Обязательная группа
                               </label>
+                              {stagePicker(groupDraft.stage_ids || groupDraft.config?.stage_ids || [], ids => setGroupDraft({ ...groupDraft, stage_ids: ids }), "Показывать группу на этапах")}
                               <ConditionEditor
                                 title="Показывать группу, когда"
                                 value={
@@ -1772,6 +1871,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                   }
                                 />
                               </label>
+                              {stagePicker(field.stage_ids || [], ids => setField({ ...field, stage_ids: ids }), "Показывать вопрос на этапах")}
                               <details className="workspace-advanced"><summary>Дополнительные настройки</summary><label>
                                 Служебный ключ поля
                                 <input
@@ -1890,7 +1990,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                 </div>
                               )}
                               <label>
-                                Подсказка
+                                Подсказка или пример ввода
                                 <input
                                   value={field.placeholder}
                                   onChange={(e) =>
@@ -1900,6 +2000,14 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                     })
                                   }
                                 />
+                              </label>
+                              <label>
+                                Как показывать этот текст
+                                <select value={field.placeholder_mode || "AUTO"} onChange={e => setField({ ...field, placeholder_mode: e.target.value })}>
+                                  <option value="HELP">Под названием вопроса</option>
+                                  <option value="EXAMPLE">Пример внутри поля</option>
+                                  <option value="AUTO">Автоматически для старой версии</option>
+                                </select>
                               </label>
                               {field.field_type === "SINGLE_SELECT" && !field.option_items?.length && !field.allow_other && (
                                 <label>

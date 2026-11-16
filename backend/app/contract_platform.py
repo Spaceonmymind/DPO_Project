@@ -18,7 +18,7 @@ from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app import choices
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
-from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductFieldMapping,ContractProductVariant,ContractProductVersion,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,RequisiteSet,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductFieldMapping,ContractProductVariant,ContractProductVersion,ContractStage,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,RequisiteSet,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
 
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
@@ -146,21 +146,40 @@ def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x
 class CreateTemplate(BaseModel):
  code:str=Field(min_length=2,max_length=80,pattern=r'^[A-Za-z0-9_-]+$'); name:str=Field(min_length=2,max_length=240); category:str=Field(default='Другое',min_length=2,max_length=120); description:str=Field(default='',max_length=2000)
 class FieldPayload(BaseModel):
- field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; default_value:Any=None; default_source:dict[str,Any]|None=None; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
+ field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); group:str=Field(default='Основные сведения',max_length=160); placeholder:str=Field(default='',max_length=300); placeholder_mode:str=Field(default='AUTO',pattern='^(AUTO|HELP|EXAMPLE)$'); stage_ids:list[str]=Field(default_factory=list,max_length=100); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); option_items:list[dict[str,Any]]=Field(default_factory=list,max_length=100); allow_other:bool=False; other_required:bool=False; default_value:Any=None; default_source:dict[str,Any]|None=None; visible_when:dict[str,Any]|None=None; required_when:dict[str,Any]|None=None; calculated:bool=False; expression:dict[str,Any]|None=None; text_expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'; item_config:dict[str,Any]=Field(default_factory=dict); components:list[dict[str,Any]]=Field(default_factory=list,max_length=30); separator:str=Field(default='; ',max_length=20)
+
+class StagePayload(BaseModel):
+ name:str=Field(min_length=2,max_length=240)
+ description:str=Field(default='',max_length=2000)
+ status:str=Field(default='ACTIVE',pattern='^(ACTIVE|INACTIVE)$')
+
+class StageOrderPayload(BaseModel):
+ stage_ids:list[str]=Field(max_length=100)
+
+class StageSelectionPayload(BaseModel):
+ selected_stage_ids:list[str]=Field(max_length=100)
+
+class StageAssignmentPayload(BaseModel):
+ stage_ids:list[str]=Field(max_length=100)
+
+class FieldOrderPayload(BaseModel):
+ field_ids:list[str]=Field(max_length=1000)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
- region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); region_type:str; start_locator:str; end_locator:str|None=None; start:int|None=Field(default=None,ge=0); end:int|None=Field(default=None,gt=0); selected_text:str|None=Field(default=None,max_length=10000); include_when:dict[str,Any]
+ region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); region_type:str; start_locator:str; end_locator:str|None=None; start:int|None=Field(default=None,ge=0); end:int|None=Field(default=None,gt=0); selected_text:str|None=Field(default=None,max_length=10000); include_when:dict[str,Any]; stage_ids:list[str]=Field(default_factory=list,max_length=100)
 class RegionUpdatePayload(BaseModel):
- region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]
+ region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]; stage_ids:list[str]=Field(default_factory=list,max_length=100)
 class RepeatingGroupPayload(BaseModel):
- group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; end_row_locator:str|None=None; row_count:int=Field(default=1,ge=1,le=20); source_repetitions:int=Field(default=1,ge=1,le=20); visible_when:dict[str,Any]|None=None
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; end_row_locator:str|None=None; row_count:int=Field(default=1,ge=1,le=20); source_repetitions:int=Field(default=1,ge=1,le=20); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100)
 class RepeatingGroupUpdatePayload(BaseModel):
- group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100)
 class RepeatingFieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
 class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
-class AnswersPayload(BaseModel): answers:dict[str,Any]
+class AnswersPayload(BaseModel):
+ answers:dict[str,Any]
+ selected_stage_ids:list[str]|None=None
 class DeleteFieldPayload(BaseModel):
  confirmed_dependencies:list[str]=Field(default_factory=list)
  acknowledge_logic_change:bool=False
@@ -245,7 +264,7 @@ def validate_default_source(p,s):
  field=type('ReferenceField',(),{'field_type':p.field_type,'required':p.required,'config':field_config(p)})()
  if error:=validate_answer(field,entry['value']):raise HTTPException(422,detail=f'Значение реквизита не подходит вопросу: {error}')
 def calculation_config(p): return {'calculated':p.calculated,'expression':p.expression,'precision':p.precision,'rounding':p.rounding,'output_format':p.output_format}
-def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'default_value':p.default_value,'default_source':p.default_source,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
+def field_config(p): return {'description':p.description,'group':p.group,'placeholder':p.placeholder,'placeholder_mode':p.placeholder_mode,'stage_ids':p.stage_ids,'validation':p.validation,'options':p.options,'option_items':p.option_items,'allow_other':p.allow_other,'other_required':p.other_required,'default_value':p.default_value,'default_source':p.default_source,'visible_when':p.visible_when,'required_when':p.required_when,'text_expression':p.text_expression,'item_config':p.item_config,'components':p.components,'separator':p.separator,**calculation_config(p)}
 def canonical_group(name,fields):
  clean=' '.join(name.split()) or 'Основные сведения'
  return next((item.config['group'] for item in fields if ' '.join((item.config or {}).get('group','').split()).casefold()==clean.casefold()),clean)
@@ -415,7 +434,25 @@ def schema_for(version_id,s,create=False,u=None):
  x=s.query(QuestionnaireSchema).filter_by(template_version_id=version_id).order_by(QuestionnaireSchema.schema_version.desc()).first()
  if not x and create: x=QuestionnaireSchema(template_version_id=version_id,created_by_id=u.id); s.add(x); s.flush()
  return x
-def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'calculation_schema_version':x.calculation_schema_version,'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()],'repeating_groups':[repeating_group_out(g,s) for g in s.query(RepeatingGroup).filter_by(template_version_id=x.template_version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()]}
+def stage_out(x): return {'id':x.id,'name':x.name,'description':x.description,'position':x.position,'status':x.status}
+def version_stages(version_id,s,active=False):
+ query=s.query(ContractStage).filter_by(template_version_id=version_id)
+ if active:query=query.filter_by(status='ACTIVE')
+ return query.order_by(ContractStage.position,ContractStage.id).all()
+def validate_stage_ids(version_id,ids,s,active=False):
+ if len(ids)!=len(set(ids)):raise HTTPException(422,detail='Этапы не должны повторяться')
+ known={x.id for x in version_stages(version_id,s,active)}
+ if set(ids)-known:raise HTTPException(422,detail='Этап не существует или неактивен')
+ return ids
+def stage_applies(config,selected,has_stages):
+ if not has_stages:return True
+ assigned=(config or {}).get('stage_ids') or []
+ return not assigned or bool(set(assigned)&set(selected))
+def stage_fields(fields,selected,has_stages):
+ return [x for x in fields if stage_applies(x.config,selected,has_stages)]
+def stage_groups(groups,selected,has_stages):
+ return [x for x in groups if stage_applies(x.config,selected,has_stages)]
+def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'calculation_schema_version':x.calculation_schema_version,'stages':[stage_out(stage) for stage in version_stages(x.template_version_id,s)],'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()],'repeating_groups':[repeating_group_out(g,s) for g in s.query(RepeatingGroup).filter_by(template_version_id=x.template_version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()]}
 def calculation_groups(version_id,s):
  groups=s.query(RepeatingGroup).filter_by(template_version_id=version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()
  for group in groups: group.fields=s.query(RepeatingGroupField).filter_by(group_id=group.id).order_by(RepeatingGroupField.position).all()
@@ -424,11 +461,12 @@ def validate_calculations(version_id,s):
  schema=schema_for(version_id,s); fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
  try: CalculationEngine.validate(fields,calculation_groups(version_id,s))
  except CalculationError as exc: raise HTTPException(422,detail=f'Некорректные вычисления: {exc}')
-def calculated_document_values(version_id,s,fields,answers):
- groups=calculation_groups(version_id,s); active_keys={x.field_key for x in ConditionEngine.active_fields(fields,answers)}; active_groups={x.group_key for x in groups if group_is_active(x,fields,answers)}
+def calculated_document_values(version_id,s,fields,answers,selected_stage_ids=None,has_stages=False):
+ groups=calculation_groups(version_id,s); legal_fields=stage_fields(fields,selected_stage_ids or [],has_stages); legal_groups=stage_groups(groups,selected_stage_ids or [],has_stages); active_keys={x.field_key for x in ConditionEngine.active_fields(legal_fields,answers)}; active_groups={x.group_key for x in legal_groups if group_is_active(x,legal_fields,answers)}
  try:
   CalculationEngine.validate(fields,groups)
-  return groups,*CalculationEngine.calculate(fields,groups,answers,active_keys,active_groups)
+  calculated,repeated=CalculationEngine.calculate(fields,groups,answers,active_keys,active_groups)
+  return legal_groups,calculated,repeated
  except CalculationError as exc: raise HTTPException(422,detail=f'Ошибка вычисления: {exc}')
 def formatted_bindings(bindings,values,fields=None):
  by_id={x.id:x for x in (fields or [])}
@@ -852,6 +890,7 @@ def publication_fingerprint(v,s):
  groups=sorted(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),key=lambda x:x.id)
  payload={
   'source':v.source_sha256,
+  'stages':[(x.id,x.name,x.description,x.position,x.status) for x in sorted(version_stages(v.id,s),key=lambda x:x.id)],
   'fields':[(x.id,x.field_key,x.label,x.field_type,x.required,x.position,x.config) for x in fields],
   'bindings':[(x.id,x.field_id,x.binding_key,x.locator,x.selected_text,x.format_config) for x in bindings],
   'regions':[(x.id,x.region_type,x.locator,x.include_when) for x in regions],
@@ -877,6 +916,9 @@ def publication_check(v,s):
    groups=validate_repeating_groups(v,s,bindings,regions)
    validate_condition_schema(fields)
    validate_calculations(v.id,s)
+   for field in fields:validate_stage_ids(v.id,(field.config or {}).get('stage_ids',[]),s)
+   for region in regions:validate_stage_ids(v.id,(region.locator or {}).get('stage_ids',[]),s)
+   for group in groups:validate_stage_ids(v.id,(group.config or {}).get('stage_ids',[]),s)
   except (HTTPException,ConditionConfigurationError,CalculationError) as exc: errors.append(str(exc.detail) if isinstance(exc,HTTPException) else str(exc))
  if not errors:
   known={field.id:field for field in fields}
@@ -1072,7 +1114,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     if entry and entry['value'] not in (None,'') and not validate_answer(field,entry['value']):value=entry['value']
     elif source.get('fallback')!='FIXED':value=None
    if value is not None:defaults[field.field_key]=copy.deepcopy(value)
-  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'schema':schema_out(schema,s)}
+  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults,selected_stage_ids=[]); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids,'schema':schema_out(schema,s)}
  @r.get('/api/v1/contract-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
@@ -1082,7 +1124,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'template':template_out(t,s),'schema':schema_out(schema,s)}
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids or [],'template':template_out(t,s),'schema':schema_out(schema,s)}
  @r.delete('/api/v1/contract-drafts/{id}')
  def delete_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s)
@@ -1094,18 +1136,28 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   import copy
   source=own_draft(id,u,s); version=s.get(TemplateVersion,source.template_version_id); template=s.get(DocumentTemplate,version.template_id)
   title=validated_draft_title((payload or {}).get('title',f'Копия — {source.title or template.name}'[:200]))
-  new=DocumentDraft(owner_id=u.id,template_version_id=source.template_version_id,questionnaire_schema_id=source.questionnaire_schema_id,title=title,answers=copy.deepcopy(source.answers or {}),status='DRAFT')
+  new=DocumentDraft(owner_id=u.id,template_version_id=source.template_version_id,questionnaire_schema_id=source.questionnaire_schema_id,title=title,answers=copy.deepcopy(source.answers or {}),selected_stage_ids=list(source.selected_stage_ids or []),status='DRAFT')
   s.add(new); s.commit(); return draft(new.id,u,s)
  @r.patch('/api/v1/contract-drafts/{id}/title')
  def rename_draft(id:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); d.title=validated_draft_title(payload.get('title')); d.updated_at=now(); s.commit(); return {'id':d.id,'title':d.title}
+ @r.patch('/api/v1/contract-drafts/{id}/stages')
+ def select_draft_stages(id:str,p:StageSelectionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=own_draft(id,u,s);active=version_stages(d.template_version_id,s,True)
+  validate_stage_ids(d.template_version_id,p.selected_stage_ids,s,True)
+  if active and not p.selected_stage_ids:raise HTTPException(422,detail='Выберите хотя бы один этап договора')
+  if not active and p.selected_stage_ids:raise HTTPException(422,detail='В шаблоне нет активных этапов')
+  d.selected_stage_ids=list(p.selected_stage_ids);d.status='DRAFT';d.updated_at=now();s.commit();return {'id':d.id,'selected_stage_ids':d.selected_stage_ids}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})
   validate_condition_schema(fields)
   if set(payload.answers)-set(known): raise HTTPException(422,detail='Анкета содержит неизвестные поля')
   if any(k in payload.answers and (f.config or {}).get('calculated') for k,f in known.items() if isinstance(f,QuestionnaireField)): raise HTTPException(422,detail='Вычисляемые поля нельзя изменять')
-  answers={**(d.answers or {}),**payload.answers}; errors=validate_active_answers(fields,answers); errors.update(validate_repeating_answers(groups,s,fields,answers,True))
+  answers={**(d.answers or {}),**payload.answers}; has_stages=bool(version_stages(d.template_version_id,s));selected=d.selected_stage_ids or []
+  if has_stages and not selected:raise HTTPException(422,detail='Выберите этапы договора')
+  legal_fields=stage_fields(fields,selected,has_stages);legal_groups=stage_groups(groups,selected,has_stages);legal_answers={x.field_key:answers[x.field_key] for x in legal_fields if x.field_key in answers}
+  errors=validate_active_answers(legal_fields,legal_answers);errors.update(validate_repeating_answers(legal_groups,s,legal_fields,answers,True))
   if errors: raise HTTPException(422,detail={'message':'Исправьте ответы','fields':errors})
   d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.patch('/api/v1/contract-drafts/{id}/autosave')
@@ -1113,7 +1165,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key for x in fields}|{x.group_key for x in groups}
   if set(payload.answers)-known: raise HTTPException(422,detail='Анкета содержит неизвестные поля')
   if any(x.field_key in payload.answers and (x.config or {}).get('calculated') for x in fields): raise HTTPException(422,detail='Вычисляемые поля нельзя изменять')
-  answers={**(d.answers or {}),**payload.answers}; errors=validate_repeating_answers(groups,s,fields,answers,False)
+  answers={**(d.answers or {}),**payload.answers};has_stages=bool(version_stages(d.template_version_id,s));selected=d.selected_stage_ids or [];legal_fields=stage_fields(fields,selected,has_stages);legal_groups=stage_groups(groups,selected,has_stages);errors=validate_repeating_answers(legal_groups,s,legal_fields,answers,False)
   if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
   for field in fields:
    value=answers.get(field.field_key)
@@ -1122,11 +1174,13 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.post('/api/v1/contract-drafts/{id}/generate',status_code=201)
  def generate(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {}; errors=validate_active_answers(fields,answers)
-  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(); errors.update(validate_repeating_answers(groups,s,fields,answers,True))
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {};stages=version_stages(v.id,s,True);selected=validate_stage_ids(v.id,d.selected_stage_ids or [],s,True)
+  if stages and not selected:raise HTTPException(422,detail='Выберите этапы договора')
+  legal_fields=stage_fields(fields,selected,bool(version_stages(v.id,s)));legal_answers={x.field_key:answers[x.field_key] for x in legal_fields if x.field_key in answers};errors=validate_active_answers(legal_fields,legal_answers)
+  groups=stage_groups(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),selected,bool(version_stages(v.id,s))); errors.update(validate_repeating_answers(groups,s,legal_fields,answers,True))
   if errors: raise HTTPException(422,detail={'message':'Заполните обязательные поля','fields':errors})
-  bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); groups=validate_repeating_groups(v,s,bindings,regions); active={x.field_key:x for x in ConditionEngine.active_fields(fields,answers)}; bindings=[x for x in bindings if x.binding_key in active]; legal_answers=condition_answers(fields,answers); included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal_answers)}; groups,calculated_values,repeated=calculated_document_values(v.id,s,fields,answers); values=formatted_bindings(bindings,calculated_values,fields); group_fields={x.id:x.fields for x in groups}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
-  try: render_docx(v,bindings,values,target,regions,included,groups,repeated,group_fields)
+  bindings=validate_bindings(v,s); regions=validate_regions(v,s,bindings); all_groups=validate_repeating_groups(v,s,bindings,regions); active={x.field_key:x for x in ConditionEngine.active_fields(legal_fields,legal_answers)}; bindings=[x for x in bindings if x.binding_key in active];condition_values=condition_answers(legal_fields,legal_answers); included={x.id for x in regions if stage_applies(x.locator,selected,bool(version_stages(v.id,s))) and ConditionEngine.evaluate(x.include_when,condition_values)};generation_answers={**legal_answers,**{g.group_key:answers[g.group_key] for g in groups if g.group_key in answers}}; _,calculated_values,repeated=calculated_document_values(v.id,s,fields,generation_answers,selected,bool(version_stages(v.id,s))); values=formatted_bindings(bindings,calculated_values,fields); group_fields={x.id:x.fields for x in all_groups}; number=s.query(GeneratedDocument).filter_by(draft_id=d.id).count()+1; root=(Path(settings.storage)/'generated_contracts'/d.id).resolve(); root.mkdir(parents=True,exist_ok=True); target=root/f'{number}.docx'
+  try: render_docx(v,bindings,values,target,regions,included,all_groups,repeated,group_fields)
   except (ValueError,IndexError,KeyError,CalculationError) as exc: raise HTTPException(422,detail=f'Не удалось безопасно сформировать DOCX: {exc}')
   raw=target.read_bytes(); g=GeneratedDocument(draft_id=d.id,template_version_id=v.id,generation_number=number,path=str(target),sha256=hashlib.sha256(raw).hexdigest(),mime_type=DOCX_MIME,size=len(raw),created_by_id=u.id); s.add(g); d.status='GENERATED'; s.commit(); return {'id':g.id,'generation_number':number,'filename':f'Договор_{number}.docx','download_url':f'/api/v1/generated-documents/{g.id}/download'}
  @r.get('/api/v1/generated-documents/{id}/download')
@@ -1259,15 +1313,17 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   known={x.field_key for x in fields}
   known.update(x.group_key for x in s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all())
   if set(p.answers)-known:raise HTTPException(422,detail='Анкета содержит неизвестные поля')
-  validate_condition_schema(fields);errors=validate_active_answers(fields,p.answers)
-  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all();errors.update(validate_repeating_answers(groups,s,fields,p.answers,True))
+  validate_condition_schema(fields);stages=version_stages(v.id,s,True);selected=validate_stage_ids(v.id,p.selected_stage_ids or [],s,True)
+  if stages and not selected:raise HTTPException(422,detail='Выберите этапы договора')
+  legal_fields=stage_fields(fields,selected,bool(version_stages(v.id,s)));legal_answers={x.field_key:p.answers[x.field_key] for x in legal_fields if x.field_key in p.answers};errors=validate_active_answers(legal_fields,legal_answers)
+  groups=stage_groups(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),selected,bool(version_stages(v.id,s)));errors.update(validate_repeating_answers(groups,s,legal_fields,p.answers,True))
   if errors:raise HTTPException(422,detail={'message':'Исправьте тестовые ответы','fields':errors})
-  bindings=validate_bindings(v,s);regions=validate_regions(v,s,bindings);groups=validate_repeating_groups(v,s,bindings,regions)
-  active={x.field_key:x for x in ConditionEngine.active_fields(fields,p.answers)};bindings=[x for x in bindings if x.binding_key in active];legal=condition_answers(fields,p.answers);included={x.id for x in regions if ConditionEngine.evaluate(x.include_when,legal)}
-  groups,calculated,repeated=calculated_document_values(v.id,s,fields,p.answers);values=formatted_bindings(bindings,calculated,fields);group_fields={x.id:x.fields for x in groups}
+  bindings=validate_bindings(v,s);regions=validate_regions(v,s,bindings);all_groups=validate_repeating_groups(v,s,bindings,regions)
+  active={x.field_key:x for x in ConditionEngine.active_fields(legal_fields,legal_answers)};bindings=[x for x in bindings if x.binding_key in active];legal=condition_answers(legal_fields,legal_answers);included={x.id for x in regions if stage_applies(x.locator,selected,bool(version_stages(v.id,s))) and ConditionEngine.evaluate(x.include_when,legal)}
+  generation_answers={**legal_answers,**{g.group_key:p.answers[g.group_key] for g in groups if g.group_key in p.answers}};_,calculated,repeated=calculated_document_values(v.id,s,fields,generation_answers,selected,bool(version_stages(v.id,s)));values=formatted_bindings(bindings,calculated,fields);group_fields={x.id:x.fields for x in all_groups}
   document_id=str(uuid.uuid4());root=(Path(settings.storage)/'test_contracts'/v.id).resolve();root.mkdir(parents=True,exist_ok=True);target=root/f'{document_id}.docx'
   try:
-   render_docx(v,bindings,values,target,regions,included,groups,repeated,group_fields)
+   render_docx(v,bindings,values,target,regions,included,all_groups,repeated,group_fields)
    marked=Document(target);marked.core_properties.title='ТЕСТОВЫЙ ДОКУМЕНТ';marked.core_properties.comments='Создано в draft test-drive. Не является официальным договором.'
    for section in marked.sections:
     paragraph=section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph();paragraph.text='ТЕСТОВЫЙ ДОКУМЕНТ · НЕ ДЛЯ ПОДПИСАНИЯ'
@@ -1320,7 +1376,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   created=[]
   for x in selected:
    position+=1
-   item=QuestionnaireField(schema_id=target_schema.id,field_key=x.field_key,label=x.label,field_type=x.field_type,required=x.required,position=position,config=copy.deepcopy(x.config))
+   item=QuestionnaireField(schema_id=target_schema.id,field_key=x.field_key,label=x.label,field_type=x.field_type,required=x.required,position=position,config={**copy.deepcopy(x.config or {}),'stage_ids':[]})
    s.add(item);created.append(item)
   s.flush()
   try:
@@ -1330,9 +1386,96 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=target.id,actor_id=u.id,event_type='QUESTIONS_COPIED',metadata_json={'source_version_id':source.id,'count':len(created)}))
   s.commit()
   return {'count':len(created),'fields':[field_out(x) for x in created]}
+ @r.get(prefix+'/{tid}/versions/{vid}/stages')
+ def list_stages(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  return [stage_out(x) for x in version_stages(v.id,s)]
+ @r.post(prefix+'/{tid}/versions/{vid}/stages',status_code=201)
+ def create_stage(tid:str,vid:str,p:StagePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  locked=s.query(TemplateVersion).filter_by(id=v.id).with_for_update().populate_existing().one();require_draft(locked)
+  if len(p.name.strip())<2:raise HTTPException(422,detail='Название этапа должно содержать минимум два символа')
+  stages=version_stages(v.id,s)
+  if len(stages)>=100:raise HTTPException(422,detail='Допускается не более 100 этапов')
+  stage=ContractStage(template_version_id=v.id,name=p.name.strip(),description=p.description.strip(),status=p.status,position=max((x.position for x in stages),default=0)+1,created_by_id=u.id)
+  s.add(stage);s.flush();s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='CONTRACT_STAGE_CREATED',metadata_json={'stage_id':stage.id}));s.commit();return stage_out(stage)
+ @r.patch(prefix+'/{tid}/versions/{vid}/stages/order')
+ def order_stages(tid:str,vid:str,p:StageOrderPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  # Serialize edits for this version before reading positions. A row lock on
+  # the parent also covers an empty stage list; row locks alone would not.
+  locked=s.query(TemplateVersion).filter_by(id=v.id).with_for_update().populate_existing().one()
+  require_draft(locked)
+  stages=s.query(ContractStage).filter_by(template_version_id=v.id).order_by(ContractStage.position,ContractStage.id).with_for_update().all();by_id={x.id:x for x in stages}
+  if len(p.stage_ids)!=len(stages) or len(set(p.stage_ids))!=len(stages) or set(p.stage_ids)!=set(by_id):raise HTTPException(422,detail='Передайте все этапы текущей версии')
+  if p.stage_ids==[x.id for x in stages]:return [stage_out(x) for x in stages]
+  offset=max((x.position for x in stages),default=0)+1
+  try:
+   for index,x in enumerate(stages):s.execute(update(ContractStage).where(ContractStage.id==x.id).values(position=offset+index))
+   for index,id in enumerate(p.stage_ids):s.execute(update(ContractStage).where(ContractStage.id==id).values(position=index+1))
+   s.commit()
+  except Exception:s.rollback();raise
+  return [stage_out(x) for x in version_stages(v.id,s)]
+ @r.patch(prefix+'/{tid}/versions/{vid}/stages/{sid}')
+ def update_stage(tid:str,vid:str,sid:str,p:StagePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v);x=s.get(ContractStage,sid)
+  if t.id!=tid or not x or x.template_version_id!=v.id:raise HTTPException(404,detail='Этап не найден')
+  if len(p.name.strip())<2:raise HTTPException(422,detail='Название этапа должно содержать минимум два символа')
+  x.name=p.name.strip();x.description=p.description.strip();x.status=p.status;s.commit();return stage_out(x)
+ @r.delete(prefix+'/{tid}/versions/{vid}/stages/{sid}',status_code=204)
+ def delete_stage(tid:str,vid:str,sid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Этап не найден')
+  locked=s.query(TemplateVersion).filter_by(id=v.id).with_for_update().populate_existing().one();require_draft(locked)
+  x=s.get(ContractStage,sid)
+  if t.id!=tid or not x or x.template_version_id!=v.id:raise HTTPException(404,detail='Этап не найден')
+  schema=schema_for(v.id,s)
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+  regions=s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id).all()
+  groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id).all()
+  if any(sid in (f.config or {}).get('stage_ids',[]) for f in fields) or any(sid in (r.locator or {}).get('stage_ids',[]) for r in regions) or any(sid in (g.config or {}).get('stage_ids',[]) for g in groups):raise HTTPException(409,detail='Сначала снимите назначения этапа с вопросов и областей Word')
+  s.delete(x);s.commit()
+ @r.patch(prefix+'/{tid}/versions/{vid}/conditional-regions/{rid}/stages')
+ def assign_region_stages(tid:str,vid:str,rid:str,p:StageAssignmentPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v);x=s.get(ConditionalDocumentRegion,rid)
+  if t.id!=tid or not x or x.template_version_id!=v.id:raise HTTPException(404,detail='Область не найдена')
+  validate_stage_ids(v.id,p.stage_ids,s);x.locator={**x.locator,'stage_ids':p.stage_ids};s.commit();return region_out(x)
+ @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}/stages')
+ def assign_group_stages(tid:str,vid:str,gid:str,p:StageAssignmentPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v);x=s.get(RepeatingGroup,gid)
+  if t.id!=tid or not x or x.template_version_id!=v.id:raise HTTPException(404,detail='Группа не найдена')
+  validate_stage_ids(v.id,p.stage_ids,s);x.config={**(x.config or {}),'stage_ids':p.stage_ids};s.commit();return repeating_group_out(x,s)
+ @r.patch(prefix+'/{tid}/versions/{vid}/fields/order')
+ def reorder_fields(tid:str,vid:str,p:FieldOrderPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  schema=schema_for(v.id,s)
+  if not schema:raise HTTPException(422,detail='Анкета не найдена')
+  fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).order_by(QuestionnaireField.position,QuestionnaireField.id).with_for_update().all()
+  by_id={field.id:field for field in fields}
+  if len(p.field_ids)!=len(fields) or len(set(p.field_ids))!=len(fields) or set(p.field_ids)!=set(by_id):
+   raise HTTPException(422,detail='Передайте все вопросы текущей версии без повторов')
+  groups=lambda ids:[(by_id[id].config or {}).get('group') or 'Основные сведения' for id in ids]
+  if groups(p.field_ids)!=groups([field.id for field in fields]):
+   raise HTTPException(422,detail='Перемещайте вопросы внутри раздела; смените раздел в настройках вопроса отдельно')
+  if p.field_ids==[field.id for field in fields]:return {'fields':[field_out(field) for field in fields]}
+  # Move all rows outside occupied positions before assigning the final order.
+  offset=max((field.position for field in fields),default=0)+1
+  try:
+   for index,field in enumerate(fields):s.execute(update(QuestionnaireField).where(QuestionnaireField.id==field.id).values(position=offset+index))
+   for index,id in enumerate(p.field_ids):s.execute(update(QuestionnaireField).where(QuestionnaireField.id==id).values(position=index+1))
+   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='QUESTIONS_REORDERED'))
+   s.commit()
+  except Exception:s.rollback();raise
+  return {'fields':[field_out(field) for field in s.query(QuestionnaireField).filter_by(schema_id=schema.id).order_by(QuestionnaireField.position).all()]}
+
  @r.post(prefix+'/{tid}/versions/{vid}/fields',status_code=201)
  def create_field(tid:str,vid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s,True,u)
+  validate_stage_ids(v.id,p.stage_ids,s)
   existing_fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all()
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
@@ -1347,6 +1490,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  @r.patch(prefix+'/{tid}/versions/{vid}/fields/{fid}')
  def update_field(tid:str,vid:str,fid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
+  validate_stage_ids(v.id,p.stage_ids,s)
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   duplicate=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.field_key==p.field_key,QuestionnaireField.id!=x.id).first()
   occupied=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.position==p.position,QuestionnaireField.id!=x.id).first()
@@ -1445,24 +1589,26 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  @r.post(prefix+'/{tid}/versions/{vid}/conditional-regions',status_code=201)
  def create_region(tid:str,vid:str,p:RegionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s); fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+  validate_stage_ids(v.id,p.stage_ids,s)
   if s.query(ConditionalDocumentRegion).filter_by(template_version_id=v.id,region_key=p.region_key).first(): raise HTTPException(409,detail='Область с таким ключом уже существует')
   try:
    ConditionEngine.validate_condition(p.include_when,fields); locator,original=_resolve_region(safe_source(v),p,v.structure_fingerprint)
   except (ConditionConfigurationError,ValueError,IndexError) as exc: raise HTTPException(422,detail=str(exc))
-  x=ConditionalDocumentRegion(template_version_id=v.id,region_key=p.region_key,region_type=p.region_type,locator=locator,include_when=p.include_when,original_text=original,created_by_id=u.id); s.add(x); s.flush()
+  x=ConditionalDocumentRegion(template_version_id=v.id,region_key=p.region_key,region_type=p.region_type,locator={**locator,'stage_ids':p.stage_ids},include_when=p.include_when,original_text=original,created_by_id=u.id); s.add(x); s.flush()
   try: validate_regions(v,s,validate_bindings(v,s))
   except HTTPException: s.rollback(); raise
   s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='CONDITIONAL_REGION_CREATED',metadata_json={'region_id':x.id,'region_type':x.region_type})); s.commit(); return region_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/conditional-regions/{rid}')
  def update_region(tid:str,vid:str,rid:str,p:RegionUpdatePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(ConditionalDocumentRegion,rid)
+  validate_stage_ids(v.id,p.stage_ids,s)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Условная область не найдена')
   duplicate=s.query(ConditionalDocumentRegion).filter(ConditionalDocumentRegion.template_version_id==v.id,ConditionalDocumentRegion.region_key==p.region_key,ConditionalDocumentRegion.id!=x.id).first()
   if duplicate: raise HTTPException(409,detail='Область с таким ключом уже существует')
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
   try: ConditionEngine.validate_condition(p.include_when,fields)
   except ConditionConfigurationError as exc: raise HTTPException(422,detail=str(exc))
-  x.region_key=p.region_key; x.include_when=p.include_when; s.flush()
+  x.region_key=p.region_key; x.include_when=p.include_when; x.locator={**x.locator,'stage_ids':p.stage_ids}; s.flush()
   try: validate_regions(v,s,validate_bindings(v,s))
   except HTTPException: s.rollback(); raise
   s.commit(); return region_out(x)
@@ -1479,6 +1625,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  @r.post(prefix+'/{tid}/versions/{vid}/repeating-groups',status_code=201)
  def create_repeating_group(tid:str,vid:str,p:RepeatingGroupPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v)
+  validate_stage_ids(v.id,p.stage_ids,s)
   if p.max_items<p.min_items or (p.required and p.max_items<1): raise HTTPException(422,detail='Максимальное количество должно быть не меньше минимального')
   if s.query(RepeatingGroup).filter_by(template_version_id=v.id,group_key=p.group_key).first(): raise HTTPException(409,detail='Группа с таким ключом уже существует')
   if s.query(RepeatingGroup).filter_by(template_version_id=v.id,position=p.position).first(): raise HTTPException(409,detail='Позиция группы уже занята')
@@ -1487,10 +1634,11 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
    locator=_resolve_repeating_row(safe_source(v),p.row_locator,v.structure_fingerprint,p.end_row_locator,p.row_count,p.source_repetitions)
   except (ConditionConfigurationError,ValueError) as exc: raise HTTPException(422,detail=str(exc))
-  x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
+  x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when,'stage_ids':p.stage_ids},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
  @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}')
  def update_repeating_group(tid:str,vid:str,gid:str,p:RepeatingGroupUpdatePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)
+  validate_stage_ids(v.id,p.stage_ids,s)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Повторяемая группа не найдена')
   if p.max_items<p.min_items: raise HTTPException(422,detail='Максимальное количество должно быть не меньше минимального')
   duplicate=s.query(RepeatingGroup).filter(RepeatingGroup.template_version_id==v.id,RepeatingGroup.group_key==p.group_key,RepeatingGroup.id!=x.id).first(); occupied=s.query(RepeatingGroup).filter(RepeatingGroup.template_version_id==v.id,RepeatingGroup.position==p.position,RepeatingGroup.id!=x.id).first()
@@ -1500,7 +1648,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   try:
    if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
   except ConditionConfigurationError as exc: raise HTTPException(422,detail=str(exc))
-  x.group_key=p.group_key; x.name=p.name.strip(); x.description=p.description.strip(); x.min_items=p.min_items; x.max_items=p.max_items; x.required=p.required; x.position=p.position; x.config={'visible_when':p.visible_when}; s.commit(); return repeating_group_out(x,s)
+  x.group_key=p.group_key; x.name=p.name.strip(); x.description=p.description.strip(); x.min_items=p.min_items; x.max_items=p.max_items; x.required=p.required; x.position=p.position; x.config={**(x.config or {}),'visible_when':p.visible_when,'stage_ids':p.stage_ids}; s.commit(); return repeating_group_out(x,s)
  @r.delete(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}',status_code=204)
  def delete_repeating_group(tid:str,vid:str,gid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)
@@ -1603,6 +1751,10 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    s.add(new_version)
    s.flush()
 
+   for old_stage in version_stages(original.id,s):
+    new_stage=duplicate(ContractStage,old_stage,template_version_id=new_id,created_by_id=u.id)
+    s.add(new_stage);s.flush();id_map[old_stage.id]=new_stage.id
+
    old_schema=s.query(QuestionnaireSchema).filter_by(
     template_version_id=original.id
    ).order_by(QuestionnaireSchema.schema_version.desc()).first()
@@ -1621,7 +1773,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
      schema_id=old_schema.id
     ).order_by(QuestionnaireField.position):
      new_field=duplicate(
-      QuestionnaireField,old_field,schema_id=new_schema.id
+      QuestionnaireField,old_field,schema_id=new_schema.id,
+      config={**(old_field.config or {}),'stage_ids':[id_map[id] for id in (old_field.config or {}).get('stage_ids',[])]}
      )
      s.add(new_field)
      s.flush()
@@ -1646,6 +1799,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     new_region=duplicate(
      ConditionalDocumentRegion,old_region,
      template_version_id=new_id,
+     locator={**old_region.locator,'stage_ids':[id_map[id] for id in old_region.locator.get('stage_ids',[])]},
      created_by_id=u.id,
     )
     s.add(new_region)
@@ -1658,6 +1812,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     new_group=duplicate(
      RepeatingGroup,old_group,
      template_version_id=new_id,
+     config={**(old_group.config or {}),'stage_ids':[id_map[id] for id in (old_group.config or {}).get('stage_ids',[])]},
      created_by_id=u.id,
     )
     s.add(new_group)

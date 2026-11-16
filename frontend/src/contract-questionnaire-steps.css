@@ -17,6 +17,18 @@
 .contract-questionnaire .dynamic-form .repeat-fields{gap:12px}
 .contract-questionnaire .dynamic-form .contract-choice-options{margin-top:2px}
 .contract-questionnaire .question-rule-hint{display:block;color:#60736b;font-size:12px;font-weight:400;line-height:1.4}
+.contract-questionnaire .question-help-text,.template-questionnaire-preview .question-help-text{display:block;margin:2px 0 6px;color:#587168;font-size:12px;font-weight:400;line-height:1.45;overflow-wrap:anywhere}
+.contract-stage-start{max-width:680px;margin:25px auto;padding:24px;border:1px solid #d6e7dc;border-radius:14px;background:#fff}
+.contract-stage-start h1{margin:0 0 8px}
+.contract-stage-start>p{color:#587168}
+.contract-stage-selection,.contract-stage-start fieldset{display:grid;gap:8px;min-width:0;margin:16px 0;padding:14px;border:1px solid #d6e7dc;border-radius:10px}
+.contract-stage-selection>p{margin:0 0 5px;color:#587168;font-size:13px}
+.contract-stage-selection>label,.contract-stage-start fieldset>label{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid #e4eee8;border-radius:8px;cursor:pointer}
+.contract-stage-selection input,.contract-stage-start fieldset input{margin-top:3px;accent-color:#07856b}
+.contract-stage-selection label span,.contract-stage-start fieldset label span{display:grid;gap:2px}
+.contract-stage-selection label small,.contract-stage-start fieldset label small{color:#587168;line-height:1.4}
+.contract-stage-change{margin:0 0 12px}
+.contract-questionnaire .question-required,.template-questionnaire-preview .question-required{color:#b84b40;font-weight:800}
 .documents-list article>div{flex-wrap:wrap}
 .document-dialog-backdrop{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;padding:16px;background:#152c2580}
 .document-dialog{display:grid;gap:12px;width:min(440px,100%);padding:24px;border:1px solid #d8e6e1;border-radius:16px;background:#fff;box-shadow:0 20px 60px #10261b33}

@@ -50,7 +50,7 @@ test("Word stays on the same fragment after editor writes and step changes", { s
     await form.getByRole("button", { name: "Добавить вопрос" }).click();
     await page.getByText("Поле анкеты сохранено.").waitFor();
     await unchanged("question creation");
-    await page.locator(".workspace-question-list").getByRole("button", { name: /Проверка прокрутки/ }).click();
+    await page.locator(".workspace-question-list .workspace-question-open").filter({ hasText: "Проверка прокрутки" }).click();
     await form.getByLabel("Вопрос", { exact: true }).fill("Проверка прокрутки обновлена");
     await form.getByRole("button", { name: "Сохранить изменения" }).click();
     await unchanged("question edit");

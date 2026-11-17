@@ -25,11 +25,14 @@
         ? [...Array.from({ length: 3500 }, (_, index) => ({ locator: `word/document.xml#/p[${index + 1}]`, kind: "paragraph", text: `Фрагмент договора ${index + 1}` })), tableCell(1, 1, "Объединённая ячейка", 2, "restart"), tableCell(1, 2, "Правая ячейка"), tableCell(2, 1, "", 2, "continue"), tableCell(2, 2, "Нижняя ячейка")]
         : smallNodes;
       window.__previewRequests = 0;
+      window.__apiCalls = [];
+      window.__commits = [];
       window.__writes = [];
       const bindings = [];
       const regions = new URLSearchParams(location.search).has("scrollRegression") ? [{ id: "region-1", region_key: "sample_region", region_type: "CONDITIONAL_PARAGRAPH", locator: { node: "word/document.xml#/p[2490]" }, include_when: { operator: "ALWAYS" } }] : [];
       const group = { id: "group-1", group_key: "schedule", name: "График тренировок", description: "", required: false, min_items: 0, max_items: 10, position: 1, status: "ACTIVE", config: {}, locator: { part: "word/document.xml", table: 1, row: 1, row_count: 1 }, fields: [{ id: "group-field-1", group_id: "group-1", field_key: "session", label: "Название занятия", field_type: "TEXT", required: true, position: 1, config: { options: [] } }] };
       const api = async (path, options = {}) => {
+        window.__apiCalls.push({ path, method: options.method || "GET", at: performance.now() });
         if (path === "/document-templates") return [{ id: "template-1", name: "Тестовый договор", category: "Договоры", version_count: 1 }];
         if (path.endsWith("/versions")) return [version];
         if (path.endsWith("/preview")) { window.__previewRequests++; return { nodes }; }
@@ -71,9 +74,10 @@
         }
         if (path.endsWith("/conditional-regions")) return regions.map(region => ({ ...region }));
         if (path.endsWith("/binding-candidates")) return [];
+        if (path.endsWith("/test-drive") && options.method === "POST") return { download_url: "/api/v1/test.docx" };
         throw new Error(`Unexpected fixture request: ${options.method || "GET"} ${path}`);
       };
-      createRoot(document.getElementById("root")).render(React.createElement(TemplateAdmin, { api }));
+      createRoot(document.getElementById("root")).render(React.createElement(React.Profiler, { id: "template", onRender: (id, phase, actualDuration, baseDuration, startTime, commitTime) => window.__commits.push({ phase, actualDuration, baseDuration, startTime, commitTime }) }, React.createElement(TemplateAdmin, { api, downloadFile: async () => {} })));
     </script>
   </body>
 </html>

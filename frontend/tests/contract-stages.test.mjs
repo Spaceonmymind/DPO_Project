@@ -12,13 +12,13 @@ test("builder stages filter step 6 and test generation uses selected IDs", { ski
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
   try {
     const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1`);
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1`, { waitUntil: "load" });
     await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
     const nav = page.getByRole("navigation", { name: "Этапы настройки шаблона" });
-    await nav.getByRole("button", { name: /Вопросы анкеты/ }).click();
-    await page.locator(".contract-stage-manager summary").click();
-    assert.match(await page.locator(".contract-stage-manager").innerText(), /Подготовка.*Проведение/s);
+    await nav.getByRole("button", { name: /Привязки к Word/ }).click();
+    await page.getByRole("tab", { name: "Этапы" }).click();
+    assert.match(await page.locator(".contract-stage-panel").innerText(), /Подготовка.*Проведение/s);
     await nav.getByRole("button", { name: /Проверка и публикация/ }).click();
     const generate = page.getByRole("button", { name: "Сформировать тестовый DOCX" });
     assert.equal(await generate.isDisabled(), true);
@@ -74,24 +74,78 @@ test("specialist creates, renames, reorders and removes a draft stage", { skip: 
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
   try {
     const page = await browser.newPage();
-    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1`);
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1&persist-stages=1`);
     await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
-    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Вопросы анкеты/ }).click();
-    const manager = page.locator(".contract-stage-manager");
-    await manager.locator("summary").click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Привязки к Word/ }).click();
+    await page.getByRole("tab", { name: "Этапы" }).click();
+    const manager = page.locator(".contract-stage-panel");
     await manager.getByRole("button", { name: /Добавить этап/ }).click();
     await manager.getByLabel("Название этапа").fill("Подписание");
     await manager.getByRole("button", { name: "Сохранить этап" }).click();
     await manager.getByText("3. Подписание").waitFor();
     await manager.getByRole("button", { name: "Поднять этап «Подписание»" }).click();
     await manager.getByText("2. Подписание").waitFor();
+    await page.reload();
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Привязки к Word/ }).click();
+    await page.getByRole("tab", { name: "Этапы" }).click();
+    await manager.getByText("2. Подписание").waitFor();
     const row = manager.locator(".contract-stage-row").filter({ hasText: "Подписание" });
     await row.getByRole("button", { name: "Изменить" }).click();
     await manager.getByLabel("Название этапа").fill("Согласование");
+    await page.getByRole("tab", { name: "Вопросы" }).click();
+    await page.getByRole("tab", { name: "Этапы" }).click();
+    assert.equal(await manager.getByLabel("Название этапа").inputValue(), "Согласование");
     await manager.getByRole("button", { name: "Сохранить этап" }).click();
     await manager.getByText("2. Согласование").waitFor();
     await manager.locator(".contract-stage-row").filter({ hasText: "Согласование" }).getByRole("button", { name: "Удалить" }).click();
     assert.equal(await manager.getByText("Согласование").count(), 0);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("step 4 keeps Word structure search and navigates to a distant fragment", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1500, height: 900 } });
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Привязки к Word/ }).click();
+    assert.deepEqual(await page.getByRole("tab").allTextContents(), ["Вопросы", "Этапы"]);
+    await page.locator(".workspace-word-outline summary").click();
+    await page.getByRole("textbox", { name: "Найти фрагмент" }).fill("Фрагмент 2400");
+    await page.getByRole("navigation", { name: "Структура документа" }).getByRole("button", { name: /Фрагмент 2400/ }).click();
+    await page.locator('[data-locator="word/document.xml#/p[2400]"]').waitFor();
+    await page.getByRole("tab", { name: "Этапы" }).click();
+    assert.equal(await page.locator(".contract-stage-panel").isVisible(), true);
+    await page.getByRole("tab", { name: "Вопросы" }).click();
+    assert.equal(await page.getByRole("textbox", { name: "Найти вопрос" }).isVisible(), true);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("empty and published versions show stages without edit controls", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    const openStages = async () => {
+      await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+      await page.getByRole("button", { name: /Версия 1/ }).first().click();
+      await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Привязки к Word/ }).click();
+      await page.getByRole("tab", { name: "Этапы" }).click();
+    };
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html`);
+    await openStages();
+    await page.getByText("Этапы пока не созданы. Добавьте этап, чтобы настроить поэтапное формирование договора.").waitFor();
+    await page.getByRole("button", { name: "Добавить этап" }).waitFor();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?stages=1&published=1`);
+    await openStages();
+    await page.getByText("Первый этап").waitFor();
+    assert.equal(await page.locator(".contract-stage-panel").getByRole("button").count(), 0);
   } finally { await browser.close(); await server.close(); }
 });

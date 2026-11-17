@@ -5,7 +5,7 @@ import { TemplateAdmin } from "/src/TemplateAdmin.tsx";
 import "/src/styles.css";
 import "/src/enhancements.css";
 const template={id:"template-1",name:"Тестовый договор",category:"Договоры",status:"DRAFT",version_count:1};
-let version={id:"version-1",template_id:template.id,version_number:1,status:new URLSearchParams(location.search).has("published")?"PUBLISHED":"DRAFT",original_filename:"test.docx"};
+let version={id:"version-1",template_id:template.id,version_number:1,status:new URLSearchParams(location.search).has("published")?"PUBLISHED":"DRAFT",original_filename:new URLSearchParams(location.search).has("no-source")?"":"test.docx"};
 const fields=[
   {id:"payment",field_key:"payment",label:"Порядок оплаты",field_type:"SINGLE_SELECT",required:true,position:1,config:{group:"Оплата",options:["POST","PARTIAL"],default_value:"POST",placeholder:"Выберите порядок расчётов"}},
   {id:"percent",field_key:"percent",label:"Процент предоплаты",field_type:"INTEGER",required:false,position:2,config:{group:"Оплата",default_value:30,placeholder:"Укажите процент от общей суммы",visible_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"},required_when:{operator:"EQUALS",field_key:"payment",value:"PARTIAL"}}},
@@ -29,7 +29,7 @@ const api=async(path,options={})=>{
   if(path==="/document-templates")return [template];
   if(path.endsWith("/versions"))return [version];
   if(path.endsWith("/preview")){window.__previewRequests++;return{nodes};}
-  if(path.endsWith("/questionnaire"))return{fields,repeating_groups:[group],stages:contractStages};
+  if(path.endsWith("/questionnaire"))return new URLSearchParams(location.search).has("no-questionnaire")?null:{fields,repeating_groups:[group],stages:contractStages};
   if(path.endsWith("/stages")&&options.method==="POST"){const item={id:`stage-${contractStages.length+1}`,...JSON.parse(options.body),position:contractStages.length+1};contractStages.push(item);persistStages();return item;}
   if(path.endsWith("/stages/order")&&options.method==="PATCH"){const ids=JSON.parse(options.body).stage_ids;contractStages.sort((a,b)=>ids.indexOf(a.id)-ids.indexOf(b.id));contractStages.forEach((item,index)=>item.position=index+1);persistStages();return [...contractStages];}
   if(/\/stages\/[^/]+$/.test(path)&&options.method==="PATCH"){const item=contractStages.find(stage=>path.endsWith(stage.id));Object.assign(item,JSON.parse(options.body));persistStages();return item;}

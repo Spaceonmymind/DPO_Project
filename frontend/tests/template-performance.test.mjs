@@ -19,7 +19,7 @@ test("large Word preview mounts distant blocks on demand and preserves visible i
     assert.equal(await page.locator(".workspace-question-list button").count(), 160);
     assert.ok(await page.locator(".preview-node").count() < 150);
     assert.equal(await page.locator(".docx-table").count(), 0);
-    await page.getByRole("tab", { name: "Word" }).click();
+    await page.locator(".workspace-word-outline summary").click();
     assert.ok(await page.locator(".workspace-structure-list button").count() < 100);
     await page.locator(".workspace-structure-list").evaluate(list => { list.scrollTop = list.scrollHeight; });
     await page.waitForFunction(() => /3500|Ячейка/.test(document.querySelector(".workspace-structure-list button:last-of-type")?.textContent || ""));
@@ -52,7 +52,6 @@ test("large Word preview mounts distant blocks on demand and preserves visible i
     });
     await page.locator("#workspace-context-inspector .selection-card").waitFor();
     assert.equal(await page.evaluate(() => window.__previewRequests), 1);
-    await page.getByRole("tab", { name: "Word" }).click();
     await page.getByLabel("Найти фрагмент").fill("Объединённая ячейка");
     await page.locator(".workspace-structure-list button").first().click();
     assert.equal(await page.locator('.docx-table [data-locator="word/document.xml#/tbl[1]/tr[2]/tc[1]/p[1]"]').count(), 1);

@@ -184,7 +184,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     [testStageIds, setTestStageIds] = useState<string[]>([]),
     [draggedQuestion, setDraggedQuestion] = useState<string | null>(null),
     [questionDrop, setQuestionDrop] = useState<{ id: string; after: boolean } | null>(null),
-    [workspaceTab, setWorkspaceTab] = useState<"questions" | "stages" | "structure">("questions"),
+    [workspaceTab, setWorkspaceTab] = useState<"questions" | "stages">("questions"),
     [showFieldEditor, setShowFieldEditor] = useState(false),
     [zoom, setZoom] = useState(100);
   const structureItems = useMemo(() => (preview?.nodes || []).map((node: any, index: number) => ({
@@ -198,9 +198,6 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     const query = docQuery.trim().toLocaleLowerCase("ru");
     return query ? structureItems.filter((item: any) => item.searchText.includes(query)) : structureItems;
   }, [structureItems, docQuery]);
-  const activeWorkspaceTab = stage === 3
-    ? workspaceTab === "structure" ? "questions" : workspaceTab
-    : workspaceTab === "stages" ? "questions" : workspaceTab;
   const previewBlocks = useMemo(() => layoutPreviewNodes(preview?.nodes || []), [preview]);
   const virtualPreview = useDocxVirtualPreview(stage === 6 ? EMPTY_PREVIEW_BLOCKS : previewBlocks, canvasRef, pageRef, zoom, preview?.documentKey);
   useEffect(() => {
@@ -387,7 +384,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     setRepeatBlockStart(undefined);
     let b = `/document-templates/${x.template_id}/versions/${x.id}`,
       [p, q, links, areas, repeaters, candidates] = await Promise.all([
-        options.skipPreview ? Promise.resolve(sameDocument ? preview : null) : sameDocument ? Promise.resolve(preview) : api(b + "/preview"),
+        options.skipPreview || !x.original_filename ? Promise.resolve(sameDocument ? preview : null) : sameDocument ? Promise.resolve(preview) : api(b + "/preview"),
         api(b + "/questionnaire"),
         api(b + "/bindings"),
         api(b + "/conditional-regions"),
@@ -395,6 +392,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         api(b + "/binding-candidates"),
       ]);
     setPreview(p && !sameDocument ? { ...p, documentKey: x.id } : p);
+    q ||= { fields: [], stages: [], repeating_groups: [] };
     setSchema(q);
     setTestStageIds(current => sameDocument ? current.filter(id => (q.stages || []).some((stage: any) => stage.id === id && stage.status === "ACTIVE")) : []);
     setTestAnswers((current:any) => {
@@ -995,7 +993,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     });
   }
   async function showStage(next: number) {
-    if (next !== 6 && version && !preview) {
+    if (next !== 6 && version?.original_filename && !preview) {
       await run(async () => {
         const loaded = await api(`/document-templates/${version.template_id}/versions/${version.id}/preview`);
         setPreview({ ...loaded, documentKey: version.id });
@@ -1412,12 +1410,12 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   ))}
                 </section>
                 <section className="docx-preview" data-tour="tpl-source">
-                  {version && preview ? (
+                  {version ? (
                     <>
                       <header>
                         <div>
                           <h3>Версия {version.version_number}</h3>
-                          <p>{preview.nodes.length} структурных фрагментов</p>
+                          <p>{preview?.nodes?.length || 0} структурных фрагментов</p>
                         </div>
                         <a
                           className="secondary"
@@ -1431,12 +1429,10 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                         <div ref={dragLineRef} className="workspace-pane-drag-line" aria-hidden="true" hidden />
                         <aside className="document-outline" aria-label="Навигация по шаблону">
                           <div className="workspace-tabs" data-tour="tpl-tabs" role="tablist" aria-label="Навигация">
-                            <button role="tab" aria-selected={activeWorkspaceTab === "questions"} className={activeWorkspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
-                            {stage === 3
-                              ? <button role="tab" aria-selected={activeWorkspaceTab === "stages"} className={activeWorkspaceTab === "stages" ? "active" : ""} onClick={() => setWorkspaceTab("stages")}>Этапы</button>
-                              : <button role="tab" aria-selected={activeWorkspaceTab === "structure"} className={activeWorkspaceTab === "structure" ? "active" : ""} onClick={() => setWorkspaceTab("structure")}>Word</button>}
+                            <button role="tab" aria-selected={workspaceTab === "questions"} className={workspaceTab === "questions" ? "active" : ""} onClick={() => setWorkspaceTab("questions")}>Вопросы</button>
+                            <button role="tab" aria-selected={workspaceTab === "stages"} className={workspaceTab === "stages" ? "active" : ""} onClick={() => setWorkspaceTab("stages")}>Этапы</button>
                           </div>
-                          {activeWorkspaceTab === "questions" ? <>
+                          {workspaceTab === "questions" ? <>
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
@@ -1445,7 +1441,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
                               {schema?.fields?.length > 0 && filteredQuestions.length === 0 && <p className="workspace-empty">По запросу ничего не найдено.</p>}
                             </nav>
-                          </> : activeWorkspaceTab === "stages" ? <section className="contract-stage-panel" aria-label="Этапы договора">
+                          </> : <section className="contract-stage-panel" aria-label="Этапы договора">
                             <div className="workspace-panel-heading"><h3>Этапы договора</h3><span>{contractStages.length}</span></div>
                             {contractStages.length === 0 && <p className="workspace-empty">Этапы пока не созданы. Добавьте этап, чтобы настроить поэтапное формирование договора.</p>}
                             <div className={`contract-stage-list${contractStages.length === 0 ? " empty" : ""}`}>{contractStages.map((item, index) => <div className="contract-stage-row" key={item.id}>
@@ -1454,15 +1450,11 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                               {version.status === "DRAFT" && <div className="contract-stage-actions"><button type="button" aria-label={`Поднять этап «${item.name}»`} disabled={index === 0 || busy} onClick={() => void moveContractStage(item.id, -1)}>↑</button><button type="button" aria-label={`Опустить этап «${item.name}»`} disabled={index === contractStages.length - 1 || busy} onClick={() => void moveContractStage(item.id, 1)}>↓</button><button type="button" onClick={() => setStageDraft({ ...item })}>Изменить</button><button type="button" onClick={() => void removeContractStage(item.id)}>Удалить</button></div>}
                             </div>)}</div>
                             {version.status === "DRAFT" && (stageDraft ? <div className="contract-stage-form"><label>Название этапа<input value={stageDraft.name} onChange={event => setStageDraft({ ...stageDraft, name: event.target.value })}/></label><label>Описание<input value={stageDraft.description || ""} onChange={event => setStageDraft({ ...stageDraft, description: event.target.value })}/></label><label>Состояние<select value={stageDraft.status || "ACTIVE"} onChange={event => setStageDraft({ ...stageDraft, status: event.target.value })}><option value="ACTIVE">Активен</option><option value="INACTIVE">Неактивен</option></select></label><button type="button" disabled={busy || !stageDraft.name?.trim()} onClick={() => void saveContractStage()}>Сохранить этап</button><button type="button" onClick={() => setStageDraft(null)}>Отмена</button></div> : <button type="button" className="workspace-add" onClick={() => setStageDraft({ name: "", description: "", status: "ACTIVE" })}><Plus size={15}/>Добавить этап</button>)}
-                          </section> : <>
-                            <div className="workspace-panel-heading"><h3>Структура Word</h3><span>{preview.nodes.length}</span></div>
-                            <label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={(event) => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label>
-                            <WordStructureList items={visibleStructureItems} onSelect={virtualPreview.scrollToLocator} />
-                          </>}
+                          </section>}
                         </aside>
                         {paneDivider("questions")}
                         <section ref={canvasRef} className="document-canvas" data-tour="tpl-canvas">
-                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><div className="workspace-toolbar-actions">{stage === 3 && <details className="workspace-word-outline"><summary>Структура Word · {preview.nodes.length}</summary><div className="workspace-word-outline-body"><label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={event => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label><WordStructureList items={visibleStructureItems} onSelect={virtualPreview.scrollToLocator}/></div></details>}<button type="button" className="secondary workspace-reset-layout" onClick={resetPanes}>Сбросить расположение</button><label>Масштаб <select value={zoom} onChange={(event) => { virtualPreview.captureAnchor(); setZoom(Number(event.target.value)); }} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div></div>
+                          <div className="workspace-canvas-toolbar"><div><b>Исходный документ</b><span>Выделите фрагмент для настройки привязки или условия</span></div><div className="workspace-toolbar-actions">{preview?.nodes?.length > 0 && <details className="workspace-word-outline"><summary>Структура Word · {preview.nodes.length}</summary><div className="workspace-word-outline-body"><label className="workspace-search"><Search size={14}/><input value={docQuery} onChange={event => setDocQuery(event.target.value)} placeholder="Найти фрагмент" aria-label="Найти фрагмент"/></label><WordStructureList items={visibleStructureItems} onSelect={virtualPreview.scrollToLocator}/></div></details>}<button type="button" className="secondary workspace-reset-layout" onClick={resetPanes}>Сбросить расположение</button><label>Масштаб <select value={zoom} onChange={(event) => { virtualPreview.captureAnchor(); setZoom(Number(event.target.value)); }} aria-label="Масштаб документа"><option value={75}>75%</option><option value={90}>90%</option><option value={100}>100%</option><option value={110}>110%</option><option value={125}>125%</option></select></label></div></div>
                           {bindingCandidates.length > 0 && (
                             <details className="selection-card binding-candidate-review" data-tour="tpl-candidates" aria-label="Кандидаты структурной разметки">
                               <summary>Кандидаты структурной разметки · {bindingCandidates.length}</summary>
@@ -1509,7 +1501,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                             onMouseUp={selectRange}
                             style={{ zoom: `${zoom}%` }}
                           >
-                            {previewContent}
+                            {preview?.nodes?.length ? previewContent : <p className="workspace-empty">Исходный DOCX ещё не загружен. Вопросы и этапы можно настроить в левой панели.</p>}
                           </article>
                           {selection && <InspectorPortal>
                             <section className="selection-card selection-card-floating" aria-label="Настройка выбранного фрагмента">

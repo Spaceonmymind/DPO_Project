@@ -17,7 +17,7 @@ test("Word stays on the same fragment after editor writes and step changes", { s
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
     await page.locator(".docx-page").waitFor();
     const stages = page.getByRole("navigation", { name: "Этапы настройки шаблона" });
-    await page.getByRole("tab", { name: "Word" }).click();
+    await page.locator(".workspace-word-outline summary").click();
     await page.getByLabel("Найти фрагмент").fill("Фрагмент договора 2500");
     await page.locator(".workspace-structure-list button").first().click();
     const target = page.locator('.docx-page [data-locator="word/document.xml#/p[2500]"]');

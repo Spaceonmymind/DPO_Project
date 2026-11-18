@@ -11,6 +11,13 @@ const schema={stages:[{id:"stage-a",name:"Подготовка",description:"Н�
   {id:"b",field_key:"only_b",label:"Вопрос проведения",field_type:"TEXT",required:true,position:3,config:{group:"Основные сведения",stage_ids:["stage-b"]}},
   {id:"shared",field_key:"shared",label:"Общий для этапов",field_type:"TEXT",required:false,position:4,config:{group:"Основные сведения",stage_ids:["stage-a","stage-b"]}},
 ],repeating_groups:[]};
+if(new URLSearchParams(location.search).has("ordered"))schema.fields=[
+  {id:"q5",field_key:"fifth",label:"Пятый вопрос",field_type:"TEXT",required:false,position:1,config:{group:"Основные сведения",stage_ids:["stage-a"]}},
+  {id:"q1",field_key:"first",label:"Первый вопрос",field_type:"TEXT",required:false,position:2,config:{group:"Основные сведения"}},
+  {id:"q2",field_key:"second",label:"Второй вопрос",field_type:"TEXT",required:false,position:3,config:{group:"Основные сведения",stage_ids:["stage-a"]}},
+  {id:"q3",field_key:"third",label:"Третий вопрос",field_type:"TEXT",required:false,position:4,config:{group:"Основные сведения",stage_ids:["stage-b"]}},
+  {id:"q4",field_key:"fourth",label:"Четвёртый вопрос",field_type:"TEXT",required:false,position:5,config:{group:"Основные сведения"}},
+];
 let draft=null;window.__selectedStages=[];window.__savedAnswers={};
 const api=async(path,options={})=>{
   if(path==="/contract-catalog")return[template];

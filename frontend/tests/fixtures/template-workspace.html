@@ -28,7 +28,8 @@
       window.__apiCalls = [];
       window.__commits = [];
       window.__writes = [];
-      const bindings = [];
+      const bindings = new URLSearchParams(location.search).has("valueMapping") ? JSON.parse(sessionStorage.getItem("binding-value-mapping-fixture") || "[]") : [];
+      const persistBindings = () => { if (new URLSearchParams(location.search).has("valueMapping")) sessionStorage.setItem("binding-value-mapping-fixture", JSON.stringify(bindings)); };
       const regions = new URLSearchParams(location.search).has("scrollRegression") ? [{ id: "region-1", region_key: "sample_region", region_type: "CONDITIONAL_PARAGRAPH", locator: { node: "word/document.xml#/p[2490]" }, include_when: { operator: "ALWAYS" } }] : [];
       const group = { id: "group-1", group_key: "schedule", name: "График тренировок", description: "", required: false, min_items: 0, max_items: 10, position: 1, status: "ACTIVE", config: {}, locator: { part: "word/document.xml", table: 1, row: 1, row_count: 1 }, fields: [{ id: "group-field-1", group_id: "group-1", field_key: "session", label: "Название занятия", field_type: "TEXT", required: true, position: 1, config: { options: [] } }] };
       const api = async (path, options = {}) => {
@@ -47,9 +48,18 @@
         if (path.endsWith("/bindings") && options.method === "POST") {
           const payload = JSON.parse(options.body);
           window.__writes.push({ kind: "binding", payload });
-          const binding = { ...payload, id: `binding-${bindings.length + 1}`, binding_key: fields.find(field => field.id === payload.field_id)?.field_key, occurrence_index: bindings.length + 1, locator: { node: payload.locator, text_start: payload.start, text_end: payload.end }, format_config: { format: payload.output_format || "RAW" } };
+          const binding = { ...payload, id: `binding-${bindings.length + 1}`, binding_key: fields.find(field => field.id === payload.field_id)?.field_key, occurrence_index: bindings.length + 1, locator: { node: payload.locator, text_start: payload.start, text_end: payload.end }, format_config: { format: payload.output_format || "RAW", options: payload.format_options || {} } };
           bindings.push(binding);
+          persistBindings();
           return binding;
+        }
+        if (/\/bindings\/binding-\d+\/format$/.test(path) && options.method === "PATCH") {
+          const payload = JSON.parse(options.body);
+          const binding = bindings.find(item => path.includes(`/bindings/${item.id}/format`));
+          binding.format_config = { format: payload.output_format, options: payload.format_options };
+          persistBindings();
+          window.__writes.push({ kind: "binding-format", payload });
+          return { ...binding };
         }
         if (path.endsWith("/bindings")) return [...bindings];
         if (path.endsWith("/fields") && options.method === "POST") {

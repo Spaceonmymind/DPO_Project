@@ -68,6 +68,24 @@ test("employee selects stages and keeps answers while switching", { skip: !exist
   } finally { await browser.close(); await server.close(); }
 });
 
+test("employee keeps the specialist's saved order after selecting one or two stages", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?ordered=1`);
+    await page.getByRole("button", { name: /Заполнить договор/ }).click();
+    await page.getByRole("checkbox", { name: /Подготовка/ }).check();
+    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
+    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Четвёртый вопрос"]);
+    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
+    await page.getByRole("checkbox", { name: /Проведение/ }).check();
+    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
+    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Третий вопрос", "Четвёртый вопрос"]);
+  } finally { await browser.close(); await server.close(); }
+});
+
 test("specialist creates, renames, reorders and removes a draft stage", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

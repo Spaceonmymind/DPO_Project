@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import { existsSync } from 'node:fs';
+import { createServer } from 'vite';
+import { chromium } from 'playwright-core';
 
 const app=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');
 const home=readFileSync(new URL('../src/ContractHome.tsx',import.meta.url),'utf8');
@@ -56,16 +59,25 @@ test('selection stays in contextual inspector and can create a linked question',
   assert.match(workspace,/\.document-outline,\.template-open \.questionnaire-builder\{position:sticky/);
 });
 
-test('Word outline keeps full searchable list in independently scrolling rows',()=>{
-  const workspace=readFileSync(new URL('../src/template-workspace.css',import.meta.url),'utf8');
-  assert.match(builder,/visibleStructureItems\.map/);
-  assert.match(builder,/structureItems\.filter/);
-  assert.match(builder,/CSS\.escape\(item\.locator\)/);
-  assert.doesNotMatch(builder,/visibleStructureItems\.slice\(/);
-  assert.match(workspace,/\.workspace-structure-list\{[^}]*grid-auto-rows:max-content/);
-  assert.match(workspace,/\.workspace-structure-list button\{[^}]*flex-shrink:0/);
-  assert.match(workspace,/\.document-outline nav\{[^}]*overflow-y:auto/);
-  assert.match(workspace,/\.workspace-question-list button\{/);
+test('Word outline searches and opens a distant fragment in a large document', { skip: !existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') }, async()=>{
+  const server=await createServer({server:{host:'127.0.0.1',port:0},logLevel:'silent'});
+  await server.listen();
+  const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true,args:['--no-sandbox']});
+  try {
+    const page=await browser.newPage({viewport:{width:1450,height:900}});
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html?large=1`);
+    await page.getByRole('button',{name:/Тестовый договор/}).first().click();
+    await page.getByRole('button',{name:/Версия 1/}).first().click();
+    await page.locator('.workspace-word-outline summary').click();
+    const outline=page.getByRole('navigation',{name:'Структура документа'});
+    assert.ok(Number(await outline.locator('button').first().getAttribute('aria-setsize'))>=3500);
+    await page.getByRole('textbox',{name:'Найти фрагмент'}).fill('Фрагмент договора 2750');
+    const result=outline.getByRole('button',{name:/Фрагмент договора 2750/});
+    assert.equal(await result.count(),1);
+    assert.equal(await outline.evaluate(node=>getComputedStyle(node).overflowY),'auto');
+    await result.click();
+    await page.locator('.docx-page [data-locator="word/document.xml#/p[2750]"]').waitFor();
+  } finally { await browser.close(); await server.close(); }
 });
 
 test('template route stays role gated and publication permission remains server controlled',()=>{

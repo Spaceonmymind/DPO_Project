@@ -349,50 +349,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           {!review && <>
           {currentStep && <fieldset key={currentStep.name}>
               <legend>{currentStep.name}</legend>
-              {currentStep.fields.filter((f:any) => fieldState(f, relevantAnswers).visible).map((f: any) => (
-                <Question
-                  key={f.id}
-                  field={f}
-                  required={fieldState(f, relevantAnswers).required}
-                  value={
-                    f.config?.calculated
-                      ? calculated.values[f.field_key]
-                      : answers[f.field_key]
-                  }
-                  error={errors[f.field_key]}
-                  change={(value: any) => {
-                    setAnswers({ ...answers, [f.field_key]: value });
-                    setErrors({ ...errors, [f.field_key]: undefined });
-                  }}
-                />
-              ))}
+              {currentStep.items.map((item, itemIndex) => item.kind === "field" ? (fieldState(item.value, relevantAnswers).visible ? <Question key={item.value.id} field={item.value} required={fieldState(item.value, relevantAnswers).required} value={answers[item.value.field_key]} error={errors[item.value.field_key]} change={(value: any) => { setAnswers({ ...answers, [item.value.field_key]: value }); setErrors({ ...errors, [item.value.field_key]: undefined }); }}/> : null) : (groupActive(item.value) ? <RepeatingGroupForm key={item.value.id} tourTarget={itemIndex === 0} group={item.value} items={answers[item.value.group_key] || []} calculatedItems={calculated.groups[item.value.group_key] || []} calculationErrors={calculated.errors || {}} error={errors[item.value.group_key]} add={() => addItem(item.value)} remove={(i: number) => setItems(item.value, (answers[item.value.group_key] || []).filter((_: any, n: number) => n !== i))} move={(i: number, o: number) => moveItem(item.value, i, o)} change={(i: number, k: string, v: any) => changeItem(item.value, i, k, v)}/> : null))}
             </fieldset>}
-          {(currentStep?.groups || [])
-            .filter(groupActive)
-            .map((g: any, groupIndex: number) => (
-              <RepeatingGroupForm
-                key={g.id}
-                tourTarget={groupIndex === 0}
-                group={g}
-                items={answers[g.group_key] || []}
-                calculatedItems={calculated.groups[g.group_key] || []}
-                calculationErrors={calculated.errors || {}}
-                error={errors[g.group_key]}
-                add={() => addItem(g)}
-                remove={(i: number) =>
-                  setItems(
-                    g,
-                    (answers[g.group_key] || []).filter(
-                      (_: any, n: number) => n !== i,
-                    ),
-                  )
-                }
-                move={(i: number, o: number) => moveItem(g, i, o)}
-                change={(i: number, k: string, v: any) =>
-                  changeItem(g, i, k, v)
-                }
-              />
-            ))}
           </>}
           <div className="form-actions" data-tour="q-actions">
             {review && <button type="button" className="secondary" onClick={() => setReview(false)}><ArrowLeft size={16}/>Вернуться к анкете</button>}
@@ -546,6 +504,7 @@ export function RepeatingGroupForm({
             {group.fields.map((f: any) => (
               <Question
                 key={f.id}
+                inputId={`field-${f.id}-${item._id || index}`}
                 field={f}
                 required={f.required}
                 value={
@@ -603,8 +562,8 @@ function selectLabel(value: string): string {
   return SELECT_LABELS[value] || value;
 }
 
-export function Question({ field, value, error, change, required }: any) {
-  let id = `field-${field.id}`,
+export function Question({ field, value, error, change, required, inputId }: any) {
+  let id = inputId || `field-${field.id}`,
     help = questionHelp(field),
     helpId = help.help ? `${id}-help` : undefined,
     describedBy = [helpId, error ? `${id}-error` : undefined].filter(Boolean).join(" ") || undefined,

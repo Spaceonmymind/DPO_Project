@@ -64,6 +64,7 @@ const OUTPUT_FORMATS: any = {
   DATE_MONTH_SHORT: "10 января 2000 г.",
   GENITIVE: "Родительный падеж",
   PERCENT: "Процент",
+  VALUE_MAPPING: "Свой текст для каждого варианта ответа",
 };
 const blank = (position = 1) => ({
   field_key: "",
@@ -96,7 +97,32 @@ const blank = (position = 1) => ({
   separator: "; ",
 });
 const parseOptionText = (text: string) => text.split(",").map((value) => value.trim()).filter(Boolean);
-const bindingFormats = (question: any) => Object.entries(OUTPUT_FORMATS).filter(([key]) => key !== "GENITIVE" && key !== "DATE_MONTH_SHORT" || key === "GENITIVE" && !!question?.config?.option_items?.length || key === "DATE_MONTH_SHORT" && question?.field_type === "DATE");
+const bindingFormats = (question: any) => Object.entries(OUTPUT_FORMATS).filter(([key]) => key !== "GENITIVE" && key !== "DATE_MONTH_SHORT" && key !== "VALUE_MAPPING" || key === "GENITIVE" && !!question?.config?.option_items?.length || key === "DATE_MONTH_SHORT" && question?.field_type === "DATE" || key === "VALUE_MAPPING" && question?.field_type === "SINGLE_SELECT");
+const bindingChoices = (question: any): {key: string; label: string}[] => question?.config?.option_items?.length ? question.config.option_items : (question?.config?.options || []).map((label: string) => ({ key: label, label }));
+const mappingOptions = (question: any, previous: any = {}) => ({ value_map: previous.value_map || {}, option_labels: Object.fromEntries(bindingChoices(question).map(item => [item.key, item.label])) });
+function ValueMappingFields({ question, options, onChange, disabled = false }: { question: any; options: any; onChange: (options: any) => void; disabled?: boolean }) {
+  const choices = bindingChoices(question), map = options?.value_map || {}, labels = options?.option_labels || {};
+  const [previewKey, setPreviewKey] = useState(choices[0]?.key || "");
+  const missing = choices.filter(item => !Object.prototype.hasOwnProperty.call(map, item.key));
+  const stale = Object.keys(map).filter(key => !choices.some(item => item.key === key));
+  const renamed = choices.filter(item => labels[item.key] && labels[item.key] !== item.label);
+  return <div className="binding-value-mapping">
+    <p>Текст настраивается только для этой привязки. Отсутствующее соответствие выводит обычный ответ.</p>
+    {choices.map(item => <div className="binding-value-mapping-row" key={item.key}>
+      <span>{item.label}</span>
+      <label><input type="checkbox" disabled={disabled} checked={Object.prototype.hasOwnProperty.call(map, item.key)} onChange={event => { const next = { ...map }; if (event.target.checked) next[item.key] = ""; else delete next[item.key]; onChange({ value_map: next, option_labels: labels }); }}/>Свой текст</label>
+      <textarea aria-label={`Текст для «${item.label}»`} disabled={disabled || !Object.prototype.hasOwnProperty.call(map, item.key)} value={map[item.key] ?? ""} onChange={event => onChange({ value_map: { ...map, [item.key]: event.target.value }, option_labels: labels })}/>
+    </div>)}
+    {(missing.length > 0 || stale.length > 0 || renamed.length > 0) && <p className="binding-value-mapping-warning" role="status">{missing.length > 0 && `Без соответствия: ${missing.map(item => item.label).join(", ")}. `}{stale.length > 0 && `Удалённые варианты: ${stale.join(", ")}. `}{renamed.length > 0 && `Переименованы: ${renamed.map(item => item.label).join(", ")}.`}</p>}
+    {!disabled && stale.length > 0 && <button type="button" className="secondary" onClick={() => onChange({ value_map: Object.fromEntries(Object.entries(map).filter(([key]) => choices.some(item => item.key === key))), option_labels: Object.fromEntries(Object.entries(labels).filter(([key]) => choices.some(item => item.key === key))) })}>Убрать удалённые варианты</button>}
+    {!disabled && renamed.length > 0 && <button type="button" className="secondary" onClick={() => onChange({ value_map: map, option_labels: Object.fromEntries(choices.map(item => [item.key, item.label])) })}>Подтвердить новые названия</button>}
+    {choices.length > 0 && <div className="binding-value-mapping-preview"><label>Предпросмотр для варианта<select value={previewKey} onChange={event => setPreviewKey(event.target.value)}>{choices.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label><output>{Object.prototype.hasOwnProperty.call(map, previewKey) && (!labels[previewKey] || labels[previewKey] === choices.find(item => item.key === previewKey)?.label) ? map[previewKey] || "(пустая строка)" : choices.find(item => item.key === previewKey)?.label || ""}</output></div>}
+  </div>;
+}
+function SavedBindingValueMapping({ binding, question, save, disabled }: { binding: any; question: any; save: (options: any) => void; disabled: boolean }) {
+  const [options, setOptions] = useState(() => binding.format_config?.options || mappingOptions(question));
+  return <div className="binding-value-mapping-settings"><ValueMappingFields question={question} options={options} onChange={setOptions} disabled={disabled}/>{!disabled && <button type="button" className="secondary" onClick={() => save(options)}>Сохранить соответствия</button>}</div>;
+}
 const newOption = () => ({ key: `option_${Math.random().toString(36).slice(2, 10)}`, label: "" });
 function conditionFieldKeys(node: any): string[] {
   if (!node || typeof node !== "object") return [];
@@ -648,12 +674,13 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       setPendingFieldDelete({ ...item, dependencies });
     });
   }
-  async function changeBindingFormat(binding: any, output_format: string) {
+  async function changeBindingFormat(binding: any, output_format: string, format_options?: any) {
     await run(async () => {
+      const question = schema?.fields?.find((item: any) => item.id === binding.field_id);
       const saved = await api(`/document-templates/${selected.id}/versions/${version.id}/bindings/${binding.id}/format`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ output_format, format_options: binding.format_config?.options || { precision: 2, rounding: "HALF_UP" } }),
+        body: JSON.stringify({ output_format, format_options: format_options ?? (output_format === "VALUE_MAPPING" ? mappingOptions(question, binding.format_config?.options) : { precision: 2, rounding: "HALF_UP" }) }),
       });
       if (!saved?.id) throw new Error("Сервер не подтвердил формат привязки.");
       setBindings((current: any[]) => current.map(item => item.id === saved.id ? saved : item));
@@ -811,6 +838,9 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       row_count: 1,
       source_repetitions: 1,
       visible_when: null,
+      questionnaire_section: "Общие вопросы",
+      questionnaire_after_position: null,
+      questionnaire_after_field_id: null,
     });
   }
   function chooseRepeatingBlock(locator:string) {
@@ -824,6 +854,9 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
         path = `/document-templates/${selected.id}/versions/${version.id}/repeating-groups${editing ? "/" + editing : ""}`;
       let payload = { ...groupDraft };
       payload.stage_ids = groupDraft.stage_ids || groupDraft.config?.stage_ids || [];
+      payload.questionnaire_section = groupDraft.questionnaire_section ?? groupDraft.config?.group ?? "Общие вопросы";
+      payload.questionnaire_after_position = groupDraft.questionnaire_after_position !== undefined ? groupDraft.questionnaire_after_position : groupDraft.config?.questionnaire_after_position ?? null;
+      payload.questionnaire_after_field_id = groupDraft.questionnaire_after_field_id !== undefined ? groupDraft.questionnaire_after_field_id : groupDraft.config?.questionnaire_after_field_id ?? null;
       delete payload.id;
       delete payload.fields;
       delete payload.locator;
@@ -1038,13 +1071,13 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
   const stagePicker = (selectedIds: string[], change: (ids: string[]) => void, label = "Этапы договора") => contractStages.length > 0 && <fieldset className="contract-stage-picker"><legend>{label}</legend><p>Без выбора — для всех этапов.</p>{contractStages.map(item => <label key={item.id}><input type="checkbox" disabled={version?.status !== "DRAFT"} checked={selectedIds.includes(item.id)} onChange={event => change(event.target.checked ? [...selectedIds, item.id] : selectedIds.filter(id => id !== item.id))}/>{item.name}{item.status !== "ACTIVE" ? " · неактивен" : ""}</label>)}</fieldset>;
   const questionGroup=(item:any)=>editing===item.id&&showFieldEditor ? field.group : item.config?.group || "Основные сведения";
   const savedQuestionGroup=(item:any)=>item.config?.group || "Основные сведения";
-  async function saveQuestionOrder(ids: string[]) {
+  async function saveQuestionOrder(ids: string[], groupUpdates: Record<string, string> = {}) {
     if (!selected || !version || !schema || busy) return;
     const current = schema.fields || [];
-    if (ids.every((id, index) => current[index]?.id === id)) return;
+    if (ids.every((id, index) => current[index]?.id === id) && !Object.keys(groupUpdates).length) return;
     await run(async () => {
       const result = await api(`/document-templates/${selected.id}/versions/${version.id}/fields/order`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ field_ids: ids }),
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ field_ids: ids, group_updates: groupUpdates }),
       });
       setSchema((old: any) => ({ ...old, fields: result.fields }));
       setNotice("Порядок вопросов сохранён.");
@@ -1054,12 +1087,23 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     const items: any[] = schema?.fields || [];
     const source = items.find(item => item.id === sourceId);
     const target = items.find(item => item.id === targetId);
-    if (!source || !target || sourceId === targetId || savedQuestionGroup(source) !== savedQuestionGroup(target)) return;
+    if (!source || !target || sourceId === targetId) return;
     const ids = items.map(item => item.id).filter(id => id !== sourceId);
     ids.splice(ids.indexOf(targetId) + (after ? 1 : 0), 0, sourceId);
-    const groupAt = (id: string) => savedQuestionGroup(items.find(item => item.id === id));
-    if (ids.some((id, index) => groupAt(id) !== groupAt(items[index].id))) return;
-    void saveQuestionOrder(ids);
+    const crossSection = savedQuestionGroup(source) !== savedQuestionGroup(target);
+    const groupUpdates = crossSection ? { [sourceId]: savedQuestionGroup(target) } : {};
+    if (crossSection) {
+      const groupAt = (id: string) => id === sourceId ? savedQuestionGroup(target) : savedQuestionGroup(items.find(item => item.id === id));
+      const names = [...new Set(ids.map(groupAt))];
+      void saveQuestionOrder(names.flatMap(name => ids.filter(id => groupAt(id) === name)), groupUpdates);
+    } else void saveQuestionOrder(ids);
+  }
+  function moveQuestionSection(name: string, offset: number) {
+    const items: any[] = schema?.fields || [];
+    const names = [...new Set(items.map(savedQuestionGroup))], index = names.indexOf(name), target = index + offset;
+    if (index < 0 || target < 0 || target >= names.length) return;
+    [names[index], names[target]] = [names[target], names[index]];
+    void saveQuestionOrder(names.flatMap(group => items.filter(item => savedQuestionGroup(item) === group).map(item => item.id)));
   }
   const questionActions = useRef({ editField });
   questionActions.current = { editField };
@@ -1072,35 +1116,41 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     for (const binding of bindings) if (binding.field_id) counts.set(binding.field_id, (counts.get(binding.field_id) || 0) + 1);
     return counts;
   }, [bindings]);
-  const questionCards = useMemo(() => filteredQuestions.map((item:any) => {
+  const questionSectionNames = useMemo(() => [...new Set((schema?.fields || []).map(savedQuestionGroup))], [schema?.fields]);
+  const questionCards = useMemo(() => filteredQuestions.flatMap((item:any, visibleIndex:number) => {
     const count = bindingCounts.get(item.id) || 0;
     const all: any[] = schema?.fields || [];
     const index = all.findIndex(question => question.id === item.id);
-    const canReorder = stage === 4 && version?.status === "DRAFT" && !questionQuery.trim() && !busy;
+    const canReorder = stage === 4 && version?.status === "DRAFT" && !questionQuery.trim() && !busy && !showFieldEditor;
     const previous = all[index - 1], next = all[index + 1];
     const same = (other: any) => other && savedQuestionGroup(other) === savedQuestionGroup(item);
     const marker = questionDrop?.id === item.id ? (questionDrop?.after ? "drop-after" : "drop-before") : "";
-    return <div key={item.id} className={`workspace-question-card ${marker} ${draggedQuestion === item.id ? "dragging" : ""}`} draggable={canReorder} onDragStart={event => {
+    const groupName = savedQuestionGroup(item), sectionIndex = questionSectionNames.indexOf(groupName);
+    const heading = visibleIndex === 0 || savedQuestionGroup(filteredQuestions[visibleIndex - 1]) !== groupName
+      ? <div key={`section-${groupName}-${visibleIndex}`} className="workspace-question-section"><b>{groupName}</b>{canReorder && <div><button type="button" aria-label={`Поднять раздел «${groupName}»`} disabled={sectionIndex === 0} onClick={() => moveQuestionSection(groupName, -1)}><ArrowUp size={13}/></button><button type="button" aria-label={`Опустить раздел «${groupName}»`} disabled={sectionIndex === questionSectionNames.length - 1} onClick={() => moveQuestionSection(groupName, 1)}><ArrowDown size={13}/></button></div>}</div> : null;
+    const card = <div key={item.id} className={`workspace-question-card ${marker} ${draggedQuestion === item.id ? "dragging" : ""}`} draggable={canReorder} onDragStart={event => {
       if (!canReorder) return;
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", item.id);
       setDraggedQuestion(item.id);
     }} onDragOver={event => {
-      const source = all.find(question => question.id === draggedQuestion);
-      if (!canReorder || !source || source.id === item.id || !same(source)) return;
+      const source = all.find(question => question.id === (event.dataTransfer.getData("text/plain") || draggedQuestion));
+      if (!canReorder || !source || source.id === item.id) return;
       event.preventDefault();
       const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.clientHeight / 2;
       setQuestionDrop(current => current?.id === item.id && current?.after === after ? current : { id: item.id, after });
     }} onDrop={event => {
       event.preventDefault();
       const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.clientHeight / 2;
-      if (draggedQuestion) moveQuestion(draggedQuestion, item.id, after);
+      const sourceId = event.dataTransfer.getData("text/plain") || draggedQuestion;
+      if (sourceId) moveQuestion(sourceId, item.id, after);
       setDraggedQuestion(null); setQuestionDrop(null);
     }} onDragEnd={() => { setDraggedQuestion(null); setQuestionDrop(null); }}>
       <button className={`workspace-question-open ${editing === item.id && showFieldEditor ? "active" : ""}`} type="button" onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>
       {canReorder && <div className="workspace-question-order"><GripVertical size={14} aria-hidden="true"/><button type="button" aria-label={`Переместить «${item.label}» вверх`} disabled={!same(previous)} onClick={() => moveQuestion(item.id, previous.id)}><ArrowUp size={13}/></button><button type="button" aria-label={`Переместить «${item.label}» вниз`} disabled={!same(next)} onClick={() => moveQuestion(item.id, next.id, true)}><ArrowDown size={13}/></button></div>}
     </div>;
-  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
+    return heading ? [heading, card] : [card];
+  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, questionSectionNames, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
   const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
   const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
   const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
@@ -1436,6 +1486,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
+                            {stage === 4 && version.status === "DRAFT" && !questionQuery.trim() && <p className="workspace-order-hint">Перетащите вопрос в нужное место или раздел. Стрелки меняют порядок вопросов и разделов.</p>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
                               {questionCards}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}
@@ -1511,7 +1562,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                 <blockquote>
                                   {selection.selected_text || "Пустая ячейка"}
                                 </blockquote>
-                                <QuestionCombobox fields={schema?.fields || []} selectedId={selection.field_id || ""} onSelect={field_id => setSelection((current: any) => current ? { ...current, field_id, output_format: bindingFormats(schema?.fields?.find((item:any) => item.id === field_id)).some(([key]) => key === current.output_format) ? current.output_format : "RAW" } : current)} onCreate={label => newField(label)}/>
+                                <QuestionCombobox fields={schema?.fields || []} selectedId={selection.field_id || ""} onSelect={field_id => setSelection((current: any) => { if (!current) return current; const valid = bindingFormats(schema?.fields?.find((item:any) => item.id === field_id)).some(([key]) => key === current.output_format); return { ...current, field_id, output_format: valid ? current.output_format : "RAW", format_options: valid ? current.format_options : { precision: 2, rounding: "HALF_UP" } }; })} onCreate={label => newField(label)}/>
                                 <label>
                                   Формат в документе
                                   <select
@@ -1520,38 +1571,14 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                       setSelection({
                                         ...selection,
                                         output_format: e.target.value,
-                                        format_options: {
-                                          precision: 2,
-                                          rounding: "HALF_UP",
-                                        },
+                                        format_options: e.target.value === "VALUE_MAPPING" ? mappingOptions(schema?.fields?.find((item:any) => item.id === selection.field_id), selection.format_options) : { precision: 2, rounding: "HALF_UP" },
                                       })
                                     }
                                   >
-                                    <option value="RAW">Как введено</option>
-                                    <option value="NUMBER">Число</option>
-                                    <option value="DECIMAL">
-                                      Десятичное число
-                                    </option>
-                                    <option value="MONEY">
-                                      Денежная сумма
-                                    </option>
-                                    <option value="MONEY_WITH_CURRENCY">
-                                      Сумма с руб.
-                                    </option>
-                                    <option value="MONEY_WORDS_RUB">
-                                      Сумма прописью
-                                    </option>
-                                    <option value="DATE">
-                                      Дата ДД.ММ.ГГГГ
-                                    </option>
-                                    <option value="DATE_WORDS">
-                                      Дата прописью
-                                    </option>
-                                    {schema?.fields?.find((item:any) => item.id === selection.field_id)?.field_type === "DATE" && <option value="DATE_MONTH_SHORT">10 января 2000 г.</option>}
-                                    {!!schema?.fields?.find((item:any) => item.id === selection.field_id)?.config?.option_items?.length && <option value="GENITIVE">Родительный падеж</option>}
-                                    <option value="PERCENT">Процент</option>
+                                    {bindingFormats(schema?.fields?.find((item:any) => item.id === selection.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}
                                   </select>
                                 </label>
+                                {selection.output_format === "VALUE_MAPPING" && <ValueMappingFields question={schema?.fields?.find((item:any) => item.id === selection.field_id)} options={selection.format_options} onChange={format_options => setSelection((current:any) => current ? { ...current, format_options } : current)}/>}
                                 {!selection.field_id && (
                                   <p className="selection-help">
                                     Выберите существующий вопрос или создайте новый для этого фрагмента.
@@ -1752,6 +1779,17 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                   }
                                 />
                               </label>
+                              <label>Раздел анкеты
+                                <input list="repeating-questionnaire-sections" value={groupDraft.questionnaire_section ?? groupDraft.config?.group ?? "Общие вопросы"} onChange={e => setGroupDraft({ ...groupDraft, questionnaire_section: e.target.value })}/>
+                                <datalist id="repeating-questionnaire-sections">{[...new Set((schema?.fields || []).map((field: any) => field.config?.group || "Общие вопросы"))].map((name: any) => <option key={name} value={name}/>)}</datalist>
+                              </label>
+                              <label>Показывать после вопроса
+                                <select value={(schema?.fields || []).find((field: any) => field.id === (groupDraft.questionnaire_after_field_id !== undefined ? groupDraft.questionnaire_after_field_id : groupDraft.config?.questionnaire_after_field_id))?.position ?? (groupDraft.questionnaire_after_position !== undefined ? groupDraft.questionnaire_after_position ?? "end" : groupDraft.config?.questionnaire_after_position ?? "end")} onChange={e => { const selected = (schema?.fields || []).find((field: any) => field.position === Number(e.target.value) && (field.config?.group || "Общие вопросы") === (groupDraft.questionnaire_section ?? groupDraft.config?.group ?? "Общие вопросы")); setGroupDraft({ ...groupDraft, questionnaire_after_position: selected?.position ?? (e.target.value === "0" ? 0 : null), questionnaire_after_field_id: selected?.id ?? null }); }}>
+                                  <option value="end">В конце раздела</option>
+                                  <option value="0">В начале раздела</option>
+                                  {(schema?.fields || []).filter((field: any) => (field.config?.group || "Общие вопросы") === (groupDraft.questionnaire_section ?? groupDraft.config?.group ?? "Общие вопросы")).map((field: any) => <option key={field.id} value={field.position}>После «{field.label}»</option>)}
+                                </select>
+                              </label>
                               <div className="repeat-limits">
                                 <label>
                                   Минимум
@@ -1842,7 +1880,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                         <aside ref={inspectorRef} data-tour="tpl-panel" className={`questionnaire-builder builder-stage-${stage} ${(selection || activeBinding || regionDraft || groupDraft) ? "has-context" : ""}`} aria-label="Панель настройки">
                           <div className="workspace-inspector-header"><span>Панель настройки</span><b>{activeBinding ? "Настроенная привязка" : selection ? "Привязка фрагмента" : regionDraft ? "Условная область" : groupDraft ? "Повторяемая группа" : showFieldEditor ? editing ? "Редактирование вопроса" : "Новый вопрос" : stage === 5 ? "Условия и таблицы" : stage === 3 ? "Привязки к Word" : "Настройка шаблона"}</b></div>
                           <div id="workspace-context-inspector" />
-                          {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{bindingFormats(schema?.fields.find((item:any) => item.id === activeBinding.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label><div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
+                          {activeBinding && <section className="workspace-active-binding"><p>Вопрос: <b>{schema?.fields.find((item:any) => item.id === activeBinding.field_id)?.label || "Без вопроса"}</b></p><blockquote>{activeBinding.selected_text}</blockquote><label>Формат вывода<select disabled={version.status !== "DRAFT" || busy} value={activeBinding.format_config?.format || "RAW"} onChange={(event) => changeBindingFormat(activeBinding, event.target.value)}>{bindingFormats(schema?.fields.find((item:any) => item.id === activeBinding.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}</select></label>{activeBinding.format_config?.format === "VALUE_MAPPING" && <SavedBindingValueMapping key={activeBinding.id} binding={activeBinding} question={schema?.fields.find((item:any) => item.id === activeBinding.field_id)} disabled={version.status !== "DRAFT" || busy} save={options => changeBindingFormat(activeBinding, "VALUE_MAPPING", options)}/>}<div><button type="button" className="secondary" onClick={() => setActiveBinding(null)}>Закрыть</button>{version.status === "DRAFT" && <button type="button" className="secondary" disabled={busy} onClick={() => unbind(activeBinding.id)}>Удалить привязку</button>}</div></section>}
                           {(stage === 3 || stage === 5) && !selection && !activeBinding && !regionDraft && !groupDraft && <p className="workspace-inspector-tip">Создайте вопрос анкеты или выделите фрагмент Word для привязки. Для условий и таблиц используйте действия у фрагментов документа.</p>}
                           {stage <= 2 && <div className="stage-guidance"><h3>{stage === 1 ? "Общие сведения" : "Исходный документ"}</h3><p>{stage === 1 ? "Проверьте название, категорию и статус версии." : "Читайте документ, используйте структуру слева и выделяйте нужный текст."}</p></div>}
                           <h3 className="panel-questionnaire">Вопросы анкеты</h3>
@@ -2102,6 +2140,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                       {bindingFormats(schema?.fields.find((item:any) => item.id === b.field_id)).map(([key, label]) => <option key={key} value={key}>{label as string}</option>)}
                                     </select>
                                   </label>
+                                  {b.format_config?.format === "VALUE_MAPPING" && <button type="button" className="secondary" onClick={() => setActiveBinding(b)}>Настроить текст вариантов</button>}
                                 </span>
                                 {version.status === "DRAFT" && (
                                   <button
@@ -2270,6 +2309,10 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                   }
                                 />
                               </label>
+                              <label>Подсказка к полю
+                                <textarea value={groupField.description || ""} maxLength={1000} onChange={e => setGroupField({ ...groupField, description: e.target.value })}/>
+                              </label>
+                              {(schema?.fields || []).some((field: any) => field.field_key === groupField.field_key && groupField.field_key) && <p role="status">В анкете есть отдельный вопрос с таким же ключом. Поле строки и обычный вопрос имеют разные ID и ответы; проверьте, нужен ли двойной ввод.</p>}
                               <label>
                                 Тип
                                 <select

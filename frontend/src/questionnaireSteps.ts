@@ -2,19 +2,37 @@ import { evaluateCondition, fieldState } from "./conditions";
 import { OTHER, choiceAnswer, choiceOtherValues, isStructuredChoice } from "./choices";
 import { characterRuleError } from "./textRules";
 
-export type QuestionnaireStep = { name: string; fields: any[]; groups: any[] };
+export type QuestionnaireItem = { kind: "field" | "group"; value: any };
+export type QuestionnaireStep = { name: string; fields: any[]; groups: any[]; items: QuestionnaireItem[] };
 
 export function questionnaireSteps(fields: any[], groups: any[] = []): QuestionnaireStep[] {
   const steps = new Map<string, QuestionnaireStep>();
   const add = (name: string) => {
-    if (!steps.has(name)) steps.set(name, { name, fields: [], groups: [] });
+    if (!steps.has(name)) steps.set(name, { name, fields: [], groups: [], items: [] });
     return steps.get(name)!;
   };
-  for (const field of [...fields].sort((a, b) => a.position - b.position || String(a.id).localeCompare(String(b.id)))) {
+  for (const field of [...fields].sort((a, b) => a.position - b.position)) {
     if (field.config?.calculated) continue;
-    add(field.config?.group?.trim() || "Общие вопросы").fields.push(field);
+    const step = add(field.config?.group?.trim() || "Общие вопросы");
+    step.fields.push(field);
+    step.items.push({ kind: "field", value: field });
   }
-  for (const group of [...groups].sort((a, b) => a.position - b.position || String(a.id).localeCompare(String(b.id)))) add(group.config?.group?.trim() || "Общие вопросы").groups.push(group);
+  for (const group of [...groups].sort((a, b) => a.position - b.position || String(a.id).localeCompare(String(b.id)))) {
+    const step = add(group.config?.group?.trim() || "Общие вопросы");
+    step.groups.push(group);
+    step.items.push({ kind: "group", value: group });
+  }
+  for (const step of steps.values()) {
+    const fieldPositions = new Map(step.fields.map((field: any) => [field.id, Number(field.position)]));
+    step.items.sort((a, b) => {
+    const position = (item: QuestionnaireItem) => {
+      if (item.kind === "field") return Number(item.value.position);
+      const anchor = fieldPositions.get(item.value.config?.questionnaire_after_field_id);
+      return anchor !== undefined ? anchor : item.value.config?.questionnaire_after_position == null ? Infinity : Number(item.value.config.questionnaire_after_position);
+    };
+    return position(a) - position(b) || (a.kind === b.kind ? Number(a.value.position) - Number(b.value.position) : a.kind === "field" ? -1 : 1);
+    });
+  }
   return [...steps.values()];
 }
 

@@ -16,7 +16,7 @@ test("large Word preview mounts distant blocks on demand and preserves visible i
     await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
     await page.locator(".preview-node").first().waitFor();
-    assert.equal(await page.locator(".workspace-question-list button").count(), 160);
+    assert.equal(await page.locator(".workspace-question-open").count(), 160);
     assert.ok(await page.locator(".preview-node").count() < 150);
     assert.equal(await page.locator(".docx-table").count(), 0);
     await page.locator(".workspace-word-outline summary").click();
@@ -40,11 +40,11 @@ test("large Word preview mounts distant blocks on demand and preserves visible i
     await page.locator('.docx-page [data-locator="word/document.xml#/p[1]"]').waitFor();
     await page.getByRole("tab", { name: "Вопросы" }).click();
     await page.evaluate(() => { window.__wordNode = document.querySelector('.docx-page [data-locator="word/document.xml#/p[1]"]'); });
-    await page.locator(".workspace-question-list button").first().click();
+    await page.locator(".workspace-question-open").first().click();
     assert.equal(await page.evaluate(() => window.__wordNode === document.querySelector('.docx-page [data-locator="word/document.xml#/p[1]"]')), true);
     await page.getByLabel("Найти вопрос").fill("Вопрос номер 160");
-    assert.equal(await page.locator(".workspace-question-list button").count(), 1);
-    await page.locator(".workspace-question-list button").click();
+    assert.equal(await page.locator(".workspace-question-open").count(), 1);
+    await page.locator(".workspace-question-open").click();
     assert.equal(await page.evaluate(() => window.__wordNode === document.querySelector('.docx-page [data-locator="word/document.xml#/p[1]"]')), true);
     await page.locator('.docx-page [data-locator="word/document.xml#/p[1]"]').evaluate(node => {
       const range = document.createRange(); range.selectNodeContents(node.firstChild); getSelection().removeAllRanges(); getSelection().addRange(range);

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import { existsSync } from 'node:fs';
+import { createServer } from 'vite';
+import { chromium } from 'playwright-core';
 
 const component=readFileSync(new URL('../src/TemplateAdmin.tsx',import.meta.url),'utf8');
 const catalog=readFileSync(new URL('../src/ContractCatalog.tsx',import.meta.url),'utf8');
@@ -17,11 +20,25 @@ test('template manager exposes catalog creation and version upload',()=>{
   assert.match(component,/accept="\.docx/);
 });
 
-test('template route opens only the DOCX constructor',()=>{
-  assert.match(component,/return <FormulaStatusProvider><TemplateBuilder api=\{api\} \/><\/FormulaStatusProvider>/);
-  assert.doesNotMatch(component,/template-mode-tabs|<ProductAdmin|Договорные продукты/);
-  assert.doesNotMatch(catalog,/contract-product-catalog|beginProduct/);
-  assert.match(catalog,/restoreProduct/);
+async function openConstructor() {
+  const server=await createServer({server:{host:'127.0.0.1',port:0},logLevel:'silent'});
+  await server.listen();
+  const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true,args:['--no-sandbox']});
+  const page=await browser.newPage({viewport:{width:1450,height:900}});
+  await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html`);
+  await page.getByRole('button',{name:/Тестовый договор/}).first().click();
+  await page.getByRole('button',{name:/Версия 1/}).first().click();
+  return {server,browser,page};
+}
+
+test('template route opens the DOCX constructor without a product switch', { skip: !existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') }, async()=>{
+  const {server,browser,page}=await openConstructor();
+  try {
+    assert.equal(await page.locator('.builder-grid').count(),1);
+    assert.equal(await page.locator('.template-mode-tabs').count(),0);
+    assert.equal(await page.getByRole('tab',{name:'Договорные продукты'}).count(),0);
+    assert.equal(await page.locator('.docx-page [data-locator]').count()>0,true);
+  } finally { await browser.close(); await server.close(); }
 });
 
 test('preview selection persists a structural locator instead of coordinates',()=>{
@@ -38,12 +55,17 @@ test('template page is role-gated in the application shell',()=>{
   assert.match(app,/route\s*===\s*["']\/templates["']/);
 });
 
-test('questionnaire builder supports field actions and multiple bindings',()=>{
-  assert.match(component,/fields/);
-  assert.match(component,/Изменить вопрос/);
-  assert.match(component,/Удалить привязку/);
-  assert.match(component,/occurrence_index/);
-  assert.match(component,/Проверить и опубликовать/);
+test('question editor and Word binding actions are available in the constructor', { skip: !existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') }, async()=>{
+  const {server,browser,page}=await openConstructor();
+  try {
+    await page.getByRole('navigation',{name:'Этапы настройки шаблона'}).getByRole('button',{name:/Вопросы анкеты/}).click();
+    await page.locator('.workspace-question-card').first().locator('.workspace-question-open').click();
+    assert.equal(await page.locator('.field-editor').count(),1);
+    assert.equal(await page.getByRole('button',{name:'Удалить вопрос'}).count(),1);
+    await page.getByRole('navigation',{name:'Этапы настройки шаблона'}).getByRole('button',{name:/Привязки к Word/}).click();
+    assert.equal(await page.getByText('Привязки',{exact:true}).count()>0,true);
+    assert.equal(await page.locator('.docx-page [data-locator]').count()>0,true);
+  } finally { await browser.close(); await server.close(); }
 });
 
 test('employee questionnaire is schema driven and restores drafts',()=>{
@@ -64,7 +86,7 @@ test('condition editor is visual, localized and supports boolean groups',()=>{
 });
 
 test('employee questionnaire reacts to conditions without dropping answers',()=>{
-  assert.match(catalog,/fieldState\(f,\s*answers\)\.visible/);
+  assert.match(catalog,/fieldState\(item\.value,\s*relevantAnswers\)\.visible/);
   assert.match(catalog,/setAnswers\(\{\s*\.\.\.answers/);
   assert.match(conditions,/EQUALS/);
   assert.match(conditions,/GREATER_OR_EQUAL/);

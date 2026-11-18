@@ -2210,6 +2210,78 @@ def test_publication_fingerprint_is_order_independent_and_tracks_generation_sett
         assert publication_fingerprint(session.get(TemplateVersion,uploaded['id']),session)!=expected
 
 
+def test_binding_value_mapping_is_per_occurrence_and_preserves_answers():
+    from app.contract_platform import publication_fingerprint
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'BINDING_VALUE_MAP')
+    document=Document()
+    for marker in ('FIRST','SECOND','THIRD','PLAIN'):document.add_paragraph(marker)
+    raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('mapping.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'period','label':'Периодичность','field_type':'SINGLE_SELECT','position':1,'required':True,'option_items':[{'key':'quarter','label':'Ежеквартально'},{'key':'year','label':'Ежегодно'}]})
+    assert field.status_code==201,field.text
+    field=field.json();nodes=client.get(base+'/preview',headers=headers).json()['nodes'];bindings=[]
+    for node in nodes:
+        text=node['text'];response=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':len(text),'selected_text':text})
+        assert response.status_code==201,response.text
+        bindings.append(response.json())
+    labels={'quarter':'Ежеквартально','year':'Ежегодно'}
+    texts=('ежеквартально','по окончании квартала','каждый квартал')
+    for binding,text in zip(bindings[:3],texts):
+        changed=client.patch(base+f"/bindings/{binding['id']}/format",headers=headers,json={'output_format':'VALUE_MAPPING','format_options':{'value_map':{'quarter':text},'option_labels':labels}})
+        assert changed.status_code==200,changed.text
+    assert client.patch(base+f"/bindings/{bindings[3]['id']}/format",headers=headers,json={'output_format':'VALUE_MAPPING','format_options':{'value_map':{'quarter':42}}}).status_code==422
+    with SessionLocal() as session:before=publication_fingerprint(session.get(TemplateVersion,uploaded.json()['id']),session)
+    changed=client.patch(base+f"/bindings/{bindings[1]['id']}/format",headers=headers,json={'output_format':'VALUE_MAPPING','format_options':{'value_map':{'quarter':'после квартала'},'option_labels':labels}})
+    assert changed.status_code==200
+    with SessionLocal() as session:assert publication_fingerprint(session.get(TemplateVersion,uploaded.json()['id']),session)!=before
+    assert client.patch(base+f"/bindings/{bindings[1]['id']}/format",headers=headers,json={'output_format':'VALUE_MAPPING','format_options':{'value_map':{'quarter':texts[1]},'option_labels':labels}}).status_code==200
+    loaded=client.get(base+'/bindings',headers=headers)
+    assert loaded.status_code==200 and next(item for item in loaded.json() if item['id']==bindings[1]['id'])['format_config']['options']['value_map']['quarter']==texts[1]
+    check=client.get(base+'/publication-check',headers=headers);assert check.status_code==200,check.text
+    assert not check.json()['errors'] and any('Не заданы соответствия' in item for item in check.json()['warnings'])
+    empty=client.patch(base+f"/bindings/{bindings[0]['id']}/format",headers=headers,json={'output_format':'VALUE_MAPPING','format_options':{'value_map':{'quarter':texts[0],'year':''},'option_labels':labels}})
+    assert empty.status_code==200,empty.text
+    year_test=client.post(base+'/test-drive',headers=headers,json={'answers':{'period':{'selected':['year'],'other_text':''}}})
+    assert year_test.status_code==201,year_test.text
+    year_doc=Document(io.BytesIO(client.get(year_test.json()['download_url'],headers=headers).content))
+    assert [item.text for item in year_doc.paragraphs]==['','Ежегодно','Ежегодно','Ежегодно']
+    test=client.post(base+'/test-drive',headers=headers,json={'answers':{'period':{'selected':['quarter'],'other_text':''}}})
+    assert test.status_code==201,test.text
+    def paragraphs(response):return [item.text for item in Document(io.BytesIO(response.content)).paragraphs]
+    assert paragraphs(client.get(test.json()['download_url'],headers=headers))==[*texts,'Ежеквартально']
+    published=client.post(base+'/publish',headers=headers);assert published.status_code==200,published.text
+    employee=TestClient(app);eh=auth(employee,'petrova');draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    draft_id=draft.json()['id'];saved=employee.patch(f'/api/v1/contract-drafts/{draft_id}/autosave',headers=eh,json={'answers':{'period':{'selected':['quarter'],'other_text':''}}})
+    assert saved.status_code==200,saved.text
+    assert saved.json()['answers']['period']['selected']==['quarter']
+    generated=employee.post(f'/api/v1/contract-drafts/{draft_id}/generate',headers=eh)
+    assert generated.status_code==201,generated.text
+    assert paragraphs(employee.get(generated.json()['download_url'],headers=eh))==[*texts,'Ежеквартально']
+    assert client.patch(base+f"/bindings/{bindings[0]['id']}/format",headers=headers,json={'output_format':'RAW'}).status_code==409
+    with SessionLocal() as session:
+        stored=session.query(DocumentBinding).filter_by(template_version_id=uploaded.json()['id']).order_by(DocumentBinding.occurrence_index).all()
+        assert len(stored)==4
+
+
+def test_binding_value_mapping_warns_on_removed_and_renamed_options():
+    from types import SimpleNamespace
+    from app.contract_platform import binding_mapping_warnings, formatted_bindings
+    field=SimpleNamespace(id='field',field_type='SINGLE_SELECT',config={'option_items':[{'key':'quarter','label':'Каждый квартал'},{'key':'year','label':'Ежегодно'}]})
+    binding=SimpleNamespace(id='binding',field_id='field',binding_key='period',format_config={'format':'VALUE_MAPPING','options':{'value_map':{'quarter':'по кварталам','removed':'старый текст'},'option_labels':{'quarter':'Ежеквартально','removed':'Удалённый'}}})
+    warnings=binding_mapping_warnings(binding,field)
+    assert any('Ежегодно' in item for item in warnings)
+    assert any('removed' in item for item in warnings)
+    assert any('Каждый квартал' in item for item in warnings)
+    assert formatted_bindings([binding],{'period':{'selected':['quarter'],'other_text':''}},[field])=={'binding':'Каждый квартал'}
+    assert formatted_bindings([binding],{'period':{'selected':['year'],'other_text':''}},[field])=={'binding':'Ежегодно'}
+    legacy=SimpleNamespace(id='legacy',field_id='old',binding_key='old_period',format_config={'format':'VALUE_MAPPING','options':{'value_map':{'Ежегодно':''}}})
+    old_field=SimpleNamespace(id='old',field_type='SINGLE_SELECT',config={'options':['Ежеквартально','Ежегодно']})
+    assert formatted_bindings([legacy],{'old_period':'Ежегодно'},[old_field])=={'legacy':''}
+
+
 def test_publication_rejects_binding_inside_hidden_word_field():
     document=Document();paragraph=document.add_paragraph()
     run=paragraph.add_run();begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');run._r.append(begin)
@@ -2301,9 +2373,13 @@ def test_question_order_is_atomic_persisted_and_preserves_bindings_and_condition
     assert binding.status_code==201,binding.text
     with SessionLocal() as session:before=publication_fingerprint(session.get(TemplateVersion,uploaded['id']),session)
     ids=[field['id'] for field in fields]
-    invalid=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[3],ids[0],ids[1],ids[2]]})
+    invalid=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[0],ids[3],ids[1],ids[2]]})
     assert invalid.status_code==422
+    assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':ids,'group_updates':{ids[0]:'   '}}).status_code==422
+    assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':ids,'group_updates':{'foreign':'Раздел А'}}).status_code==422
     assert [field['id'] for field in client.get(base+'/questionnaire',headers=headers).json()['fields']]==ids
+    moved_section=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[3],ids[0],ids[1],ids[2]]})
+    assert moved_section.status_code==200,moved_section.text
     changed=client.patch(base+'/fields/order',headers=headers,json={'field_ids':[ids[2],ids[0],ids[1],ids[3]]})
     assert changed.status_code==200,changed.text
     expected=[ids[2],ids[0],ids[1],ids[3]]
@@ -2321,6 +2397,44 @@ def test_question_order_is_atomic_persisted_and_preserves_bindings_and_condition
     assert draft.status_code==201,draft.text
     assert [field['id'] for field in draft.json()['schema']['fields']]==expected
     assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':ids}).status_code==409
+
+
+def test_question_order_moves_last_to_first_across_sections_and_employee_sees_it():
+    from app.contract_platform import stage_fields
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'ORDER_ACROSS_SECTIONS')
+    document=Document();document.add_paragraph('NAME');raw=io.BytesIO();document.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('order-sections.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    stage_a=manager.post(base+'/stages',headers=mh,json={'name':'Этап А'}).json()
+    stage_b=manager.post(base+'/stages',headers=mh,json={'name':'Этап Б'}).json()
+    specs=[('first','Первый','Раздел А',[]),('second','Второй','Раздел А',[stage_a['id']]),('third','Третий','Раздел А',[stage_b['id']]),('fourth','Четвёртый','Раздел Б',[]),('fifth','Пятый','Раздел Б',[stage_a['id']])]
+    fields=[]
+    for position,(key,label,group,stages) in enumerate(specs,1):
+        response=manager.post(base+'/fields',headers=mh,json={'field_key':key,'label':label,'field_type':'TEXT','position':position,'group':group,'stage_ids':stages})
+        assert response.status_code==201,response.text
+        fields.append(response.json())
+    node=manager.get(base+'/preview',headers=mh).json()['nodes'][0]
+    binding=manager.post(base+'/bindings',headers=mh,json={'field_id':fields[0]['id'],'locator':node['locator'],'start':0,'end':4,'selected_text':'NAME'}).json()
+    ids=[field['id'] for field in fields];order=[ids[4],*ids[:4]]
+    moved=manager.patch(base+'/fields/order',headers=mh,json={'field_ids':order,'group_updates':{ids[4]:'Раздел А'}})
+    assert moved.status_code==200,moved.text
+    assert [item['id'] for item in moved.json()['fields']]==order
+    assert moved.json()['fields'][0]['config']['group']=='Раздел А'
+    assert moved.json()['fields'][0]['config']['stage_ids']==[stage_a['id']]
+    assert manager.get(base+'/bindings',headers=mh).json()[0]['id']==binding['id']
+    reordered=manager.get(base+'/questionnaire',headers=mh).json()['fields']
+    assert [item['id'] for item in reordered]==order
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    assert [item['id'] for item in draft.json()['schema']['fields']]==order
+    with SessionLocal() as session:
+        rows=session.query(QuestionnaireField).filter_by(schema_id=draft.json()['schema']['id']).order_by(QuestionnaireField.position).all()
+        assert [item.field_key for item in stage_fields(rows,[stage_a['id']],True)]==['fifth','first','second','fourth']
+        assert [item.field_key for item in stage_fields(rows,[stage_a['id'],stage_b['id']],True)]==['fifth','first','second','third','fourth']
+    assert manager.patch(base+'/fields/order',headers=mh,json={'field_ids':ids}).status_code==409
 
 
 def test_contract_stages_filter_questions_regions_and_restore_draft():
@@ -2424,8 +2538,10 @@ def test_contract_stage_excludes_unselected_repeating_row():
     field=manager.post(base+'/fields',headers=mh,json={'field_key':'name','label':'Имя','field_type':'TEXT','required':True,'position':1}).json()
     nodes=manager.get(base+'/preview',headers=mh).json()['nodes'];name_node=next(x for x in nodes if x['text']=='NAME');row_node=next(x for x in nodes if x['text']=='VALUE')
     assert manager.post(base+'/bindings',headers=mh,json={'field_id':field['id'],'locator':name_node['locator'],'start':0,'end':4,'selected_text':'NAME'}).status_code==201
-    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'services','name':'Услуги','position':1,'row_locator':row_node['locator'],'stage_ids':[a['id']]}).json()
-    row_field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=mh,json={'field_key':'value','label':'Услуга','field_type':'TEXT','required':True,'position':1}).json()
+    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'services','name':'Услуги','position':1,'min_items':1,'row_locator':row_node['locator'],'stage_ids':[a['id']],'questionnaire_section':'Основные сведения','questionnaire_after_position':1,'questionnaire_after_field_id':field['id']}).json()
+    assert group['config']['group']=='Основные сведения' and group['config']['questionnaire_after_position']==1 and group['config']['questionnaire_after_field_id']==field['id']
+    row_field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=mh,json={'field_key':'value','label':'Услуга','field_type':'TEXT','required':True,'position':1,'description':'Укажите услугу'}).json()
+    assert row_field['config']['description']=='Укажите услугу'
     assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{row_field['id']}/binding",headers=mh,json={'locator':row_node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).status_code==200
     assert manager.post(base+'/publish',headers=mh).status_code==200
     employee=TestClient(app);eh=auth(employee,'petrova');draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{draft['id']}"
@@ -2439,6 +2555,12 @@ def test_contract_stage_excludes_unselected_repeating_row():
     generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
     table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
     assert len(table.rows)==2 and table.cell(1,0).text=='Кейтеринг'
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
+    assert employee.get(path,headers=eh).json()['answers']['services'][0]['value']=='Кейтеринг'
+    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
+    assert len(Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0].rows)==1
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    assert employee.get(path,headers=eh).json()['answers']['services'][0]['value']=='Кейтеринг'
 
 
 def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():

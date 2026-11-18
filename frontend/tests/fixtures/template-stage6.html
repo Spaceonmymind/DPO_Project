@@ -16,14 +16,26 @@ const fields=[
   ...Array.from({length:156},(_,index)=>({id:`extra-${index}`,field_key:`extra_${index}`,label:`Дополнительный вопрос ${index+1}`,field_type:"TEXT",required:false,position:index+7,config:{group:"Дополнительно",placeholder:index===0?"Укажите краткое описание":""}})),
 ];
 const staged=new URLSearchParams(location.search).has("stages");
+if(new URLSearchParams(location.search).has("order-small")){
+  const keep=new Set(["payment","percent","extra-0","extra-1","extra-2"]);
+  fields.splice(0,fields.length,...fields.filter(field=>keep.has(field.id)));
+  fields.forEach((field,index)=>field.position=index+1);
+}
+if(new URLSearchParams(location.search).has("order-groups")){
+  const names=[...new Set(fields.map(field=>field.config.group))];
+  fields.sort((a,b)=>names.indexOf(a.config.group)-names.indexOf(b.config.group)||a.position-b.position);
+  fields.forEach((field,index)=>field.position=index+1);
+}
+const savedGroups=JSON.parse(localStorage.getItem("question-group-fixture")||"{}");
+fields.forEach(field=>{if(savedGroups[field.id])field.config.group=savedGroups[field.id];});
 const contractStages=staged?JSON.parse(localStorage.getItem("contract-stages-fixture")||"null")||[{id:"stage-a",name:"Подготовка",description:"Первый этап",position:1,status:"ACTIVE"},{id:"stage-b",name:"Проведение",description:"Второй этап",position:2,status:"ACTIVE"}]:[];
 const persistStages=()=>{if(new URLSearchParams(location.search).has("persist-stages"))localStorage.setItem("contract-stages-fixture",JSON.stringify(contractStages));};
-if(staged){fields.find(field=>field.id==="percent").config.stage_ids=["stage-a"];fields.find(field=>field.id==="services").config.stage_ids=["stage-b"];}
+if(staged){const percent=fields.find(field=>field.id==="percent"),services=fields.find(field=>field.id==="services");if(percent)percent.config.stage_ids=["stage-a"];if(services)services.config.stage_ids=["stage-b"];}
 const savedOrder=JSON.parse(localStorage.getItem("question-order-fixture")||"null");
 if(savedOrder){const index=new Map(savedOrder.map((id,position)=>[id,position]));fields.sort((a,b)=>(index.get(a.id)??a.position)-(index.get(b.id)??b.position));fields.forEach((field,position)=>field.position=position+1);}
 const group={id:"group-1",group_key:"extras",name:"Иные услуги",required:false,min_items:0,max_items:5,position:1,config:{group:"Дополнительно"},fields:[{id:"row-description",field_key:"description",label:"Описание услуги",field_type:"TEXT",required:true,position:1,config:{}}]};
 const nodes=Array.from({length:3500},(_,index)=>({locator:`word/document.xml#/p[${index+1}]`,kind:"paragraph",text:`Фрагмент ${index+1}`}));
-window.__previewRequests=0;window.__testAnswers=null;window.__testStageIds=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;window.__orderCalls=0;
+window.__previewRequests=0;window.__testAnswers=null;window.__testStageIds=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;window.__orderCalls=0;window.__orderPayloads=[];
 const api=async(path,options={})=>{
   if(path==="/requisite-sets?include_archived=true")return [];
   if(path==="/document-templates")return [template];
@@ -35,11 +47,13 @@ const api=async(path,options={})=>{
   if(/\/stages\/[^/]+$/.test(path)&&options.method==="PATCH"){const item=contractStages.find(stage=>path.endsWith(stage.id));Object.assign(item,JSON.parse(options.body));persistStages();return item;}
   if(/\/stages\/[^/]+$/.test(path)&&options.method==="DELETE"){contractStages.splice(contractStages.findIndex(stage=>path.endsWith(stage.id)),1);persistStages();return null;}
   if(path.endsWith("/fields/order")&&options.method==="PATCH"){
-    const {field_ids}=JSON.parse(options.body);window.__orderCalls++;
+    const {field_ids,group_updates={}}=JSON.parse(options.body);window.__orderCalls++;window.__orderPayloads.push({field_ids,group_updates});
     const byId=new Map(fields.map(field=>[field.id,field]));
     fields.splice(0,fields.length,...field_ids.map(id=>byId.get(id)));
+    for(const [id,group] of Object.entries(group_updates))byId.get(id).config.group=group;
     fields.forEach((field,index)=>field.position=index+1);
     localStorage.setItem("question-order-fixture",JSON.stringify(field_ids));
+    localStorage.setItem("question-group-fixture",JSON.stringify({...JSON.parse(localStorage.getItem("question-group-fixture")||"{}"),...group_updates}));
     return{fields:[...fields]};
   }
   if(path.endsWith("/repeating-groups"))return[group];

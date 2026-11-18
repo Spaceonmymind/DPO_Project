@@ -53,16 +53,12 @@ export function TemplateQuestionnairePreview({ schema, answers, change, selected
       {Object.entries(errors).some(([, message]) => !!message) && <div className="platform-error" role="alert"><b>Проверьте ответы:</b><ul>{Object.entries(errors).filter(([, message]) => !!message).map(([key, message]) => <li key={key}><b>{fields.find((field: any) => field.field_key === key)?.label || groups.find((group: any) => group.group_key === key)?.name || key}</b>: {message}</li>)}</ul></div>}
       <div className="dynamic-form" data-tour="tpl-preview-questionnaire">
         {current ? <fieldset key={current.name}><legend>{current.name}</legend>
-          {current.fields.filter(field => fieldState(field, relevantAnswers).visible).map((field: any) => <Question key={field.id} field={field} value={field.config?.calculated ? calculated.values[field.field_key] : answers[field.field_key]} required={fieldState(field, relevantAnswers).required} error={errors[field.field_key]} change={(value: any) => setValue(field.field_key, value)}/>)}
+          {current.items.map((item, index) => item.kind === "field" ? (fieldState(item.value, relevantAnswers).visible ? <Question key={item.value.id} field={item.value} value={answers[item.value.field_key]} required={fieldState(item.value, relevantAnswers).required} error={errors[item.value.field_key]} change={(value: any) => setValue(item.value.field_key, value)}/> : null) : (evaluateCondition(item.value.config?.visible_when, activeAnswers) ? <RepeatingGroupForm key={item.value.id} group={item.value} tourTarget={index === 0} items={answers[item.value.group_key] || []} calculatedItems={calculated.groups[item.value.group_key] || []} calculationErrors={calculated.errors} error={errors[item.value.group_key]}
+            add={() => { const items = answers[item.value.group_key] || []; if (items.length < item.value.max_items) setItems(item.value, [...items, { _id: newRowId() }]); }}
+            remove={(position: number) => setItems(item.value, (answers[item.value.group_key] || []).filter((_: any, itemIndex: number) => itemIndex !== position))}
+            move={(position: number, offset: number) => { const next = [...(answers[item.value.group_key] || [])], target = position + offset; if (target < 0 || target >= next.length) return; [next[position], next[target]] = [next[target], next[position]]; setItems(item.value, next); }}
+            change={(position: number, key: string, value: any) => setItems(item.value, (answers[item.value.group_key] || []).map((row: any, itemIndex: number) => itemIndex === position ? { ...row, [key]: value } : row))}/> : null))}
         </fieldset> : <div className="template-questionnaire-empty">В этой версии пока нет вопросов. Добавьте их на шаге «Вопросы анкеты».</div>}
-        {(current?.groups || []).filter((group: any) => evaluateCondition(group.config?.visible_when, activeAnswers)).map((group: any, index: number) => {
-          const items = answers[group.group_key] || [];
-          return <RepeatingGroupForm key={group.id} group={group} tourTarget={index === 0} items={items} calculatedItems={calculated.groups[group.group_key] || []} calculationErrors={calculated.errors} error={errors[group.group_key]}
-            add={() => { if (items.length < group.max_items) setItems(group, [...items, { _id: newRowId() }]); }}
-            remove={(position: number) => setItems(group, items.filter((_: any, index: number) => index !== position))}
-            move={(position: number, offset: number) => { const next = [...items], target = position + offset; if (target < 0 || target >= next.length) return; [next[position], next[target]] = [next[target], next[position]]; setItems(group, next); }}
-            change={(position: number, key: string, value: any) => setItems(group, items.map((item: any, index: number) => index === position ? { ...item, [key]: value } : item))}/>;
-        })}
       </div>
       {document && <a className="document-ready" href={document.download_url}><FileText size={20}/><span><b>Тестовый DOCX готов</b><small>Скачайте документ и проверьте результат</small></span><Download size={20}/></a>}
       <footer className="template-questionnaire-actions">

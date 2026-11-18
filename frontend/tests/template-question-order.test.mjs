@@ -46,6 +46,37 @@ test("150+ questions reorder by buttons and drag, persist after reload, and matc
   } finally { await browser.close(); await server.close(); }
 });
 
+test("sections move and a question crosses sections without losing saved order", { skip: !existsSync(chromePath), timeout: 60000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+    const url = `${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?order-groups=1&order-small=1&stages=1`;
+    await openBuilder(page, url);
+    await page.getByRole("button", { name: "Поднять раздел «Дополнительно»" }).click();
+    await page.waitForFunction(() => window.__orderCalls === 1);
+    assert.deepEqual(await page.locator(".workspace-question-section b").allTextContents(), ["Дополнительно", "Оплата"]);
+    const source = page.locator(".workspace-question-card").filter({ has: page.getByText("Дополнительный вопрос 1", { exact: true }) });
+    const target = page.locator(".workspace-question-card").filter({ has: page.getByText("Порядок оплаты", { exact: true }) });
+    assert.equal(await source.count(), 1);
+    assert.equal(await source.locator(".workspace-question-open b").textContent(), "Дополнительный вопрос 1");
+    await source.evaluate(node => { window.__questionDrag = new DataTransfer(); node.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: window.__questionDrag })); });
+    await target.evaluate(node => { node.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: window.__questionDrag, clientY: node.getBoundingClientRect().top + 5 })); node.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: window.__questionDrag, clientY: node.getBoundingClientRect().top + 5 })); });
+    await page.waitForFunction(() => window.__orderCalls === 2);
+    assert.match(await source.locator(".workspace-question-open span").textContent(), /Оплата/, JSON.stringify(await page.evaluate(() => window.__orderPayloads)));
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("question-order-fixture")));
+    assert.ok(saved.indexOf("extra-0") < saved.indexOf("payment"));
+    await openBuilder(page, url);
+    assert.match(await page.locator(".workspace-question-card").filter({ has: page.getByText("Дополнительный вопрос 1", { exact: true }) }).locator(".workspace-question-open span").textContent(), /Оплата/);
+    assert.deepEqual(await page.locator(".workspace-question-section b").allTextContents(), ["Дополнительно", "Оплата"]);
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Проверка и публикация/ }).click();
+    await page.getByRole("navigation", { name: "Разделы анкеты" }).getByRole("button", { name: /Оплата/ }).click();
+    const preview = await page.locator(".dynamic-form").innerText();
+    assert.ok(preview.indexOf("Дополнительный вопрос 1") < preview.indexOf("Порядок оплаты"));
+  } finally { await browser.close(); await server.close(); }
+});
+
 test("help is above inputs and stays visible for text, date, number and choices", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

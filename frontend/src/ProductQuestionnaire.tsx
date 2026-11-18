@@ -44,7 +44,7 @@ export function ProductQuestionnaire({ api, initial, close, reload }: any) {
   const effectiveVariant = { ...variant };
   for (const mapping of draft.selected_variant?.mappings || []) effectiveVariant[mapping.target_field_key] = common[mapping.product_field_key];
   const calculated = schema ? calculateAnswers(schema, effectiveVariant) : { values: {}, groups: {}, errors: {} };
-  const commonStep = { name: "Общие сведения и применимость", fields: draft.common_fields || [], groups: [] };
+  const commonStep = { name: "Общие сведения и применимость", fields: draft.common_fields || [], groups: [], items: [] };
   const variantSteps = decision.state === "SELECTED" && schema ? questionnaireSteps(schema.fields.filter((field: any) => !draft.mapped_field_keys?.includes(field.field_key)), schema.repeating_groups || []) : [];
   const steps = [commonStep, ...variantSteps];
   const activeIndex = Math.min(stepIndex, steps.length - 1);

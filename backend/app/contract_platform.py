@@ -133,6 +133,9 @@ def field_out(x): return {'id':x.id,'schema_id':x.schema_id,'field_key':x.field_
 def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.binding_key,'occurrence_index':x.occurrence_index,'selected_text':x.selected_text,'locator':x.locator,'format_config':x.format_config or {},'status':x.status}
 def requisite_set_out(x): return {'id':x.id,'name':x.name,'status':x.status,'entries':x.entries,'revision':x.revision,'updated_at':x.updated_at}
 def validate_binding_format(name,field):
+ if name=='VALUE_MAPPING':
+  if not field or field.field_type!='SINGLE_SELECT':raise CalculationError('Свой текст доступен только для вопроса с одним вариантом ответа')
+  return
  ValueFormatter.validate(name)
  if name=='GENITIVE' and (not field or field.field_type not in {'SINGLE_SELECT','MULTI_SELECT'} or not (field.config or {}).get('option_items')):
   raise CalculationError('Родительный падеж доступен для вопросов с настроенными вариантами ответа')
@@ -140,6 +143,26 @@ def validate_binding_format(name,field):
   raise CalculationError('Формат даты доступен для даты или текстового вопроса с датой')
  if name in {'NUMBER','DECIMAL','MONEY','MONEY_WITH_CURRENCY','MONEY_WORDS_RUB','PERCENT'} and (not field or field.field_type not in {'INTEGER','DECIMAL','MONEY','TEXT','MULTILINE_TEXT'}):
   raise CalculationError('Числовой формат доступен для числа, суммы или текстового вопроса с числом')
+def binding_option_labels(field):
+ cfg=field.config or {}
+ return {item['key']:item['label'] for item in cfg.get('option_items',[])} if cfg.get('option_items') else {value:value for value in cfg.get('options',[])}
+def validate_binding_options(name,options,field):
+ if name!='VALUE_MAPPING':ValueFormatter.validate_options(options);return
+ if not isinstance(options,dict) or set(options)-{'value_map','option_labels'}:raise CalculationError('Некорректные настройки пользовательского текста')
+ value_map=options.get('value_map',{});labels=options.get('option_labels',{})
+ if not isinstance(value_map,dict) or not isinstance(labels,dict) or len(value_map)>100 or len(labels)>100:raise CalculationError('Слишком много соответствий вариантов')
+ if any(not isinstance(key,str) or len(key)>200 or not isinstance(value,str) or len(value)>10000 for key,value in value_map.items()):raise CalculationError('Текст соответствия должен быть строкой не длиннее 10000 символов')
+ if any(not isinstance(key,str) or len(key)>200 or not isinstance(value,str) or len(value)>200 for key,value in labels.items()):raise CalculationError('Некорректные названия вариантов в настройках привязки')
+def binding_mapping_warnings(binding,field):
+ options=(binding.format_config or {}).get('options') or {};current=binding_option_labels(field);mapped=options.get('value_map') or {};snapshot=options.get('option_labels') or {}
+ warnings=[]
+ missing=[label for key,label in current.items() if key not in mapped]
+ stale=[key for key in mapped if key not in current]
+ renamed=[current[key] for key in snapshot if key in current and snapshot[key]!=current[key]]
+ if missing:warnings.append('Не заданы соответствия: '+', '.join(missing))
+ if stale:warnings.append('Остались соответствия удалённых вариантов: '+', '.join(stale))
+ if renamed:warnings.append('Изменились названия вариантов: '+', '.join(renamed))
+ return warnings
 def region_out(x): return {'id':x.id,'region_key':x.region_key,'region_type':x.region_type,'locator':x.locator,'include_when':x.include_when,'original_text':x.original_text,'status':x.status}
 def repeating_field_out(x): return {'id':x.id,'group_id':x.group_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator}
 def repeating_group_out(x,s): return {'id':x.id,'group_key':x.group_key,'name':x.name,'description':x.description,'min_items':x.min_items,'max_items':x.max_items,'required':x.required,'position':x.position,'config':x.config,'locator':x.locator,'status':x.status,'fields':[repeating_field_out(f) for f in s.query(RepeatingGroupField).filter_by(group_id=x.id).order_by(RepeatingGroupField.position).all()]}
@@ -164,6 +187,7 @@ class StageAssignmentPayload(BaseModel):
 
 class FieldOrderPayload(BaseModel):
  field_ids:list[str]=Field(max_length=1000)
+ group_updates:dict[str,str]=Field(default_factory=dict,max_length=1000)
 class BindingPayload(BaseModel): field_id:str|None=None; binding_key:str|None=None; locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000); output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class BindingFormatPayload(BaseModel): output_format:str='RAW'; format_options:dict[str,Any]=Field(default_factory=dict)
 class RegionPayload(BaseModel):
@@ -171,9 +195,9 @@ class RegionPayload(BaseModel):
 class RegionUpdatePayload(BaseModel):
  region_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); include_when:dict[str,Any]; stage_ids:list[str]=Field(default_factory=list,max_length=100)
 class RepeatingGroupPayload(BaseModel):
- group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; end_row_locator:str|None=None; row_count:int=Field(default=1,ge=1,le=20); source_repetitions:int=Field(default=1,ge=1,le=20); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100)
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); row_locator:str; end_row_locator:str|None=None; row_count:int=Field(default=1,ge=1,le=20); source_repetitions:int=Field(default=1,ge=1,le=20); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100); questionnaire_section:str=Field(default='Общие вопросы',max_length=160); questionnaire_after_position:int|None=Field(default=None,ge=0); questionnaire_after_field_id:str|None=None
 class RepeatingGroupUpdatePayload(BaseModel):
- group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100)
+ group_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); name:str=Field(min_length=2,max_length=240); description:str=Field(default='',max_length=2000); min_items:int=Field(default=0,ge=0,le=50); max_items:int=Field(default=10,ge=1,le=50); required:bool=False; position:int=Field(ge=1); visible_when:dict[str,Any]|None=None; stage_ids:list[str]=Field(default_factory=list,max_length=100); questionnaire_section:str=Field(default='Общие вопросы',max_length=160); questionnaire_after_position:int|None=Field(default=None,ge=0); questionnaire_after_field_id:str|None=None
 class RepeatingFieldPayload(BaseModel):
  field_key:str=Field(min_length=2,max_length=120,pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$'); label:str=Field(min_length=2,max_length=300); field_type:str; required:bool=False; position:int=Field(ge=1); description:str=Field(default='',max_length=1000); placeholder:str=Field(default='',max_length=300); validation:dict[str,Any]=Field(default_factory=dict); options:list[str]=Field(default_factory=list,max_length=100); calculated:bool=False; expression:dict[str,Any]|None=None; precision:int=Field(default=2,ge=0,le=12); rounding:str='HALF_UP'; output_format:str='RAW'
 class RepeatingBindingPayload(BaseModel): locator:str; start:int=Field(ge=0); end:int=Field(ge=0); selected_text:str=Field(default='',max_length=10000)
@@ -474,7 +498,12 @@ def formatted_bindings(bindings,values,fields=None):
  for binding in bindings:
   cfg=binding.format_config or {}; value=values.get(binding.binding_key,''); field=by_id.get(binding.field_id)
   structured_choice=field and field.field_type in {'SINGLE_SELECT','MULTI_SELECT'} and (field.config or {}).get('option_items')
-  result[binding.id]=choices.render(value,field.config or {},genitive=cfg.get('format')=='GENITIVE') if structured_choice else render_value(field,value) if field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list'))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
+  if cfg.get('format')=='VALUE_MAPPING':
+   key=choices.selected(value)[0] if structured_choice and choices.selected(value) else value
+   options=cfg.get('options') or {};mapped=options.get('value_map') or {};snapshot=options.get('option_labels') or {};current=binding_option_labels(field) if field else {}
+   approved=isinstance(key,str) and key in mapped and (key not in snapshot or snapshot[key]==current.get(key))
+   result[binding.id]=mapped[key] if approved else choices.render(value,field.config or {}) if structured_choice else str(value or '')
+  else:result[binding.id]=choices.render(value,field.config or {},genitive=cfg.get('format')=='GENITIVE') if structured_choice else render_value(field,value) if field and cfg.get('format','RAW')=='RAW' and (field.field_type in {'BOOLEAN','COMPOSITE'} or (field.field_type=='LIST' and cfg.get('render_list'))) else ValueFormatter.format(value,cfg.get('format','RAW'),cfg.get('options') or {})
  return result
 def validate_active_answers(fields,answers):
  errors={}
@@ -497,6 +526,7 @@ def validate_repeating_answers(groups,s,questionnaire_fields,answers,complete=Tr
  errors={}
  for group in groups:
   items=answers.get(group.group_key,[]); active=group_is_active(group,questionnaire_fields,answers)
+  if not active: continue
   if not isinstance(items,list): errors[group.group_key]=f'«{group.name}»: данные должны быть списком записей'; continue
   if len(items)>group.max_items: errors[group.group_key]=f'«{group.name}»: можно добавить не больше {group.max_items} записей'; continue
   minimum=max(group.min_items,1 if group.required else 0)
@@ -927,7 +957,8 @@ def publication_check(v,s):
    elif binding.binding_key!=known[binding.field_id].field_key: errors.append(f'Привязка «{binding.binding_key}» ссылается на другой ключ вопроса')
    else:
     try:
-     cfg=binding.format_config or {};validate_binding_format(cfg.get('format','RAW'),known[binding.field_id]);ValueFormatter.validate_options(cfg.get('options') or {})
+     cfg=binding.format_config or {};field=known[binding.field_id];validate_binding_format(cfg.get('format','RAW'),field);validate_binding_options(cfg.get('format','RAW'),cfg.get('options') or {},field)
+     if cfg.get('format')=='VALUE_MAPPING':warnings.extend(f'Привязка «{binding.binding_key}»: {message}' for message in binding_mapping_warnings(binding,field))
     except CalculationError as exc: errors.append(f'Привязка «{binding.binding_key}»: {exc}')
  if not bindings: warnings.append('В документе нет прямых привязок к вопросам')
  used={x.field_key for x in fields if x.id in {b.field_id for b in bindings}}
@@ -1458,15 +1489,25 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   by_id={field.id:field for field in fields}
   if len(p.field_ids)!=len(fields) or len(set(p.field_ids))!=len(fields) or set(p.field_ids)!=set(by_id):
    raise HTTPException(422,detail='Передайте все вопросы текущей версии без повторов')
-  groups=lambda ids:[(by_id[id].config or {}).get('group') or 'Основные сведения' for id in ids]
-  if groups(p.field_ids)!=groups([field.id for field in fields]):
-   raise HTTPException(422,detail='Перемещайте вопросы внутри раздела; смените раздел в настройках вопроса отдельно')
-  if p.field_ids==[field.id for field in fields]:return {'fields':[field_out(field) for field in fields]}
+  if set(p.group_updates)-set(by_id) or any(not isinstance(name,str) or not name.strip() or len(name.strip())>160 for name in p.group_updates.values()):
+   raise HTTPException(422,detail='Укажите существующие вопросы и непустые названия разделов до 160 символов')
+  group_at=lambda id:p.group_updates.get(id,(by_id[id].config or {}).get('group') or 'Основные сведения').strip()
+  final_groups=[group_at(id) for id in p.field_ids]
+  current_groups=[((field.config or {}).get('group') or 'Основные сведения').strip() for field in fields]
+  if final_groups!=current_groups:
+   seen=set();previous=None
+   for name in final_groups:
+    if name!=previous:
+     if name in seen:raise HTTPException(422,detail='Вопросы одного раздела должны идти подряд')
+     seen.add(name);previous=name
+  changed_groups={id:name.strip() for id,name in p.group_updates.items() if name.strip()!=((by_id[id].config or {}).get('group') or 'Основные сведения').strip()}
+  if p.field_ids==[field.id for field in fields] and not changed_groups:return {'fields':[field_out(field) for field in fields]}
   # Move all rows outside occupied positions before assigning the final order.
   offset=max((field.position for field in fields),default=0)+1
   try:
    for index,field in enumerate(fields):s.execute(update(QuestionnaireField).where(QuestionnaireField.id==field.id).values(position=offset+index))
    for index,id in enumerate(p.field_ids):s.execute(update(QuestionnaireField).where(QuestionnaireField.id==id).values(position=index+1))
+   for id,name in changed_groups.items():by_id[id].config={**(by_id[id].config or {}),'group':name}
    s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='QUESTIONS_REORDERED'))
    s.commit()
   except Exception:s.rollback();raise
@@ -1563,7 +1604,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if p.field_id and (not field or not schema or field.schema_id!=schema.id): raise HTTPException(404,detail='Поле анкеты не найдено')
   key=field.field_key if field else p.binding_key
   if not key: raise HTTPException(422,detail='Выберите поле анкеты')
-  try: validate_binding_format(p.output_format,field); ValueFormatter.validate_options(p.format_options); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+  try: validate_binding_format(p.output_format,field); validate_binding_options(p.output_format,p.format_options,field); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
@@ -1573,7 +1614,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def update_binding_format(tid:str,vid:str,bid:str,p:BindingFormatPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(DocumentBinding,bid)
   if not x or x.template_version_id!=v.id: raise HTTPException(404,detail='Привязка не найдена')
-  try: validate_binding_format(p.output_format,s.get(QuestionnaireField,x.field_id) if x.field_id else None); ValueFormatter.validate_options(p.format_options)
+  try:
+   field=s.get(QuestionnaireField,x.field_id) if x.field_id else None;validate_binding_format(p.output_format,field);validate_binding_options(p.output_format,p.format_options,field)
   except CalculationError as exc: raise HTTPException(422,detail=str(exc))
   x.format_config={'format':p.output_format,'options':p.format_options}; s.commit(); return binding_out(x)
  @r.delete(prefix+'/{tid}/versions/{vid}/bindings/{bid}',status_code=204)
@@ -1630,11 +1672,12 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if s.query(RepeatingGroup).filter_by(template_version_id=v.id,group_key=p.group_key).first(): raise HTTPException(409,detail='Группа с таким ключом уже существует')
   if s.query(RepeatingGroup).filter_by(template_version_id=v.id,position=p.position).first(): raise HTTPException(409,detail='Позиция группы уже занята')
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
+  if p.questionnaire_after_field_id and not any(f.id==p.questionnaire_after_field_id and (f.config or {}).get('group','Общие вопросы')==p.questionnaire_section for f in fields): raise HTTPException(422,detail='Вопрос для размещения группы не найден в выбранном разделе')
   try:
    if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
    locator=_resolve_repeating_row(safe_source(v),p.row_locator,v.structure_fingerprint,p.end_row_locator,p.row_count,p.source_repetitions)
   except (ConditionConfigurationError,ValueError) as exc: raise HTTPException(422,detail=str(exc))
-  x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when,'stage_ids':p.stage_ids},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
+  x=RepeatingGroup(template_version_id=v.id,group_key=p.group_key,name=p.name.strip(),description=p.description.strip(),min_items=p.min_items,max_items=p.max_items,required=p.required,position=p.position,config={'visible_when':p.visible_when,'stage_ids':p.stage_ids,'group':p.questionnaire_section.strip() or 'Общие вопросы','questionnaire_after_position':p.questionnaire_after_position,'questionnaire_after_field_id':p.questionnaire_after_field_id},locator=locator,created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='REPEATING_GROUP_CREATED',metadata_json={'group_id':x.id})); s.commit(); return repeating_group_out(x,s)
  @r.patch(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}')
  def update_repeating_group(tid:str,vid:str,gid:str,p:RepeatingGroupUpdatePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)
@@ -1645,10 +1688,11 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if duplicate: raise HTTPException(409,detail='Группа с таким ключом уже существует')
   if occupied: raise HTTPException(409,detail='Позиция группы уже занята')
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema_for(v.id,s).id).all()
+  if p.questionnaire_after_field_id and not any(f.id==p.questionnaire_after_field_id and (f.config or {}).get('group','Общие вопросы')==p.questionnaire_section for f in fields): raise HTTPException(422,detail='Вопрос для размещения группы не найден в выбранном разделе')
   try:
    if p.visible_when is not None: ConditionEngine.validate_condition(p.visible_when,fields)
   except ConditionConfigurationError as exc: raise HTTPException(422,detail=str(exc))
-  x.group_key=p.group_key; x.name=p.name.strip(); x.description=p.description.strip(); x.min_items=p.min_items; x.max_items=p.max_items; x.required=p.required; x.position=p.position; x.config={**(x.config or {}),'visible_when':p.visible_when,'stage_ids':p.stage_ids}; s.commit(); return repeating_group_out(x,s)
+  x.group_key=p.group_key; x.name=p.name.strip(); x.description=p.description.strip(); x.min_items=p.min_items; x.max_items=p.max_items; x.required=p.required; x.position=p.position; x.config={**(x.config or {}),'visible_when':p.visible_when,'stage_ids':p.stage_ids,'group':p.questionnaire_section.strip() or 'Общие вопросы','questionnaire_after_position':p.questionnaire_after_position,'questionnaire_after_field_id':p.questionnaire_after_field_id}; s.commit(); return repeating_group_out(x,s)
  @r.delete(prefix+'/{tid}/versions/{vid}/repeating-groups/{gid}',status_code=204)
  def delete_repeating_group(tid:str,vid:str,gid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(RepeatingGroup,gid)

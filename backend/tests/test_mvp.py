@@ -750,23 +750,159 @@ def test_fillin_result_replacement_is_narrow_and_flattens_only_the_edited_field(
     assert len(paragraph._p.findall('.//'+qn('w:fldChar')))==6
     first_end=source.index(' и ')
     for start,end in ((source.index('ПЕРВЫЙ')-1,source.index('ПЕРВЫЙ')+2),(first_end-2,first_end+1),(source.index('ПЕРВЫЙ'),second+2)):
-        with pytest.raises(ValueError,match='поля Word'):replace_range(copy.deepcopy(paragraph._p),start,end,'ОТКАЗ')
+        changed=copy.deepcopy(paragraph._p);replace_range(changed,start,end,'ОТКАЗ')
+        assert ''.join(node.text or '' for node in changed.findall('.//'+qn('w:t'))) == source[:start]+'ОТКАЗ'+source[end:]
     unsupported=Document().add_paragraph()
     begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');unsupported.add_run()._r.append(begin)
     code=OxmlElement('w:instrText');code.text=' DATE ';unsupported.add_run()._r.append(code)
     separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');unsupported.add_run()._r.append(separate)
     unsupported.add_run('01.01.2026')
     end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');unsupported.add_run()._r.append(end)
-    with pytest.raises(ValueError,match='поля Word'):replace_range(unsupported._p,0,10,'ОТКАЗ')
+    with pytest.raises(ValueError,match='Word'):replace_range(unsupported._p,0,10,'ОТКАЗ')
     simple=Document().add_paragraph()
     simple_field=OxmlElement('w:fldSimple');simple_field.set(qn('w:instr'),'DATE')
     simple_run=OxmlElement('w:r');simple_text=OxmlElement('w:t');simple_text.text='01.01.2026';simple_run.append(simple_text);simple_field.append(simple_run)
     simple._p.append(simple_field)
-    with pytest.raises(ValueError,match='поля Word'):replace_range(simple._p,0,10,'ОТКАЗ')
+    with pytest.raises(ValueError,match='Word'):replace_range(simple._p,0,10,'ОТКАЗ')
     instruction_only=Document().add_paragraph()
     begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');instruction_only.add_run()._r.append(begin)
     code=OxmlElement('w:instrText');code.text=' FILLIN "Скрыто" ';instruction_only.add_run()._r.append(code)
-    with pytest.raises(ValueError,match='поля Word'):replace_range(instruction_only._p,0,6,'ОТКАЗ')
+    with pytest.raises(ValueError,match='границы текста|Word'):replace_range(instruction_only._p,0,6,'ОТКАЗ')
+
+
+def test_word_range_preserves_exact_text_runs_spaces_punctuation_and_untouched_fields():
+    from app.contract_platform import replace_range
+    import copy
+    paragraph=Document().add_paragraph()
+    paragraph.add_run('Преамбула: ').bold=True
+    def field(result):
+        begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+        code=OxmlElement('w:instrText');code.text=' FILLIN "Данные" ';paragraph.add_run()._r.append(code)
+        separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+        paragraph.add_run(result[:len(result)//2])
+        if result=='[ФИО]':
+            bookmark=OxmlElement('w:bookmarkStart');bookmark.set(qn('w:id'),'31');bookmark.set(qn('w:name'),'signer');paragraph._p.append(bookmark)
+        paragraph.add_run(result[len(result)//2:])
+        if result=='[ФИО]':
+            bookmark=OxmlElement('w:bookmarkEnd');bookmark.set(qn('w:id'),'31');paragraph._p.append(bookmark)
+        end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    field('[ФИО]');paragraph.add_run(', ');field('[должность]');paragraph.add_run('! НЕ ТРОГАТЬ').bold=True
+    source=paragraph.text
+    cases=[
+        (source.index('Преамбула'),source.index(':')+1,'Введение',0),
+        (source.index('[ФИО]')-1,source.index('[ФИО]')+len('[ФИО]'),' Иванов',1),
+        (source.index('[ФИО]')+1,source.index(',')+2,'СИДОРОВ, ',1),
+        (source.index('[ФИО]'),source.index('[должность]')+len('[должность]'),'Иванов, директор',2),
+        (source.index(', '),source.index('[должность]'),' — ',0),
+        (source.index('[должность]')+1,source.index('!')+1,'директор!',1),
+    ]
+    for start,end,replacement,flattened in cases:
+        changed=copy.deepcopy(paragraph._p)
+        replace_range(changed,start,end,replacement)
+        result=''.join(node.text or '' for node in changed.findall('.//'+qn('w:t')))
+        assert result==source[:start]+replacement+source[end:]
+        assert len(changed.findall('.//'+qn('w:fldChar')))==6-3*flattened
+        assert len(changed.findall('.//'+qn('w:bookmarkStart')))==len(changed.findall('.//'+qn('w:bookmarkEnd')))==1
+        assert changed.findall('.//'+qn('w:b'))
+        assert any(node.get('{http://www.w3.org/XML/1998/namespace}space')=='preserve' for node in changed.findall('.//'+qn('w:t')) if (node.text or '').startswith(' ') or (node.text or '').endswith(' '))
+    nested=Document().add_paragraph()
+    for kind in ('begin','begin','separate'):
+        marker=OxmlElement('w:fldChar');marker.set(qn('w:fldCharType'),kind);nested.add_run()._r.append(marker)
+    nested.add_run('TEXT')
+    for _ in range(2):
+        marker=OxmlElement('w:fldChar');marker.set(qn('w:fldCharType'),'end');nested.add_run()._r.append(marker)
+    nested.add_run(' OUTSIDE')
+    with pytest.raises(ValueError,match='Word'):replace_range(copy.deepcopy(nested._p),0,4,'ОТКАЗ')
+    outside=copy.deepcopy(nested._p);replace_range(outside,5,12,'РЯДОМ')
+    assert ''.join(node.text or '' for node in outside.findall('.//'+qn('w:t')))=='TEXT РЯДОМ'
+    nested_text=Document().add_paragraph('A')
+    container=OxmlElement('w:hyperlink');run=OxmlElement('w:r');text=OxmlElement('w:t');text.text='НЕВИДИМО';run.append(text);container.append(run);nested_text._p.append(container)
+    nested_text.add_run('TARGET')
+    with pytest.raises(ValueError,match='координатах предпросмотра'):replace_range(nested_text._p,1,7,'ОТКАЗ')
+
+
+def test_existing_range_with_one_extra_character_before_fillin_works_in_conditional_docx():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FILLIN_CROSS_BOUNDARY')
+    document=Document();paragraph=document.add_paragraph();paragraph.add_run('X'*200);paragraph.add_run(' ')
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=' FILLIN "Подписант" ';paragraph.add_run()._r.append(code)
+    separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+    result='[должность и Ф.И.О. подписанта договора Заказчика]'
+    paragraph.add_run(result[:23]);paragraph.add_run(result[23:])
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    paragraph.add_run(', далее по тексту.')
+    raw=io.BytesIO();document.save(raw);original=raw.getvalue()
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('fillin.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    signer=client.post(base+'/fields',headers=headers,json={'field_key':'signer','label':'Подписант','field_type':'TEXT','position':1}).json()
+    included=client.post(base+'/fields',headers=headers,json={'field_key':'included','label':'Включить пункт','field_type':'BOOLEAN','position':2}).json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    assert node['text'][200:201+len(result)]==' '+result
+    linked=client.post(base+'/bindings',headers=headers,json={'field_id':signer['id'],'locator':node['locator'],'start':200,'end':201+len(result),'selected_text':' '+result})
+    assert linked.status_code==201,linked.text
+    region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'signer_clause','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'EQUALS','field_key':'included','value':True}})
+    assert region.status_code==201,region.text
+    for enabled in (True,False):
+        generated=client.post(base+'/test-drive',headers=headers,json={'answers':{'signer':' Иванов И.И.','included':enabled}})
+        assert generated.status_code==201,generated.text
+        output=Document(io.BytesIO(client.get(generated.json()['download_url'],headers=headers).content))
+        if enabled:
+            assert output.paragraphs[0].text=='X'*200+' Иванов И.И., далее по тексту.'
+            assert not output.paragraphs[0]._p.findall('.//'+qn('w:fldChar'))
+        else:assert not any('Иванов' in item.text for item in output.paragraphs)
+    from app.contract_platform import safe_source
+    with SessionLocal() as session:assert safe_source(session.get(TemplateVersion,version['id'])).read_bytes()==original
+
+
+def test_fillin_result_in_repeating_table_clones_remains_valid_docx(tmp_path):
+    from app.contract_platform import render_docx
+    from types import SimpleNamespace
+    document=Document();table=document.add_table(rows=3,cols=1)
+    table.cell(0,0).text='Заголовок';table.cell(2,0).text='Итого'
+    paragraph=table.cell(1,0).paragraphs[0]
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=' FILLIN "Строка" ';paragraph.add_run()._r.append(code)
+    separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+    paragraph.add_run('ITEM')
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    source=tmp_path/'source.docx';target=tmp_path/'rendered.docx';document.save(source);original=source.read_bytes()
+    part='word/document.xml';group=SimpleNamespace(id='group',group_key='lines',name='Строки',locator={'part':part,'table':1,'row':2,'row_count':1})
+    field=SimpleNamespace(field_key='value',field_type='TEXT',label='Значение',config={},locator={'node':f'{part}#/tbl[1]/tr[2]/tc[1]/p[1]','text_start':0,'text_end':4})
+    with patch('app.contract_platform.safe_source',return_value=source):
+        render_docx(SimpleNamespace(),[],{},target,repeating_groups=[group],repeating_values={'lines':[{'_id':'a','value':'Первая'},{'_id':'b','value':'Вторая'}]},repeating_fields={'group':[field]})
+    result=Document(target)
+    assert [row.cells[0].text for row in result.tables[0].rows]==['Заголовок','Первая','Вторая','Итого']
+    assert not result.tables[0]._tbl.findall('.//'+qn('w:fldChar'))
+    assert source.read_bytes()==original
+
+
+def test_conditional_run_can_remove_text_across_fillin_result_without_xml_damage():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FILLIN_RUN_REGION')
+    document=Document();paragraph=document.add_paragraph('До ')
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=' FILLIN "Фрагмент" ';paragraph.add_run()._r.append(code)
+    separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+    paragraph.add_run('FIELD')
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    paragraph.add_run(' после.');document.add_paragraph('NAME')
+    raw=io.BytesIO();document.save(raw)
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('run.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    response=client.post(base+'/fields',headers=headers,json={'field_key':'show','label':'Показывать','field_type':'BOOLEAN','position':1})
+    assert response.status_code==201,response.text
+    name=client.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','position':2})
+    assert name.status_code==201,name.text
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes'];node=nodes[0]
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':name.json()['id'],'locator':nodes[1]['locator'],'start':0,'end':4,'selected_text':'NAME'})
+    assert binding.status_code==201,binding.text
+    region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'optional_run','region_type':'CONDITIONAL_RUN','start_locator':node['locator'],'start':0,'end':len('До FIELD'),'selected_text':'До FIELD','include_when':{'operator':'EQUALS','field_key':'show','value':True}})
+    assert region.status_code==201,region.text
+    for show in (True,False):
+        made=client.post(base+'/test-drive',headers=headers,json={'answers':{'show':show,'name':'ТЕСТ'}})
+        assert made.status_code==201,made.text
+        output=Document(io.BytesIO(client.get(made.json()['download_url'],headers=headers).content))
+        assert output.paragraphs[0].text==('До FIELD после.' if show else ' после.')
+        assert len(output.paragraphs[0]._p.findall('.//'+qn('w:fldChar')))==(3 if show else 0)
 
 
 def test_conditional_row_alias_becomes_unresolved_after_anchor_rollback():
@@ -2395,9 +2531,16 @@ def test_publication_rejects_binding_inside_hidden_word_field():
     region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'hidden','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'NEVER'}})
     assert region.status_code==201,region.text
     binding=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':0,'end':6,'selected_text':'SECRET'})
-    assert binding.status_code==201,binding.text
+    assert binding.status_code==422 and 'Word' in binding.text,binding.text
+    from app.contract_platform import adapter, safe_source
+    with SessionLocal() as session:
+        version=session.get(TemplateVersion,uploaded['id'])
+        locator=adapter.get_structural_locator(safe_source(version),adapter.select_range(safe_source(version),node['locator'],0,6,'SECRET'))
+        session.add(DocumentBinding(template_version_id=uploaded['id'],field_id=field['id'],binding_key='name',occurrence_index=1,
+            locator=locator,selected_text='SECRET',created_by_id=version.created_by_id))
+        session.commit()
     check=client.get(base+'/publication-check',headers=headers)
-    assert check.status_code==200 and any('внутри поля Word' in message for message in check.json()['errors']),check.text
+    assert check.status_code==200 and any('Word' in message for message in check.json()['errors']),check.text
     assert client.post(base+'/publish',headers=headers).status_code==422
 
 

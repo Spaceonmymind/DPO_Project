@@ -566,7 +566,7 @@ def validate_bindings(v,s):
    field=s.get(QuestionnaireField,b.field_id) if b.field_id else None
    label=field.label if field else b.binding_key
    fragment=b.selected_text[:100] or node['text'][max(0,start-30):min(len(node['text']),end+30)]
-   advice=' Выделите обычный текст вне кода и результата поля Word или настройте условную область на уровне всего абзаца.' if 'поля Word' in str(exc) else ' Проверьте выделенный фрагмент в исходном DOCX.'
+   advice=' Выделите обычный текст либо отображаемый результат поддерживаемого FILLIN; код и неизвестные поля Word изменять нельзя.' if 'поля Word' in str(exc) or 'поле Word' in str(exc) else ' Проверьте выделенный фрагмент в исходном DOCX.'
    raise HTTPException(422,detail=f'Привязка вопроса «{label}» (фрагмент «{fragment}», ключ {b.binding_key}) не может быть применена: {exc}.{advice}')
  return bindings
 def _element_hash(node): return hashlib.sha256(ET.tostring(node,encoding='utf-8')).hexdigest()
@@ -577,63 +577,68 @@ def _unsafe(node):
  names=('fldChar','instrText','drawing','pict','object','bookmarkStart','bookmarkEnd')
  return next((name for name in names if node.find(f'.//w:{name}',NS) is not None),None)
 def _safe_text_range_around_word_fields(paragraph,start,end):
- """Allow a run edit beside a Word field, never inside its code or displayed result."""
- if any(paragraph.find(f'.//w:{name}',NS) is not None for name in ('drawing','pict','object')):return False
- depth=0;position=0
- for element in paragraph.iter():
-  local=element.tag.rsplit('}',1)[-1]
-  if local=='fldChar':
-   if start<position<end:return False
-   kind=element.get(f'{{{WORD_NS}}}fldCharType')
-   if kind=='begin':depth+=1
-   elif kind=='end':
-    depth-=1
-    if depth<0:return False
-  elif local=='instrText':
-   if start<position<end:return False
-  elif local=='t':
-   length=len(element.text or '')
-   if depth and start<position+length and end>position:return False
-   position+=length
- return depth==0
-def _fillin_result_markers(paragraph,start,end):
- """Return markers to remove only for a simple FILLIN result wholly containing the edit.
+ """Whether a range can be replaced without flattening a Word field."""
+ try:return not _word_range_plan(paragraph,start,end)
+ except ValueError:return False
+def _word_range_plan(paragraph,start,end):
+ """List FILLIN markers to flatten in the output, leaving displayed offsets intact.
 
- Flattening the field in the output prevents Word from recalculating its result
- and restoring the source placeholder. Text positions remain unchanged.
+ The selection is interpreted in the same w:t coordinates as DocxXmlAdapter.
+ Ordinary text around a field is replaced exactly as selected; field code is
+ never used as display text. Unsupported or malformed fields fail closed.
  """
- position=0;field=None;matched=None
+ if start<0 or end<start:raise ValueError('Некорректные границы выделения')
+ position=0;field=None;stack=[];markers=[];parents={child:parent for parent in paragraph.iter() for child in parent}
  for element in paragraph.iter():
   local=element.tag.rsplit('}',1)[-1]
   if local=='fldChar':
    kind=element.get(f'{{{WORD_NS}}}fldCharType')
-   if list(element):return None
    if kind=='begin':
-    if field is not None:return None
-    field={'code':[],'markers':[element],'result_start':None,'valid':True}
+    if field is not None:field['valid']=False;stack.append(field)
+    field={'code':[],'markers':[element],'begin':position,'result_start':None,'valid':not stack and not list(element)}
    elif kind=='separate':
-    if field is None or field['result_start'] is not None:return None
-    field['result_start']=position;field['markers'].append(element)
+    if field is None:
+     if start<position<end:raise ValueError('Выделение пересекает повреждённое поле Word')
+    else:
+     if field['result_start'] is not None or list(element):field['valid']=False
+     field['result_start']=position;field['markers'].append(element)
    elif kind=='end':
-    if field is None:return None
-    if (field['valid'] and field['result_start'] is not None
-        and re.match(r'^\s*FILLIN(?:\s|$)',''.join(field['code']),re.I)
-        and field['result_start']<=start<end<=position):
-     if matched is not None:return None
-     matched=[*field['markers'],element]
-    field=None
-   else:return None
+    if field is None:
+     if start<position<end:raise ValueError('Выделение пересекает повреждённое поле Word')
+    else:
+     touched=start<position and end>field['begin']
+     if touched:
+      code=''.join(field['code'])
+      if not field['valid'] or list(element) or field['result_start'] is None or field['result_start']==position:
+       raise ValueError('Поле Word не содержит безопасного отображаемого результата')
+      if not re.match(r'^\s*FILLIN(?:\s|$)',code,re.I):
+       raise ValueError('Выделение затрагивает неподдерживаемый тип поля Word')
+      markers.extend((*field['markers'],element))
+     field=stack.pop() if stack else None
+   elif start<position<end:raise ValueError('Выделение пересекает повреждённое поле Word')
   elif local=='instrText':
-   if field is None or field['result_start'] is not None:return None
-   field['code'].append(element.text or '');field['markers'].append(element)
+   if field is None:
+    if start<position<end:raise ValueError('Выделение пересекает код поля Word вне поддерживаемой структуры')
+   elif field['result_start'] is not None:field['valid']=False
+   else:field['code'].append(element.text or '');field['markers'].append(element)
   elif local=='t':
    if field is not None and field['result_start'] is None:field['valid']=False
+   ancestor=parents.get(element)
+   while ancestor is not None and ancestor is not paragraph:
+    if ancestor.tag==f'{{{WORD_NS}}}fldSimple' and start<position+len(element.text or '') and end>position:
+     raise ValueError('Выделение затрагивает неподдерживаемый тип поля Word')
+    ancestor=parents.get(ancestor)
    position+=len(element.text or '')
-  elif local in {'bookmarkStart','bookmarkEnd','commentRangeStart','commentRangeEnd','permStart','permEnd'}:
-   if field is not None and start<position<end:field['valid']=False
-  elif field is not None and local in {'drawing','pict','object','fldSimple','delText','sdt','tab','br'}:
+  elif local in {'drawing','pict','object','tab','br'}:
+   if start<position<end:raise ValueError('Выделение пересекает нетекстовый элемент Word')
+   if field is not None:field['valid']=False
+  elif field is not None and local in {'fldSimple','delText','sdt'}:
    field['valid']=False
- return matched if field is None else None
+ if field is not None and start<position and end>field['begin']:
+  raise ValueError('Выделение пересекает незавершённое поле Word')
+ if start==end==0 and position==0 and paragraph.find('.//w:fldChar',NS) is not None:
+  raise ValueError('Пустой результат поля Word нельзя заменить как пустую ячейку')
+ return markers
 def _table_parts(locator):
  match=re.fullmatch(r'(.+)#/tbl\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]/p\[(\d+)\]',locator)
  return (match.group(1),*map(int,match.groups()[1:])) if match else None
@@ -744,9 +749,7 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
  # A whole paragraph/row/table can be removed atomically even when it contains
  # Word fields or drawings.  Only a run-level edit could split such a node and
  # therefore retains the strict safety gate.
- bad=next((_unsafe(x) for x in targets if _unsafe(x)),None) if p.region_type=='CONDITIONAL_RUN' else None
- if bad in {'fldChar','instrText'} and _safe_text_range_around_word_fields(targets[0],p.start,p.end):bad=None
- if bad: raise ValueError(f'Область содержит неподдерживаемую структуру Word ({bad})')
+ if p.region_type=='CONDITIONAL_RUN':replace_range(copy.deepcopy(targets[0]),p.start,p.end,'')
  original='\n'.join(_paragraph_text(x) for target in targets for x in ([target] if target.tag==f'{{{WORD_NS}}}p' else target.findall('.//w:p',NS)))
  if not original.strip(): raise ValueError('Условная область не содержит текста')
  return locator,original
@@ -1036,26 +1039,13 @@ def paragraph_for(root,locator):
  if not m: raise ValueError('Неподдерживаемый структурный locator')
  t,r,c,p=map(int,m.groups()); return body.findall('./w:tbl',NS)[t-1].findall('./w:tr',NS)[r-1].findall('./w:tc',NS)[c-1].findall('./w:p',NS)[p-1]
 def replace_range(p,start,end,value):
- if p.find('.//w:fldSimple',NS) is not None:
-  parents={child:parent for parent in p.iter() for child in parent}
-  position=0
-  for node in p.findall('.//w:t',NS):
-   finish=position+len(node.text or '')
-   ancestor=parents.get(node)
-   while ancestor is not None and ancestor is not p:
-    if ancestor.tag==f'{{{WORD_NS}}}fldSimple' and start<finish and end>position:
-     raise ValueError('Привязка внутри поля Word не поддерживается')
-    ancestor=parents.get(ancestor)
-   position=finish
- if (p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None) and not _safe_text_range_around_word_fields(p,start,end):
-  markers=_fillin_result_markers(p,start,end)
-  if markers is None:raise ValueError('Привязка внутри поля Word не поддерживается')
-  for marker in markers:
-   parent=_parent_of(p,marker)
-   if parent is None:raise ValueError('Структура поля FILLIN повреждена')
-   parent.remove(marker)
+ preview_text=''.join(node.text or '' for run in p.findall('./w:r',NS) for node in run.findall('.//w:t',NS))
+ actual_text=''.join(node.text or '' for node in p.findall('.//w:t',NS))
+ if preview_text!=actual_text:raise ValueError('Текст поля Word или вложенного контейнера отсутствует в координатах предпросмотра; выберите другой фрагмент')
+ markers=_word_range_plan(p,start,end)
  spans=[]; pos=0
  for node in p.findall('.//w:t',NS): text=node.text or ''; spans.append((node,pos,pos+len(text),text)); pos+=len(text)
+ if end>pos:raise ValueError('Диапазон привязки выходит за границы текста')
  if start==end==0 and pos==0:
   run=p.find('./w:r',NS)
   if run is None: run=ET.SubElement(p,f'{{{WORD_NS}}}r')
@@ -1064,7 +1054,11 @@ def replace_range(p,start,end,value):
   text_node.text=str(value)
   return
  touched=[x for x in spans if x[2]>start and x[1]<end]
- if end>pos or not touched: raise ValueError('Диапазон привязки выходит за границы текста')
+ if not touched: raise ValueError('Диапазон привязки выходит за границы текста')
+ for marker in markers:
+  parent=_parent_of(p,marker)
+  if parent is None:raise ValueError('Структура поля FILLIN повреждена')
+  parent.remove(marker)
  first,last=touched[0],touched[-1]
  for node,s,e,text in touched:
   prefix=text[:max(0,start-s)] if node is first[0] else ''; suffix=text[max(0,end-s):] if node is last[0] else ''; node.text=(prefix+str(value)+suffix) if node is first[0] else suffix
@@ -1682,7 +1676,10 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if p.field_id and (not field or not schema or field.schema_id!=schema.id): raise HTTPException(404,detail='Поле анкеты не найдено')
   key=field.field_key if field else p.binding_key
   if not key: raise HTTPException(422,detail='Выберите поле анкеты')
-  try: validate_binding_format(p.output_format,field); validate_binding_options(p.output_format,p.format_options,field); path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+  try:
+   validate_binding_format(p.output_format,field); validate_binding_options(p.output_format,p.format_options,field)
+   path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА')
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
@@ -1809,7 +1806,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def bind_repeating_field(tid:str,vid:str,gid:str,fid:str,p:RepeatingBindingPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); group=s.get(RepeatingGroup,gid); field=s.get(RepeatingGroupField,fid)
   if not group or group.template_version_id!=v.id or not field or field.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
-  try: loc=adapter.get_structural_locator(safe_source(v),adapter.select_range(safe_source(v),p.locator,p.start,p.end,p.selected_text))
+  try:
+   path=safe_source(v);loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
+   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА')
   except ValueError as exc: raise HTTPException(422,detail=str(exc))
   if not _field_in_primary_group_row(loc['node'],group): raise HTTPException(422,detail='Выделение должно находиться в основном блоке-образце этой группы')
   loc['selected_text']=p.selected_text

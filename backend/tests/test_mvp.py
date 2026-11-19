@@ -821,6 +821,99 @@ def test_word_range_preserves_exact_text_runs_spaces_punctuation_and_untouched_f
     with pytest.raises(ValueError,match='координатах предпросмотра'):replace_range(nested_text._p,1,7,'ОТКАЗ')
 
 
+def _test_complex_field(paragraph, kind, result, bookmark_id=None, ffdata=False):
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin')
+    if ffdata:
+        data=OxmlElement('w:ffData');name=OxmlElement('w:name');name.set(qn('w:val'),'Name');data.append(name)
+        input_node=OxmlElement('w:textInput');input_type=OxmlElement('w:type');input_type.set(qn('w:val'),'regular');input_node.append(input_type);data.append(input_node);begin.append(data)
+    paragraph.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=f' {kind} ';paragraph.add_run()._r.append(code)
+    separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+    if bookmark_id is not None:
+        marker=OxmlElement('w:bookmarkStart');marker.set(qn('w:id'),str(bookmark_id));marker.set(qn('w:name'),f'field_{bookmark_id}');paragraph._p.append(marker)
+    paragraph.add_run(result[:len(result)//2]);paragraph.add_run(result[len(result)//2:])
+    if bookmark_id is not None:
+        marker=OxmlElement('w:bookmarkEnd');marker.set(qn('w:id'),str(bookmark_id));paragraph._p.append(marker)
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+
+
+def test_formtext_mixed_ranges_preserve_exact_text_and_untouched_fields():
+    import copy
+    from app.contract_platform import replace_range
+    document=Document();paragraph=document.add_paragraph();paragraph.add_run('Исполнитель: ').bold=True
+    for index,result in enumerate(('[Полное наименование]','[Сокращённое наименование]','[ИНН]','[ОГРН]'),1):
+        _test_complex_field(paragraph,'FORMTEXT',result,index,ffdata=index==1)
+        paragraph.add_run(', ' if index<4 else '; ')
+    _test_complex_field(paragraph,'FILLIN','[Подписант]',5)
+    paragraph.add_run(' конец.').bold=True
+    source=paragraph.text
+    cases=[(source.index('[Полное'),source.index(']',source.index('[Сокращённое'))+1,'ООО Ромашка, ООО Р.'),
+           (source.index('наименование]')+3,source.index(']',source.index('[Полное'))+1,'замена'),
+           (source.index('Исполнитель'),source.index('[Полное')+4,'Компания'),
+           (source.index('[ОГРН]'),source.index('[Подписант]')+len('[Подписант]'),'123, Иванов')]
+    for start,end,value in cases:
+        edited=copy.deepcopy(paragraph._p);replace_range(edited,start,end,value)
+        assert ''.join(n.text or '' for n in edited.findall('.//'+qn('w:t')))==source[:start]+value+source[end:]
+        starts=[n.get(qn('w:id')) for n in edited.findall('.//'+qn('w:bookmarkStart'))]
+        ends=[n.get(qn('w:id')) for n in edited.findall('.//'+qn('w:bookmarkEnd'))]
+        assert starts==ends==['1','2','3','4','5']
+        assert edited.findall('.//'+qn('w:b'))
+        assert len(edited.findall('.//'+qn('w:fldChar'))) < 15
+        assert len(paragraph._p.findall('.//'+qn('w:fldChar')))==15
+    result=io.BytesIO();document.save(result)
+    assert Document(io.BytesIO(result.getvalue())).paragraphs[0].text==source
+
+
+def test_formtext_rejects_unsafe_metadata_bookmarks_and_protected_forms(tmp_path):
+    import copy
+    from app.contract_platform import replace_range, _form_protected
+    paragraph=Document().add_paragraph();_test_complex_field(paragraph,'FORMTEXT','RESULT',ffdata=True)
+    replace_range(copy.deepcopy(paragraph._p),0,6,'OK')
+    with pytest.raises(ValueError,match='защищённой форме'):replace_range(copy.deepcopy(paragraph._p),0,6,'OK',False)
+    invalid=copy.deepcopy(paragraph._p);invalid_begin=invalid.findall('.//'+qn('w:fldChar'))[0]
+    invalid_begin.find(qn('w:ffData')).append(OxmlElement('w:checkBox'))
+    with pytest.raises(ValueError,match='FORMTEXT'):replace_range(invalid,0,6,'OK')
+    crossing=copy.deepcopy(paragraph._p)
+    for kind,identifier in (('bookmarkStart',1),('bookmarkStart',2),('bookmarkEnd',1),('bookmarkEnd',2)):
+        marker=OxmlElement('w:'+kind);marker.set(qn('w:id'),str(identifier));crossing.append(marker)
+    with pytest.raises(ValueError,match='Закладки'):replace_range(crossing,0,6,'OK')
+    protected=Document();protected.add_paragraph('FORM')
+    setting=OxmlElement('w:documentProtection');setting.set(qn('w:edit'),'forms');setting.set(qn('w:enforcement'),'1');protected.settings.element.append(setting)
+    path=tmp_path/'protected.docx';protected.save(path);assert _form_protected(path)
+
+
+def test_formtext_binding_in_conditional_region_survives_api_roundtrip():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FORMTEXT_REGION')
+    document=Document();paragraph=document.add_paragraph('Название: ')
+    _test_complex_field(paragraph,'FORMTEXT','[Полное]',11,True);paragraph.add_run(' / ')
+    _test_complex_field(paragraph,'FORMTEXT','[Краткое]',12);paragraph.add_run(' / ')
+    _test_complex_field(paragraph,'FORMTEXT','[ИНН]',13);paragraph.add_run(' / ')
+    _test_complex_field(paragraph,'FORMTEXT','[ОГРН]',14);paragraph.add_run(' / ')
+    _test_complex_field(paragraph,'FILLIN','[Подписант]',15)
+    raw=io.BytesIO();document.save(raw);original=raw.getvalue()
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('formtext.docx',original,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert version.status_code==201,version.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version.json()['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'names','label':'Наименования','field_type':'TEXT','position':1}).json()
+    show=client.post(base+'/fields',headers=headers,json={'field_key':'show','label':'Показывать','field_type':'BOOLEAN','position':2}).json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0];source=node['text'];start=source.index('[Полное]');end=source.index('[Краткое]')+len('[Краткое]')
+    bound=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':start,'end':end,'selected_text':source[start:end]})
+    assert bound.status_code==201,bound.text
+    assert any(item['id']==bound.json()['id'] for item in client.get(base+'/bindings',headers=headers).json())
+    region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'names_region','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'EQUALS','field_key':'show','value':True}})
+    assert region.status_code==201,region.text
+    for visible in (True,False):
+        response=client.post(base+'/test-drive',headers=headers,json={'answers':{'names':'ООО Ромашка','show':visible}})
+        assert response.status_code==201,response.text
+        output=Document(io.BytesIO(client.get(response.json()['download_url'],headers=headers).content))
+        assert ('ООО Ромашка' in '\n'.join(p.text for p in output.paragraphs))==visible
+        if visible:
+            assert len(output.paragraphs[0]._p.findall('.//'+qn('w:fldChar')))==9
+            assert len(output.paragraphs[0]._p.findall('.//'+qn('w:bookmarkStart')))==5
+    from app.contract_platform import safe_source
+    with SessionLocal() as session:assert safe_source(session.get(TemplateVersion,version.json()['id'])).read_bytes()==original
+
+
 def test_existing_range_with_one_extra_character_before_fillin_works_in_conditional_docx():
     client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FILLIN_CROSS_BOUNDARY')
     document=Document();paragraph=document.add_paragraph();paragraph.add_run('X'*200);paragraph.add_run(' ')
@@ -854,14 +947,15 @@ def test_existing_range_with_one_extra_character_before_fillin_works_in_conditio
     with SessionLocal() as session:assert safe_source(session.get(TemplateVersion,version['id'])).read_bytes()==original
 
 
-def test_fillin_result_in_repeating_table_clones_remains_valid_docx(tmp_path):
+@pytest.mark.parametrize('field_type', ['FILLIN', 'FORMTEXT'])
+def test_fillin_result_in_repeating_table_clones_remains_valid_docx(tmp_path,field_type):
     from app.contract_platform import render_docx
     from types import SimpleNamespace
     document=Document();table=document.add_table(rows=3,cols=1)
     table.cell(0,0).text='Заголовок';table.cell(2,0).text='Итого'
     paragraph=table.cell(1,0).paragraphs[0]
     begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
-    code=OxmlElement('w:instrText');code.text=' FILLIN "Строка" ';paragraph.add_run()._r.append(code)
+    code=OxmlElement('w:instrText');code.text=f' {field_type} "Строка" ';paragraph.add_run()._r.append(code)
     separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
     paragraph.add_run('ITEM')
     end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)

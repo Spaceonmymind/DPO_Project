@@ -548,7 +548,7 @@ def validate_repeating_answers(groups,s,questionnaire_fields,answers,complete=Tr
    if group.group_key in errors: break
  return errors
 def validate_bindings(v,s):
- preview=adapter.preview(safe_source(v))
+ path=safe_source(v);preview=adapter.preview(path);allow_formtext=not _form_protected(path)
  if preview['structure_fingerprint']!=v.structure_fingerprint: raise HTTPException(409,detail='DOCX изменился после создания версии')
  nodes={x['locator']:x for x in preview['nodes']}; occupied={}; roots={}; bindings=s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE').all()
  for b in bindings:
@@ -560,8 +560,8 @@ def validate_bindings(v,s):
   ranges.append((start,end))
   try:
    part=node['part']
-   if part not in roots: roots[part]=_part_root(safe_source(v),part)
-   replace_range(copy.deepcopy(paragraph_for(roots[part],node['locator'])),start,end,'ПРОВЕРКА')
+   if part not in roots: roots[part]=_part_root(path,part)
+   replace_range(copy.deepcopy(paragraph_for(roots[part],node['locator'])),start,end,'ПРОВЕРКА',allow_formtext)
   except (ValueError,IndexError,KeyError) as exc:
    field=s.get(QuestionnaireField,b.field_id) if b.field_id else None
    label=field.label if field else b.binding_key
@@ -572,6 +572,14 @@ def validate_bindings(v,s):
 def _element_hash(node): return hashlib.sha256(ET.tostring(node,encoding='utf-8')).hexdigest()
 def _part_root(path,part):
  with zipfile.ZipFile(path) as z: return ET.fromstring(z.read(part))
+def _form_protected(path):
+ with zipfile.ZipFile(path) as archive:
+  if 'word/settings.xml' in archive.namelist():
+   settings=ET.fromstring(archive.read('word/settings.xml'))
+   for protection in settings.findall('.//w:documentProtection',NS):
+    if protection.get(f'{{{WORD_NS}}}enforcement','1').lower() not in {'0','false','off'}:return True
+  document=ET.fromstring(archive.read('word/document.xml'))
+  return any(node.get(f'{{{WORD_NS}}}val','1').lower() not in {'0','false','off'} for node in document.findall('.//w:formProt',NS))
 def _body(root): return root.find('w:body',NS) if root.tag.endswith('document') else root
 def _unsafe(node):
  names=('fldChar','instrText','drawing','pict','object','bookmarkStart','bookmarkEnd')
@@ -580,8 +588,36 @@ def _safe_text_range_around_word_fields(paragraph,start,end):
  """Whether a range can be replaced without flattening a Word field."""
  try:return not _word_range_plan(paragraph,start,end)
  except ValueError:return False
-def _word_range_plan(paragraph,start,end):
- """List FILLIN markers to flatten in the output, leaving displayed offsets intact.
+def _formtext_metadata_error(children):
+ if not children:return None
+ if len(children)!=1 or children[0].tag!=f'{{{WORD_NS}}}ffData':return 'FORMTEXT содержит неподдерживаемые служебные данные'
+ ffdata=children[0];allowed={'name','enabled','helpText','statusText','tabIndex','textInput'}
+ if any(child.tag.rsplit('}',1)[-1] not in allowed for child in ffdata):return 'FORMTEXT содержит управляющие действия или неподдерживаемый тип формы'
+ inputs=ffdata.findall('./w:textInput',NS)
+ if len(inputs)!=1:return 'FORMTEXT не содержит единственного текстового ввода'
+ allowed_input={'type','default','maxLength','format'}
+ if any(child.tag.rsplit('}',1)[-1] not in allowed_input for child in inputs[0]):return 'FORMTEXT содержит неподдерживаемые настройки ввода'
+ input_type=inputs[0].find('./w:type',NS)
+ if input_type is not None and input_type.get(f'{{{WORD_NS}}}val','regular')!='regular':return 'FORMTEXT использует нетекстовый тип ввода'
+ format_node=inputs[0].find('./w:format',NS)
+ if format_node is not None and format_node.get(f'{{{WORD_NS}}}val',''):return 'FORMTEXT использует форматирование Word, которое нельзя безопасно сохранить'
+ return None
+def _bookmarks_well_nested(paragraph):
+ stack=[];opened=set()
+ for node in paragraph.iter():
+  local=node.tag.rsplit('}',1)[-1]
+  if local not in {'bookmarkStart','bookmarkEnd'}:continue
+  identifier=node.get(f'{{{WORD_NS}}}id')
+  if identifier is None:return False
+  if local=='bookmarkStart':
+   if identifier in opened:return False
+   opened.add(identifier);stack.append(identifier)
+  elif identifier in stack:
+   if stack[-1]!=identifier:return False
+   stack.pop()
+ return True
+def _word_range_plan(paragraph,start,end,allow_formtext=True):
+ """List supported field markers to flatten in the output, leaving text offsets intact.
 
  The selection is interpreted in the same w:t coordinates as DocxXmlAdapter.
  Ordinary text around a field is replaced exactly as selected; field code is
@@ -595,7 +631,7 @@ def _word_range_plan(paragraph,start,end):
    kind=element.get(f'{{{WORD_NS}}}fldCharType')
    if kind=='begin':
     if field is not None:field['valid']=False;stack.append(field)
-    field={'code':[],'markers':[element],'begin':position,'result_start':None,'valid':not stack and not list(element)}
+    field={'code':[],'markers':[element],'begin':position,'result_start':None,'valid':not stack,'begin_children':list(element)}
    elif kind=='separate':
     if field is None:
      if start<position<end:raise ValueError('Выделение пересекает повреждённое поле Word')
@@ -611,7 +647,13 @@ def _word_range_plan(paragraph,start,end):
       code=''.join(field['code'])
       if not field['valid'] or list(element) or field['result_start'] is None or field['result_start']==position:
        raise ValueError('Поле Word не содержит безопасного отображаемого результата')
-      if not re.match(r'^\s*FILLIN(?:\s|$)',code,re.I):
+      if re.match(r'^\s*FILLIN(?:\s|$)',code,re.I):
+       if field['begin_children']:raise ValueError('FILLIN содержит неподдерживаемые служебные данные')
+      elif re.match(r'^\s*FORMTEXT(?:\s|$)',code,re.I):
+       if not allow_formtext:raise ValueError('FORMTEXT в защищённой форме нельзя преобразовать в текст')
+       if error:=_formtext_metadata_error(field['begin_children']):raise ValueError(error)
+       if not _bookmarks_well_nested(paragraph):raise ValueError('Закладки Word вложены некорректно; FORMTEXT нельзя безопасно преобразовать')
+      else:
        raise ValueError('Выделение затрагивает неподдерживаемый тип поля Word')
       markers.extend((*field['markers'],element))
      field=stack.pop() if stack else None
@@ -749,7 +791,7 @@ def _resolve_region(path,p:RegionPayload,structure_fingerprint):
  # A whole paragraph/row/table can be removed atomically even when it contains
  # Word fields or drawings.  Only a run-level edit could split such a node and
  # therefore retains the strict safety gate.
- if p.region_type=='CONDITIONAL_RUN':replace_range(copy.deepcopy(targets[0]),p.start,p.end,'')
+ if p.region_type=='CONDITIONAL_RUN':replace_range(copy.deepcopy(targets[0]),p.start,p.end,'',not _form_protected(path))
  original='\n'.join(_paragraph_text(x) for target in targets for x in ([target] if target.tag==f'{{{WORD_NS}}}p' else target.findall('.//w:p',NS)))
  if not original.strip(): raise ValueError('Условная область не содержит текста')
  return locator,original
@@ -782,7 +824,7 @@ def validate_regions(v,s,bindings=None):
   hashes=loc.get('element_hashes') or [loc.get('element_hash')]
   if [_element_hash(x) for x in actual]!=hashes: raise HTTPException(422,detail=f'Locator области «{region.region_key}» устарел')
   try:
-   if region.region_type=='CONDITIONAL_RUN': replace_range(copy.deepcopy(actual[0]),loc['text_start'],loc['text_end'],'')
+   if region.region_type=='CONDITIONAL_RUN': replace_range(copy.deepcopy(actual[0]),loc['text_start'],loc['text_end'],'',not _form_protected(safe_source(v)))
    elif region.region_type=='CONDITIONAL_TABLE_COLUMN': _remove_table_column(copy.deepcopy(actual[0]),loc['column'])
   except (KeyError,IndexError,ValueError) as exc: raise HTTPException(422,detail=f'Условная область «{region.region_key}» не может быть применена: {exc}')
   for old in seen:
@@ -940,7 +982,7 @@ def validate_repeating_groups(v,s,bindings=None,regions=None):
    try:
     cfg=field.config or {};validate_binding_format(cfg.get('output_format','RAW'),field)
     ValueFormatter.validate_options({'precision':cfg.get('precision',2),'rounding':cfg.get('rounding','HALF_UP')})
-    replace_range(copy.deepcopy(p),floc['text_start'],floc['text_end'],'ПРОВЕРКА')
+    replace_range(copy.deepcopy(p),floc['text_start'],floc['text_end'],'ПРОВЕРКА',not _form_protected(safe_source(v)))
    except (CalculationError,ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Поле группы «{field.label}» не может быть подставлено: {exc}')
   ranges={}
   for field in fields:
@@ -1038,11 +1080,11 @@ def paragraph_for(root,locator):
  m=re.fullmatch(r'tbl\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]/p\[(\d+)\]',path)
  if not m: raise ValueError('Неподдерживаемый структурный locator')
  t,r,c,p=map(int,m.groups()); return body.findall('./w:tbl',NS)[t-1].findall('./w:tr',NS)[r-1].findall('./w:tc',NS)[c-1].findall('./w:p',NS)[p-1]
-def replace_range(p,start,end,value):
+def replace_range(p,start,end,value,allow_formtext=True):
  preview_text=''.join(node.text or '' for run in p.findall('./w:r',NS) for node in run.findall('.//w:t',NS))
  actual_text=''.join(node.text or '' for node in p.findall('.//w:t',NS))
  if preview_text!=actual_text:raise ValueError('Текст поля Word или вложенного контейнера отсутствует в координатах предпросмотра; выберите другой фрагмент')
- markers=_word_range_plan(p,start,end)
+ markers=_word_range_plan(p,start,end,allow_formtext)
  spans=[]; pos=0
  for node in p.findall('.//w:t',NS): text=node.text or ''; spans.append((node,pos,pos+len(text),text)); pos+=len(text)
  if end>pos:raise ValueError('Диапазон привязки выходит за границы текста')
@@ -1068,6 +1110,7 @@ def _parent_of(root,node):
   if node in list(parent): return parent
  return None
 def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,repeating_groups=None,repeating_values=None,repeating_fields=None):
+ source=safe_source(v);allow_formtext=not _form_protected(source)
  regions=regions or []; included_region_ids=set(included_region_ids or [])
  repeating_groups=repeating_groups or []; repeating_values=repeating_values or {}; repeating_fields=repeating_fields or {}
  excluded_all=[x for x in regions if x.id not in included_region_ids]
@@ -1078,7 +1121,7 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
  for r in excluded: grouped.setdefault(r.locator['part'],{'bindings':[],'regions':[]})['regions'].append(r)
  for g in repeating_groups:
   for part in {target['part'] for target in _group_targets(g.locator)}:grouped.setdefault(part,{'bindings':[],'regions':[],'groups':[]}).setdefault('groups',[]).append(g)
- with zipfile.ZipFile(safe_source(v),'r') as src,zipfile.ZipFile(target,'w') as dst:
+ with zipfile.ZipFile(source,'r') as src,zipfile.ZipFile(target,'w') as dst:
   for info in src.infolist():
    raw=src.read(info.filename)
    if info.filename in grouped:
@@ -1099,7 +1142,7 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
      if region.region_type=='CONDITIONAL_RUN': by_node.setdefault(region.locator['node'],[]).append((region.locator['text_start'],region.locator['text_end'],''))
     for locator,items in by_node.items():
      p=paragraph_for(root,locator)
-     for start,end,value in sorted(items,key=lambda x:x[0],reverse=True): replace_range(p,start,end,value)
+     for start,end,value in sorted(items,key=lambda x:x[0],reverse=True): replace_range(p,start,end,value,allow_formtext)
     for group,target_loc,rows,source_rows in jobs:
      if not rows:raise ValueError(f'Блок-образец группы «{group.name}» недоступен')
      table=_parent_of(root,rows[0])
@@ -1118,7 +1161,7 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
        cfg=field.config or {}; formatted=render_value(field,item.get(field.field_key,'')) if field.field_type=='BOOLEAN' and cfg.get('output_format','RAW')=='RAW' else ValueFormatter.format(item.get(field.field_key,''),cfg.get('output_format','RAW'),{'precision':cfg.get('precision',2),'rounding':cfg.get('rounding','HALF_UP')})
        actions.setdefault(paragraph,[]).append((loc['text_start'],loc['text_end'],formatted))
       for paragraph,ranges in actions.items():
-       for start,end,value in sorted(ranges,key=lambda x:x[0],reverse=True): replace_range(paragraph,start,end,value)
+       for start,end,value in sorted(ranges,key=lambda x:x[0],reverse=True): replace_range(paragraph,start,end,value,allow_formtext)
       for row_offset,clone in enumerate(clones):table.insert(insert_at+item_index*block_size+row_offset,clone)
      for row in source_rows:table.remove(row)
     for table,column in column_removals:_remove_table_column(table,column)
@@ -1679,7 +1722,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   try:
    validate_binding_format(p.output_format,field); validate_binding_options(p.output_format,p.format_options,field)
    path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
-   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА')
+   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА',not _form_protected(path))
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
@@ -1808,7 +1851,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if not group or group.template_version_id!=v.id or not field or field.group_id!=gid: raise HTTPException(404,detail='Поле группы не найдено')
   try:
    path=safe_source(v);loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
-   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА')
+   replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА',not _form_protected(path))
   except ValueError as exc: raise HTTPException(422,detail=str(exc))
   if not _field_in_primary_group_row(loc['node'],group): raise HTTPException(422,detail='Выделение должно находиться в основном блоке-образце этой группы')
   loc['selected_text']=p.selected_text

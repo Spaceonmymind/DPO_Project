@@ -45,7 +45,7 @@
 .template-open .workspace-question-card.drop-before::before,.template-open .workspace-question-card.drop-after::after{position:absolute;z-index:2;right:4px;left:4px;height:3px;border-radius:3px;background:#07856b;content:""}
 .template-open .workspace-question-card.drop-before::before{top:-3px}
 .template-open .workspace-question-card.drop-after::after{bottom:-3px}
-.template-open .workspace-question-open{position:relative;box-sizing:border-box;width:100%;min-width:0;min-height:76px;flex-shrink:0;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;overflow:visible;text-align:left;background:transparent}
+.template-open .workspace-question-open{position:relative;box-sizing:border-box;width:auto;min-width:0;min-height:76px;flex:1 1 0;padding:10px 22px 10px 9px;border:1px solid transparent;border-radius:8px;overflow:visible;text-align:left;background:transparent}
 .template-open .workspace-question-open:hover,.template-open .workspace-question-open.active{border-color:#b8dfd0;background:#eff8f4}
 .template-open .workspace-question-open span{font-size:10px;text-transform:none}
 .template-open .workspace-question-open b{margin-top:4px;overflow-wrap:anywhere;white-space:normal;line-height:1.35;font-size:12px}

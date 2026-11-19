@@ -64,6 +64,54 @@ test("DOCX pane widths drag, persist, clamp and reset without changing zoom", { 
   }
 });
 
+test("question arrows stay visible inside a narrow panel beside a wrapped title", { skip: !existsSync(chromePath) }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    for (const width of [1280, 640]) {
+      const page = await browser.newPage({ viewport: { width, height: 900 }, deviceScaleFactor: 1 });
+      await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html`);
+      await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+      await page.getByRole("button", { name: /Версия 1/ }).first().click();
+      await page.locator(".workspace-question-card").first().scrollIntoViewIfNeeded();
+      const geometry = await page.locator(".workspace-question-card").first().evaluate((card) => {
+        const list = card.closest(".workspace-question-list");
+        const title = card.querySelector(".workspace-question-open b");
+        const open = card.querySelector(".workspace-question-open");
+        const order = card.querySelector(".workspace-question-order");
+        const arrows = [...order.querySelectorAll("button")];
+        const bounds = (node) => {
+          const rect = node.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
+        };
+        return {
+          list: bounds(list), card: bounds(card), open: bounds(open), order: bounds(order),
+          titleLines: title.getBoundingClientRect().height / parseFloat(getComputedStyle(title).lineHeight),
+          flexShrink: getComputedStyle(open).flexShrink,
+          arrows: arrows.map(button => {
+            const rect = bounds(button);
+            const topElement = document.elementFromPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+            return { ...rect, visible: getComputedStyle(button).visibility === "visible", inFront: button.contains(topElement) };
+          }),
+        };
+      });
+      assert.ok(geometry.titleLines > 1, `${width}px: long question title wraps`);
+      assert.equal(geometry.flexShrink, "1", `${width}px: title control may shrink`);
+      assert.ok(geometry.open.right <= geometry.order.left + 2, `${width}px: title does not cover arrows`);
+      assert.ok(geometry.order.right <= geometry.card.right + 2 && geometry.order.right <= geometry.list.right + 2, `${width}px: arrows remain inside the card and panel`);
+      for (const arrow of geometry.arrows) {
+        assert.ok(arrow.visible && arrow.inFront, `${width}px: arrow is visible without hover ${JSON.stringify(geometry)}`);
+        assert.ok(arrow.left >= geometry.card.left - 2 && arrow.right <= geometry.list.right + 2, `${width}px: arrow is within panel bounds`);
+      }
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    await server.close();
+  }
+});
+
 test("DOCX workspace controls fit their panels at desktop and zoom-equivalent widths", { skip: !existsSync(chromePath) }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

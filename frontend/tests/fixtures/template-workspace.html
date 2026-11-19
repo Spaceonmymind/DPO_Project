@@ -13,6 +13,7 @@
       const longLabel = "Порядок оплаты и подтверждения оказанных услуг по договору с дополнительными условиями и примечаниями для проверки длинного названия вопроса";
       const field = { id: "field-1", field_key: "payment_order", label: longLabel, field_type: "SINGLE_SELECT", required: true, position: 1, config: { group: "Основные сведения", placeholder: "", options: ["100% постоплата", "50% предоплата"] } };
       const fields = [field, ...Array.from({ length: 159 }, (_, index) => ({ id: `field-${index + 2}`, field_key: `question_${index + 2}`, label: `Вопрос номер ${index + 2}`, field_type: "TEXT", position: index + 2, config: { group: "Дополнительные сведения", options: [] } }))];
+      if (new URLSearchParams(location.search).has("positionHole")) fields.splice(1, 1);
       const version = { id: "version-1", template_id: "template-1", version_number: 1, status: "DRAFT", original_filename: "sample.docx" };
       const smallNodes = [
         { locator: "word/document.xml#/p[1]", kind: "paragraph", text: "Порядок оплаты услуг по договору" },
@@ -65,6 +66,7 @@
         if (path.endsWith("/fields") && options.method === "POST") {
           const payload = JSON.parse(options.body);
           window.__writes.push({ kind: "field", payload });
+          if (new URLSearchParams(location.search).has("fieldError")) throw new Error("Сервер не сохранил вопрос");
           const created = { id: `field-${fields.length + 1}`, field_key: payload.field_key, label: payload.label, field_type: payload.field_type, required: payload.required, position: payload.position, config: { ...payload, group: payload.group } };
           fields.push(created);
           return created;

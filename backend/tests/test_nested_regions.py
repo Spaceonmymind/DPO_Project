@@ -75,7 +75,7 @@ def test_row_contains_run_without_removing_parent_when_run_false(tmp_path):
     kept=render(source,target,[row,run],{'row'})
     assert kept.tables[0].cell(0,0).text=='Keep  end'
     removed=render(source,target,[row,run],{'run'})
-    assert len(removed.tables[0].rows)==0
+    assert removed.tables==[]
 
 
 def test_paragraph_contains_run_and_disjoint_region(tmp_path):

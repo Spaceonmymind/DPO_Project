@@ -562,7 +562,12 @@ def validate_bindings(v,s):
    part=node['part']
    if part not in roots: roots[part]=_part_root(safe_source(v),part)
    replace_range(copy.deepcopy(paragraph_for(roots[part],node['locator'])),start,end,'ПРОВЕРКА')
-  except (ValueError,IndexError,KeyError) as exc: raise HTTPException(422,detail=f'Привязка «{b.binding_key}» не может быть применена: {exc}')
+  except (ValueError,IndexError,KeyError) as exc:
+   field=s.get(QuestionnaireField,b.field_id) if b.field_id else None
+   label=field.label if field else b.binding_key
+   fragment=b.selected_text[:100] or node['text'][max(0,start-30):min(len(node['text']),end+30)]
+   advice=' Выделите обычный текст вне кода и результата поля Word или настройте условную область на уровне всего абзаца.' if 'поля Word' in str(exc) else ' Проверьте выделенный фрагмент в исходном DOCX.'
+   raise HTTPException(422,detail=f'Привязка вопроса «{label}» (фрагмент «{fragment}», ключ {b.binding_key}) не может быть применена: {exc}.{advice}')
  return bindings
 def _element_hash(node): return hashlib.sha256(ET.tostring(node,encoding='utf-8')).hexdigest()
 def _part_root(path,part):
@@ -591,6 +596,44 @@ def _safe_text_range_around_word_fields(paragraph,start,end):
    if depth and start<position+length and end>position:return False
    position+=length
  return depth==0
+def _fillin_result_markers(paragraph,start,end):
+ """Return markers to remove only for a simple FILLIN result wholly containing the edit.
+
+ Flattening the field in the output prevents Word from recalculating its result
+ and restoring the source placeholder. Text positions remain unchanged.
+ """
+ position=0;field=None;matched=None
+ for element in paragraph.iter():
+  local=element.tag.rsplit('}',1)[-1]
+  if local=='fldChar':
+   kind=element.get(f'{{{WORD_NS}}}fldCharType')
+   if list(element):return None
+   if kind=='begin':
+    if field is not None:return None
+    field={'code':[],'markers':[element],'result_start':None,'valid':True}
+   elif kind=='separate':
+    if field is None or field['result_start'] is not None:return None
+    field['result_start']=position;field['markers'].append(element)
+   elif kind=='end':
+    if field is None:return None
+    if (field['valid'] and field['result_start'] is not None
+        and re.match(r'^\s*FILLIN(?:\s|$)',''.join(field['code']),re.I)
+        and field['result_start']<=start<end<=position):
+     if matched is not None:return None
+     matched=[*field['markers'],element]
+    field=None
+   else:return None
+  elif local=='instrText':
+   if field is None or field['result_start'] is not None:return None
+   field['code'].append(element.text or '');field['markers'].append(element)
+  elif local=='t':
+   if field is not None and field['result_start'] is None:field['valid']=False
+   position+=len(element.text or '')
+  elif local in {'bookmarkStart','bookmarkEnd','commentRangeStart','commentRangeEnd','permStart','permEnd'}:
+   if field is not None and start<position<end:field['valid']=False
+  elif field is not None and local in {'drawing','pict','object','fldSimple','delText','sdt','tab','br'}:
+   field['valid']=False
+ return matched if field is None else None
 def _table_parts(locator):
  match=re.fullmatch(r'(.+)#/tbl\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]/p\[(\d+)\]',locator)
  return (match.group(1),*map(int,match.groups()[1:])) if match else None
@@ -993,7 +1036,24 @@ def paragraph_for(root,locator):
  if not m: raise ValueError('Неподдерживаемый структурный locator')
  t,r,c,p=map(int,m.groups()); return body.findall('./w:tbl',NS)[t-1].findall('./w:tr',NS)[r-1].findall('./w:tc',NS)[c-1].findall('./w:p',NS)[p-1]
 def replace_range(p,start,end,value):
- if (p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None) and not _safe_text_range_around_word_fields(p,start,end): raise ValueError('Привязка внутри поля Word не поддерживается')
+ if p.find('.//w:fldSimple',NS) is not None:
+  parents={child:parent for parent in p.iter() for child in parent}
+  position=0
+  for node in p.findall('.//w:t',NS):
+   finish=position+len(node.text or '')
+   ancestor=parents.get(node)
+   while ancestor is not None and ancestor is not p:
+    if ancestor.tag==f'{{{WORD_NS}}}fldSimple' and start<finish and end>position:
+     raise ValueError('Привязка внутри поля Word не поддерживается')
+    ancestor=parents.get(ancestor)
+   position=finish
+ if (p.find('.//w:fldChar',NS) is not None or p.find('.//w:instrText',NS) is not None) and not _safe_text_range_around_word_fields(p,start,end):
+  markers=_fillin_result_markers(p,start,end)
+  if markers is None:raise ValueError('Привязка внутри поля Word не поддерживается')
+  for marker in markers:
+   parent=_parent_of(p,marker)
+   if parent is None:raise ValueError('Структура поля FILLIN повреждена')
+   parent.remove(marker)
  spans=[]; pos=0
  for node in p.findall('.//w:t',NS): text=node.text or ''; spans.append((node,pos,pos+len(text),text)); pos+=len(text)
  if start==end==0 and pos==0:
@@ -1485,6 +1545,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
   schema=schema_for(v.id,s)
   if not schema:raise HTTPException(422,detail='Анкета не найдена')
+  s.query(QuestionnaireSchema).filter_by(id=schema.id).with_for_update().one()
   fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).order_by(QuestionnaireField.position,QuestionnaireField.id).with_for_update().all()
   by_id={field.id:field for field in fields}
   if len(p.field_ids)!=len(fields) or len(set(p.field_ids))!=len(fields) or set(p.field_ids)!=set(by_id):
@@ -1515,38 +1576,53 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
 
  @r.post(prefix+'/{tid}/versions/{vid}/fields',status_code=201)
  def create_field(tid:str,vid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s,True,u)
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s)
+  schema=schema_for(v.id,s)
+  if not schema:
+   s.query(TemplateVersion).filter_by(id=v.id).with_for_update().one()
+   schema=schema_for(v.id,s,True,u)
+  s.query(QuestionnaireSchema).filter_by(id=schema.id).with_for_update().one()
   validate_stage_ids(v.id,p.stage_ids,s)
   existing_fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all()
   if s.query(QuestionnaireField).filter_by(schema_id=schema.id,field_key=p.field_key).first(): raise HTTPException(409,detail='Поле с таким ключом уже существует')
-  if s.query(QuestionnaireField).filter_by(schema_id=schema.id,position=p.position).first(): raise HTTPException(409,detail='Позиция уже занята')
+  occupied={field.position for field in existing_fields}
+  position=p.position if p.position not in occupied else max(occupied,default=0)+1
   config=field_config(p);config['group']=canonical_group(p.group,existing_fields)
-  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=p.position,config=config); s.add(x); s.flush()
+  x=QuestionnaireField(schema_id=schema.id,field_key=p.field_key,label=p.label,field_type=p.field_type,required=p.required,position=position,config=config); s.add(x)
   try:
+   s.flush()
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
    validate_regions(v,s)
    validate_calculations(v.id,s)
-  except HTTPException: s.rollback(); raise
-  s.commit(); return field_out(x)
+   s.commit()
+  except IntegrityError:
+   s.rollback();raise HTTPException(409,detail='Вопрос или его позиция изменились одновременно с вашим запросом. Обновите анкету и повторите сохранение.')
+  except HTTPException: s.rollback();raise
+  return field_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/fields/{fid}')
  def update_field(tid:str,vid:str,fid:str,p:FieldPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); validate_field_payload(p); validate_default_source(p,s); schema=schema_for(v.id,s)
+  if schema:s.query(QuestionnaireSchema).filter_by(id=schema.id).with_for_update().one()
+  x=s.get(QuestionnaireField,fid)
   validate_stage_ids(v.id,p.stage_ids,s)
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   duplicate=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.field_key==p.field_key,QuestionnaireField.id!=x.id).first()
-  occupied=s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.position==p.position,QuestionnaireField.id!=x.id).first()
   if duplicate: raise HTTPException(409,detail='Поле с таким ключом уже существует')
-  if occupied: raise HTTPException(409,detail='Позиция уже занята')
+  # Field editing does not reorder questions; the dedicated order endpoint owns position.
   if x.field_key!=p.field_key:
    for binding in s.query(DocumentBinding).filter_by(field_id=x.id): binding.binding_key=p.field_key
   config=field_config(p);config['group']=canonical_group(p.group,s.query(QuestionnaireField).filter(QuestionnaireField.schema_id==schema.id,QuestionnaireField.id!=x.id).all())
-  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.position=p.position; x.config=config; s.flush()
+  x.field_key=p.field_key; x.label=p.label; x.field_type=p.field_type; x.required=p.required; x.config=config
   try:
+   s.flush()
    validate_condition_schema(s.query(QuestionnaireField).filter_by(schema_id=schema.id).all())
    validate_regions(v,s)
    validate_calculations(v.id,s)
-  except HTTPException: s.rollback(); raise
-  s.commit(); return field_out(x)
+   s.commit()
+  except IntegrityError:
+   s.rollback();raise HTTPException(409,detail='Вопрос изменился одновременно с вашим запросом. Обновите анкету и повторите сохранение.')
+  except HTTPException: s.rollback();raise
+  return field_out(x)
  @r.get(prefix+'/{tid}/versions/{vid}/fields/{fid}/dependencies')
  def field_dependencies(tid:str,vid:str,fid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u);v,t=owned_version(vid,u,s)
@@ -1556,7 +1632,9 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   return {'dependencies':question_dependencies(field,v,s)}
  @r.delete(prefix+'/{tid}/versions/{vid}/fields/{fid}',status_code=204)
  def delete_field(tid:str,vid:str,fid:str,p:DeleteFieldPayload|None=Body(default=None),u=Depends(current_dependency),s:DBS=Depends(db)):
-  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s); x=s.get(QuestionnaireField,fid)
+  require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); schema=schema_for(v.id,s)
+  if schema:s.query(QuestionnaireSchema).filter_by(id=schema.id).with_for_update().one()
+  x=s.get(QuestionnaireField,fid)
   if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
   if not x or not schema or x.schema_id!=schema.id: raise HTTPException(404,detail='Поле не найдено')
   dependencies=question_dependencies(x,v,s);expected={f"{item['kind']}:{item['id']}" for item in dependencies}

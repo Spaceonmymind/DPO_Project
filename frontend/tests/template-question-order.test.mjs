@@ -77,6 +77,47 @@ test("sections move and a question crosses sections without losing saved order",
   } finally { await browser.close(); await server.close(); }
 });
 
+test("question arrows cross section boundaries and failed order save leaves the view unchanged", { skip: !existsSync(chromePath), timeout: 60000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1450, height: 900 } });
+    const base = `${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?order-small=1&order-groups=1`;
+    await openBuilder(page, base);
+    assert.equal(await page.getByRole("button", { name: "Переместить «Порядок оплаты» вверх" }).isDisabled(), true);
+    assert.equal(await page.getByRole("button", { name: "Переместить «Процент предоплаты» вниз" }).isEnabled(), true);
+    await page.getByRole("button", { name: "Переместить «Процент предоплаты» вниз" }).click();
+    await page.waitForFunction(() => window.__orderCalls === 1);
+    assert.match(await page.locator(".workspace-question-card").filter({ has: page.getByText("Процент предоплаты", { exact: true }) }).locator(".workspace-question-open span").textContent(), /Дополнительно/);
+    await openBuilder(page, `${base}&order-error=1`);
+    const before = await questionOrder(page);
+    await page.getByRole("button", { name: "Переместить «Порядок оплаты» вниз" }).click();
+    await page.getByText("Порядок не сохранён на сервере").waitFor();
+    assert.deepEqual(await questionOrder(page), before);
+    assert.equal(await page.getByRole("button", { name: "Переместить «Порядок оплаты» вниз" }).isEnabled(), true);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("new question uses the highest position and keeps the edited label after a save error", { skip: !existsSync(chromePath), timeout: 60000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1450, height: 900 } });
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-workspace.html?positionHole=1&fieldError=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.locator(".workspace-add").click();
+    const form = page.locator(".field-editor");
+    await form.getByLabel("Вопрос", { exact: true }).fill("Вопрос 2.3.1");
+    await form.getByRole("button", { name: "Добавить вопрос" }).click();
+    await page.getByText("Сервер не сохранил вопрос").waitFor();
+    assert.equal(await form.getByLabel("Вопрос", { exact: true }).inputValue(), "Вопрос 2.3.1");
+    assert.equal(await page.evaluate(() => window.__writes.find(item => item.kind === "field").payload.position), 161);
+  } finally { await browser.close(); await server.close(); }
+});
+
 test("help is above inputs and stays visible for text, date, number and choices", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

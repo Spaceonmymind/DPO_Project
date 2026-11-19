@@ -94,9 +94,9 @@ test("DOCX workspace controls fit their panels at desktop and zoom-equivalent wi
         assert.deepEqual(result.outside, [], `${width}px ${state}: controls remain inside panel`);
       };
 
-      await page.locator(".workspace-question-list button").first().click();
+      await page.locator(".workspace-question-open").first().click();
       await checkPanel("existing question");
-      const question = await page.locator(".workspace-question-list button").first().evaluate((button) => ({ clientHeight: button.clientHeight, scrollHeight: button.scrollHeight }));
+      const question = await page.locator(".workspace-question-open").first().evaluate((button) => ({ clientHeight: button.clientHeight, scrollHeight: button.scrollHeight }));
       assert.ok(question.scrollHeight <= question.clientHeight + 1, `${width}px: long question title is not clipped`);
 
       await page.locator(".docx-page [data-locator]").first().evaluate((paragraph) => {
@@ -169,7 +169,7 @@ test("3500 Word fragments keep their layout during drag and apply each resize on
     await page.getByRole("button", { name: /Версия 1/ }).first().click();
     await page.locator(".preview-node").first().waitFor();
     assert.ok(await page.locator(".preview-node").count() < 150, "large document mounts only visible Word blocks");
-    await page.locator(".workspace-question-list button").first().click();
+    await page.locator(".workspace-question-open").first().click();
     await page.locator(".docx-page [data-locator]").first().evaluate((node) => {
       window.__firstPreviewNode = node;
       const range = document.createRange(); range.selectNodeContents(node); getSelection().removeAllRanges(); getSelection().addRange(range);
@@ -182,7 +182,7 @@ test("3500 Word fragments keep their layout during drag and apply each resize on
       requests: window.__previewRequests,
       sameNode: window.__firstPreviewNode === grid.querySelector(".docx-page [data-locator]"),
       selection: getSelection().toString(),
-      selectedQuestion: !!grid.querySelector(".workspace-question-list button.active"),
+      selectedQuestion: !!grid.querySelector(".workspace-question-open.active"),
     }));
     const before = await snapshot();
     assert.equal(before.requests, 1);

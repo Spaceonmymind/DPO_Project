@@ -48,6 +48,7 @@ const api=async(path,options={})=>{
   if(/\/stages\/[^/]+$/.test(path)&&options.method==="DELETE"){contractStages.splice(contractStages.findIndex(stage=>path.endsWith(stage.id)),1);persistStages();return null;}
   if(path.endsWith("/fields/order")&&options.method==="PATCH"){
     const {field_ids,group_updates={}}=JSON.parse(options.body);window.__orderCalls++;window.__orderPayloads.push({field_ids,group_updates});
+    if(new URLSearchParams(location.search).has("order-error"))throw new Error("Порядок не сохранён на сервере");
     const byId=new Map(fields.map(field=>[field.id,field]));
     fields.splice(0,fields.length,...field_ids.map(id=>byId.get(id)));
     for(const [id,group] of Object.entries(group_updates))byId.get(id).config.group=group;

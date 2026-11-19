@@ -96,7 +96,7 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     assert.notEqual(dom.window.getComputedStyle(dom.window.document.querySelector(".questionnaire-builder .field-editor")).display, "none");
     await click(dom.window.document.querySelector(".field-editor button.secondary"));
     assert.match(dom.window.document.querySelector(".workspace-inspector-header").textContent, /Привязка фрагмента/, "cancel restores the selected fragment");
-    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    await click(dom.window.document.querySelector(".workspace-question-list .workspace-question-open"));
     const typeSelect = [...dom.window.document.querySelectorAll(".field-editor label")].find((label) => label.textContent.includes("Тип"))?.querySelector("select");
     assert.ok(typeSelect);
     await act(async () => { typeSelect.value = "SINGLE_SELECT"; typeSelect.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
@@ -111,7 +111,7 @@ test("empty draft: add question, fill form, save, and select it", async () => {
     assert.equal(optionsInput.value, rawOptions);
     await act(async () => dom.window.document.querySelector(".field-editor").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
     assert.deepEqual(writes.at(-1).options, ["100% постоплата", "50% предоплата", "Оплата в течение 10 рабочих дней"]);
-    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    await click(dom.window.document.querySelector(".workspace-question-list .workspace-question-open"));
     const reopenedOptions = [...dom.window.document.querySelectorAll(".field-editor label")].find((label) => label.textContent.includes("Варианты через запятую"))?.querySelector("input");
     assert.equal(reopenedOptions?.value, rawOptions, "saved options reopen with spaces intact");
     await act(async () => { setter.call(reopenedOptions, `${rawOptions}, , `); reopenedOptions.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
@@ -199,7 +199,7 @@ test("deleting a question warns about linked Word and nested rules, then refresh
     await act(async()=>root.render(React.createElement(TemplateAdmin,{api})));
     await click([...dom.window.document.querySelectorAll("button")].find(button=>button.textContent.includes("Тестовый договор")));
     await click([...dom.window.document.querySelectorAll("button")].find(button=>button.textContent.includes("Версия 1")));
-    await click(dom.window.document.querySelector(".workspace-question-list button"));
+    await click(dom.window.document.querySelector(".workspace-question-list .workspace-question-open"));
     await click([...dom.window.document.querySelectorAll(".field-editor button")].find(button=>button.textContent.includes("Удалить вопрос")));
     let dialog=dom.window.document.querySelector('[role="dialog"]');
     assert.match(dialog.textContent,/Связанных зависимостей: 2/);

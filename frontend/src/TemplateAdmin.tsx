@@ -644,7 +644,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     setGroupField(null);
     setStage(4);
     setEditing(undefined);
-    setField({ ...blank((schema?.fields?.length || 0) + 1), label: initialLabel.trim(), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
+    setField({ ...blank(Math.max(0, ...(schema?.fields || []).map((item: any) => item.position || 0)) + 1), label: initialLabel.trim(), field_key: `question_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}` });
     setFieldOptionsText("");
     setShowFieldEditor(true);
   }
@@ -1121,13 +1121,13 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     const count = bindingCounts.get(item.id) || 0;
     const all: any[] = schema?.fields || [];
     const index = all.findIndex(question => question.id === item.id);
-    const canReorder = stage === 4 && version?.status === "DRAFT" && !questionQuery.trim() && !busy && !showFieldEditor;
+    const showOrderControls = stage >= 2 && stage <= 5 && version?.status === "DRAFT";
+    const canReorder = showOrderControls && !questionQuery.trim() && !busy && !showFieldEditor;
     const previous = all[index - 1], next = all[index + 1];
-    const same = (other: any) => other && savedQuestionGroup(other) === savedQuestionGroup(item);
     const marker = questionDrop?.id === item.id ? (questionDrop?.after ? "drop-after" : "drop-before") : "";
     const groupName = savedQuestionGroup(item), sectionIndex = questionSectionNames.indexOf(groupName);
     const heading = visibleIndex === 0 || savedQuestionGroup(filteredQuestions[visibleIndex - 1]) !== groupName
-      ? <div key={`section-${groupName}-${visibleIndex}`} className="workspace-question-section"><b>{groupName}</b>{canReorder && <div><button type="button" aria-label={`Поднять раздел «${groupName}»`} disabled={sectionIndex === 0} onClick={() => moveQuestionSection(groupName, -1)}><ArrowUp size={13}/></button><button type="button" aria-label={`Опустить раздел «${groupName}»`} disabled={sectionIndex === questionSectionNames.length - 1} onClick={() => moveQuestionSection(groupName, 1)}><ArrowDown size={13}/></button></div>}</div> : null;
+      ? <div key={`section-${groupName}-${visibleIndex}`} className="workspace-question-section"><b>{groupName}</b>{showOrderControls && <div><button type="button" aria-label={`Поднять раздел «${groupName}»`} disabled={!canReorder || sectionIndex === 0} onClick={() => moveQuestionSection(groupName, -1)}><ArrowUp size={13}/></button><button type="button" aria-label={`Опустить раздел «${groupName}»`} disabled={!canReorder || sectionIndex === questionSectionNames.length - 1} onClick={() => moveQuestionSection(groupName, 1)}><ArrowDown size={13}/></button></div>}</div> : null;
     const card = <div key={item.id} className={`workspace-question-card ${marker} ${draggedQuestion === item.id ? "dragging" : ""}`} draggable={canReorder} onDragStart={event => {
       if (!canReorder) return;
       event.dataTransfer.effectAllowed = "move";
@@ -1147,7 +1147,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       setDraggedQuestion(null); setQuestionDrop(null);
     }} onDragEnd={() => { setDraggedQuestion(null); setQuestionDrop(null); }}>
       <button className={`workspace-question-open ${editing === item.id && showFieldEditor ? "active" : ""}`} type="button" onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>
-      {canReorder && <div className="workspace-question-order"><GripVertical size={14} aria-hidden="true"/><button type="button" aria-label={`Переместить «${item.label}» вверх`} disabled={!same(previous)} onClick={() => moveQuestion(item.id, previous.id)}><ArrowUp size={13}/></button><button type="button" aria-label={`Переместить «${item.label}» вниз`} disabled={!same(next)} onClick={() => moveQuestion(item.id, next.id, true)}><ArrowDown size={13}/></button></div>}
+      {showOrderControls && <div className="workspace-question-order" title={questionQuery.trim() ? "Очистите поиск, чтобы изменить порядок вопросов" : undefined}><GripVertical size={14} aria-hidden="true"/><button type="button" aria-label={`Переместить «${item.label}» вверх`} disabled={!canReorder || !previous} onClick={() => moveQuestion(item.id, previous.id)}><ArrowUp size={13}/></button><button type="button" aria-label={`Переместить «${item.label}» вниз`} disabled={!canReorder || !next} onClick={() => moveQuestion(item.id, next.id, true)}><ArrowDown size={13}/></button></div>}
     </div>;
     return heading ? [heading, card] : [card];
   }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, questionSectionNames, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
@@ -1486,7 +1486,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                             <div className="workspace-panel-heading"><h3>Вопросы анкеты</h3><span>{schema?.fields?.length || 0}</span></div>
                             <label className="workspace-search"><Search size={14}/><input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="Найти вопрос" aria-label="Найти вопрос"/></label>
                             {version.status === "DRAFT" && <button className="workspace-add" data-tour="tpl-add-question" type="button" onClick={() => newField()}><Plus size={15}/>Добавить вопрос</button>}
-                            {stage === 4 && version.status === "DRAFT" && !questionQuery.trim() && <p className="workspace-order-hint">Перетащите вопрос в нужное место или раздел. Стрелки меняют порядок вопросов и разделов.</p>}
+                            {version.status === "DRAFT" && <p className="workspace-order-hint">{questionQuery.trim() ? "Очистите поиск, чтобы изменить порядок вопросов." : "Перетащите вопрос в нужное место или раздел. Стрелки меняют порядок вопросов и разделов."}</p>}
                             <nav className="workspace-question-list" data-tour="tpl-questions" aria-label="Список вопросов">
                               {questionCards}
                               {schema?.fields?.length === 0 && <p className="workspace-empty">Вопросов пока нет. Добавьте первый вопрос или выделите текст в документе.</p>}

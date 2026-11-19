@@ -535,7 +535,7 @@ def test_question_delete_resets_dependent_calculation_to_manual_field():
     assert remaining[0]['config']['calculated'] is False and remaining[0]['config']['expression'] is None
 
 
-def test_question_delete_rolls_back_all_cleanup_when_validation_fails():
+def test_question_delete_rolls_back_all_cleanup_when_audit_fails():
     client,headers,base,_=deletion_test_template('DELETE_ROLLBACK')
     field=client.post(base+'/fields',headers=headers,json={'field_key':'source','label':'Источник','field_type':'TEXT','position':1}).json()
     locator=next(node['locator'] for node in client.get(base+'/preview',headers=headers).json()['nodes'] if node['text']=='VALUE')
@@ -544,9 +544,9 @@ def test_question_delete_rolls_back_all_cleanup_when_validation_fails():
     region=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'visible','region_type':'CONDITIONAL_PARAGRAPH','start_locator':locator,'include_when':{'operator':'IS_NOT_EMPTY','field_key':'source'}})
     assert region.status_code==201,region.text
     path=base+f"/fields/{field['id']}"
-    with patch('app.contract_platform.validate_calculations',side_effect=HTTPException(422,detail='Проверка прервана')):
-        deleted,_=confirmed_question_delete(client,headers,path)
-    assert deleted.status_code==422
+    with patch('app.contract_platform.TemplateAuditEvent',side_effect=RuntimeError('Не удалось записать аудит')):
+        with pytest.raises(RuntimeError,match='Не удалось записать аудит'):
+            confirmed_question_delete(client,headers,path)
     assert client.get(base+'/questionnaire',headers=headers).json()['fields'][0]['id']==field['id']
     assert client.get(base+'/bindings',headers=headers).json()[0]['id']==binding.json()['id']
     assert client.get(base+'/conditional-regions',headers=headers).json()[0]['include_when']=={'operator':'IS_NOT_EMPTY','field_key':'source'}
@@ -669,6 +669,104 @@ def test_conditional_run_beside_word_field_keeps_field_and_allows_nested_payment
     replace_range(paragraph._p,start,finish,'')
     assert paragraph.text=='Оплата [срок].'
     assert len(paragraph._p.findall('.//'+qn('w:fldChar')))==2
+
+
+def test_conditional_paragraph_with_bindings_beside_fillin_and_bookmark():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FIELD_ADJACENT_REGION')
+    document=Document();paragraph=document.add_paragraph();paragraph.add_run('BEFORE ')
+    bookmark_start=OxmlElement('w:bookmarkStart');bookmark_start.set(qn('w:id'),'7');bookmark_start.set(qn('w:name'),'safe_text')
+    paragraph._p.append(bookmark_start);paragraph.add_run('BOOKMARK ')
+    bookmark_end=OxmlElement('w:bookmarkEnd');bookmark_end.set(qn('w:id'),'7');paragraph._p.append(bookmark_end)
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+    instruction=OxmlElement('w:instrText');instruction.text=' FILLIN "Название" ';paragraph.add_run()._r.append(instruction)
+    separator=OxmlElement('w:fldChar');separator.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separator)
+    paragraph.add_run('FIELD_RESULT')
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    paragraph.add_run(' AFTER')
+    raw=io.BytesIO();document.save(raw);source_bytes=raw.getvalue()
+    version=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('fields.docx',source_bytes,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    fields=[]
+    for position,key in enumerate(('before','after','include','inside'),1):
+        response=client.post(base+'/fields',headers=headers,json={'field_key':key,'label':f'Вопрос {key}','field_type':'BOOLEAN' if key=='include' else 'TEXT','position':position})
+        assert response.status_code==201,response.text
+        fields.append(response.json())
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0];text=node['text']
+    for field,needle in ((fields[0],'BEFORE'),(fields[1],'AFTER')):
+        start=text.index(needle)
+        bound=client.post(base+'/bindings',headers=headers,json={'field_id':field['id'],'locator':node['locator'],'start':start,'end':start+len(needle),'selected_text':needle})
+        assert bound.status_code==201,bound.text
+    created=client.post(base+'/conditional-regions',headers=headers,json={'region_key':'optional','region_type':'CONDITIONAL_PARAGRAPH','start_locator':node['locator'],'include_when':{'operator':'EQUALS','field_key':'include','value':True}})
+    assert created.status_code==201,created.text
+    enabled=client.post(base+'/test-drive',headers=headers,json={'answers':{'before':'СЛЕВА','after':'СПРАВА','include':True}})
+    assert enabled.status_code==201,enabled.text
+    enabled_doc=Document(io.BytesIO(client.get(enabled.json()['download_url'],headers=headers).content))
+    assert 'СЛЕВА' in enabled_doc.paragraphs[0].text and 'СПРАВА' in enabled_doc.paragraphs[0].text
+    assert len(enabled_doc.paragraphs[0]._p.findall('.//'+qn('w:fldChar')))==3
+    assert len(enabled_doc.paragraphs[0]._p.findall('.//'+qn('w:bookmarkStart')))==1
+    disabled=client.post(base+'/test-drive',headers=headers,json={'answers':{'before':'СЛЕВА','after':'СПРАВА','include':False}})
+    assert disabled.status_code==201,disabled.text
+    assert not any('СЛЕВА' in item.text for item in Document(io.BytesIO(client.get(disabled.json()['download_url'],headers=headers).content)).paragraphs)
+    from app.contract_platform import safe_source
+    with SessionLocal() as session:assert safe_source(session.get(TemplateVersion,version['id'])).read_bytes()==source_bytes
+    # A binding in the displayed FILLIN result becomes plain text in the output.
+    start=text.index('FIELD_RESULT')
+    inside=client.post(base+'/bindings',headers=headers,json={'field_id':fields[3]['id'],'locator':node['locator'],'start':start,'end':start+len('FIELD_RESULT'),'selected_text':'FIELD_RESULT'})
+    assert inside.status_code==201,inside.text
+    checked=client.patch(base+f"/conditional-regions/{created.json()['id']}",headers=headers,json={'region_key':'optional','include_when':{'operator':'EQUALS','field_key':'include','value':True}})
+    assert checked.status_code==200,checked.text
+    generated=client.post(base+'/test-drive',headers=headers,json={'answers':{'before':'СЛЕВА','after':'СПРАВА','include':True,'inside':'ВНУТРИ'}})
+    assert generated.status_code==201,generated.text
+    output=Document(io.BytesIO(client.get(generated.json()['download_url'],headers=headers).content))
+    assert 'ВНУТРИ' in output.paragraphs[0].text
+    assert len(output.paragraphs[0]._p.findall('.//'+qn('w:fldChar')))==0
+    hidden=client.post(base+'/test-drive',headers=headers,json={'answers':{'before':'СЛЕВА','after':'СПРАВА','include':False,'inside':'ВНУТРИ'}})
+    assert hidden.status_code==201,hidden.text
+    assert not any('ВНУТРИ' in item.text for item in Document(io.BytesIO(client.get(hidden.json()['download_url'],headers=headers).content)).paragraphs)
+
+
+def test_fillin_result_replacement_is_narrow_and_flattens_only_the_edited_field():
+    from app.contract_platform import replace_range
+    import copy
+    paragraph=Document().add_paragraph();paragraph.add_run('Начало ')
+    def add_field(instruction,result):
+        begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');paragraph.add_run()._r.append(begin)
+        for part in (instruction[:len(instruction)//2],instruction[len(instruction)//2:]):
+            code=OxmlElement('w:instrText');code.text=part;paragraph.add_run()._r.append(code)
+        separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');paragraph.add_run()._r.append(separate)
+        paragraph.add_run(result[:len(result)//2]);paragraph.add_run(result[len(result)//2:])
+        end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');paragraph.add_run()._r.append(end)
+    add_field(' FILLIN "Первый" ','ПЕРВЫЙ РЕЗУЛЬТАТ')
+    paragraph.add_run(' и ')
+    add_field(' FILLIN "Второй" ','ВТОРОЙ')
+    source=paragraph.text
+    first=source.index('РЕЗУЛЬТАТ');second=source.index('ВТОРОЙ')
+    edited=copy.deepcopy(paragraph._p)
+    replace_range(edited,second,second+len('ВТОРОЙ'),'ЗАМЕНА')
+    replace_range(edited,first,first+len('РЕЗУЛЬТАТ'),'ЧАСТЬ')
+    assert len(edited.findall('.//'+qn('w:fldChar')))==0
+    assert len(edited.findall('.//'+qn('w:instrText')))==0
+    assert ''.join(node.text or '' for node in edited.findall('.//'+qn('w:t'))) == 'Начало ПЕРВЫЙ ЧАСТЬ и ЗАМЕНА'
+    assert len(paragraph._p.findall('.//'+qn('w:fldChar')))==6
+    first_end=source.index(' и ')
+    for start,end in ((source.index('ПЕРВЫЙ')-1,source.index('ПЕРВЫЙ')+2),(first_end-2,first_end+1),(source.index('ПЕРВЫЙ'),second+2)):
+        with pytest.raises(ValueError,match='поля Word'):replace_range(copy.deepcopy(paragraph._p),start,end,'ОТКАЗ')
+    unsupported=Document().add_paragraph()
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');unsupported.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=' DATE ';unsupported.add_run()._r.append(code)
+    separate=OxmlElement('w:fldChar');separate.set(qn('w:fldCharType'),'separate');unsupported.add_run()._r.append(separate)
+    unsupported.add_run('01.01.2026')
+    end=OxmlElement('w:fldChar');end.set(qn('w:fldCharType'),'end');unsupported.add_run()._r.append(end)
+    with pytest.raises(ValueError,match='поля Word'):replace_range(unsupported._p,0,10,'ОТКАЗ')
+    simple=Document().add_paragraph()
+    simple_field=OxmlElement('w:fldSimple');simple_field.set(qn('w:instr'),'DATE')
+    simple_run=OxmlElement('w:r');simple_text=OxmlElement('w:t');simple_text.text='01.01.2026';simple_run.append(simple_text);simple_field.append(simple_run)
+    simple._p.append(simple_field)
+    with pytest.raises(ValueError,match='поля Word'):replace_range(simple._p,0,10,'ОТКАЗ')
+    instruction_only=Document().add_paragraph()
+    begin=OxmlElement('w:fldChar');begin.set(qn('w:fldCharType'),'begin');instruction_only.add_run()._r.append(begin)
+    code=OxmlElement('w:instrText');code.text=' FILLIN "Скрыто" ';instruction_only.add_run()._r.append(code)
+    with pytest.raises(ValueError,match='поля Word'):replace_range(instruction_only._p,0,6,'ОТКАЗ')
 
 
 def test_conditional_row_alias_becomes_unresolved_after_anchor_rollback():
@@ -1641,7 +1739,8 @@ def test_contract_platform_rejects_invalid_condition_configuration():
     assert cycle.status_code==422 and 'циклическая' in cycle.text
     wrong=client.patch(base+f"/fields/{b.json()['id']}",headers=headers,json={'field_key':'field.b','label':'Поле Б','field_type':'TEXT','position':2,'visible_when':{'operator':'GREATER_THAN','field_key':'field.a','value':'x'}})
     assert wrong.status_code==422 and 'несовместим' in wrong.text
-    assert client.delete(base+f"/fields/{a['id']}",headers=headers).status_code==422
+    blocked=client.delete(base+f"/fields/{a['id']}",headers=headers)
+    assert blocked.status_code==409 and blocked.json()['detail']['dependencies']
     database=SessionLocal(); broken=database.query(QuestionnaireField).filter_by(id=b.json()['id']).one(); broken.config={**broken.config,'visible_when':{'operator':'EQUALS','field_key':'deleted.field','value':'x'}}; database.commit(); database.close()
     rejected=client.post(base+'/publish',headers=headers)
     assert rejected.status_code==422 and 'не найдено' in rejected.text
@@ -2017,7 +2116,7 @@ def test_r35_product_resolver_and_unified_document_flow():
     published_product=manager.post(base+'/publish',headers=headers); assert published_product.status_code==200,published_product.text
     assert manager.patch(base+'/rules',headers=headers,json=rules).status_code==409
     employee=TestClient(app); employee_headers=auth(employee,'petrova'); catalog=employee.get('/api/v1/contract-product-catalog',headers=employee_headers).json(); assert [x['name'] for x in catalog].count('Договор на проведение тренировок')==1
-    legacy_catalog=employee.get('/api/v1/contract-catalog',headers=employee_headers).json(); assert person['id'] not in {x['id'] for x in legacy_catalog} and entrepreneur['id'] not in {x['id'] for x in legacy_catalog}
+    docx_catalog=employee.get('/api/v1/contract-catalog',headers=employee_headers).json(); assert {person['id'],entrepreneur['id']} <= {x['id'] for x in docx_catalog}
     draft=employee.post('/api/v1/contract-product-drafts',headers=employee_headers,json={'product_id':product['id']}).json(); did=draft['id']; assert draft['decision']['state']=='NEED_MORE_INFORMATION'
     common={'contractor_status':'Физическое лицо','contractor_name':'Иван Иванов','labor_signs':False,'foreign_citizen':False}
     saved=employee.patch(f'/api/v1/contract-product-drafts/{did}',headers=employee_headers,json={'common_answers':common,'selected_variant_id':variants[1]['id'],'variant_answers':{}}); assert saved.status_code==200,saved.text; assert saved.json()['selected_variant']['id']==variants[0]['id']
@@ -2397,6 +2496,33 @@ def test_question_order_is_atomic_persisted_and_preserves_bindings_and_condition
     assert draft.status_code==201,draft.text
     assert [field['id'] for field in draft.json()['schema']['fields']]==expected
     assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':ids}).status_code==409
+
+
+def test_question_position_after_delete_reorder_and_stale_edit_keeps_binding():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'FIELD_POSITION_RECOVERY')
+    source=Document();source.add_paragraph('NAME');raw=io.BytesIO();source.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('positions.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
+    fields=[]
+    for position,label in enumerate(('Первый','2.3.1','2.4'),1):
+        response=client.post(base+'/fields',headers=headers,json={'field_key':f'question_{position}','label':label,'field_type':'TEXT','position':position})
+        assert response.status_code==201,response.text
+        fields.append(response.json())
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':fields[0]['id'],'locator':node['locator'],'start':0,'end':4,'selected_text':'NAME'}).json()
+    assert client.delete(base+f"/fields/{fields[1]['id']}",headers=headers).status_code==204
+    # A legacy client may still submit len(fields)+1, which is already occupied.
+    created=client.post(base+'/fields',headers=headers,json={'field_key':'replacement','label':'2.3.1','field_type':'TEXT','position':3})
+    assert created.status_code==201,created.text
+    assert created.json()['position']==4
+    order=[fields[2]['id'],fields[0]['id'],created.json()['id']]
+    assert client.patch(base+'/fields/order',headers=headers,json={'field_ids':order}).status_code==200
+    # The editor was opened before the reorder and still sends its old position.
+    edited=client.patch(base+f"/fields/{fields[0]['id']}",headers=headers,json={'field_key':'question_1','label':'Исправленный 2.4','field_type':'TEXT','position':1})
+    assert edited.status_code==200,edited.text
+    assert edited.json()['position']==2
+    assert client.get(base+'/bindings',headers=headers).json()[0]['id']==binding['id']
+    assert [item['id'] for item in client.get(base+'/questionnaire',headers=headers).json()['fields']]==order
 
 
 def test_question_order_moves_last_to_first_across_sections_and_employee_sees_it():

@@ -11,6 +11,19 @@ const newRowId = () => globalThis.crypto?.randomUUID?.() || `row-${Date.now()}-$
 export function TemplateQuestionnairePreview({ schema, answers, change, selectedStageIds = [], changeStages, lockCompletedStages = false, changeStageLocking, lockedDrafts = [], unlockStage, busy, published, document, error, notice, publicationCheck, generate, publish }: any) {
   const [sectionIndex, setSectionIndex] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [lockOverride, setLockOverride] = useState<boolean | null>(null);
+  const [lockSaving, setLockSaving] = useState(false);
+  const [lockError, setLockError] = useState("");
+  const lockValue = lockOverride ?? lockCompletedStages;
+  const saveStageLocking = async (enabled: boolean) => {
+    setLockOverride(enabled);
+    setLockSaving(true);
+    setLockError("");
+    const saved = await changeStageLocking(enabled);
+    if (!saved) setLockError("Не удалось сохранить настройку. Значение восстановлено.");
+    setLockOverride(null);
+    setLockSaving(false);
+  };
   const stages = (schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE");
   const { fields, groups } = useMemo(() => selectedQuestionnaire(schema, selectedStageIds), [schema, selectedStageIds]);
   const relevantAnswers = Object.fromEntries([...fields.map((field: any) => field.field_key), ...groups.map((group: any) => group.group_key)].filter(key => key in answers).map(key => [key, answers[key]]));
@@ -45,7 +58,7 @@ export function TemplateQuestionnairePreview({ schema, answers, change, selected
     <div className="template-questionnaire-content">
       <header className="template-questionnaire-heading"><span>Проверка перед публикацией</span><h2>Предпросмотр анкеты</h2><p>Заполните вопросы так, как это сделает сотрудник, и сформируйте тестовый документ.</p></header>
       {stages.length > 0 && <fieldset className="contract-stage-selection"><legend>Этапы договора</legend><p>Выберите один или несколько этапов для тестового документа.</p><button type="button" className="secondary" onClick={() => changeStages(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>{stages.map((stage: any) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} onChange={event => changeStages(event.target.checked ? [...selectedStageIds, stage.id] : selectedStageIds.filter((id: string) => id !== stage.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>}
-      {stages.length > 0 && <div className="contract-stage-lock-setting"><label><input type="checkbox" checked={lockCompletedStages} disabled={busy || published} onChange={event => void changeStageLocking(event.target.checked)}/><b>Блокировать редактирование завершённых этапов</b></label><p>После завершения этапа сотрудник сможет просматривать ранее введённые ответы, но не сможет их изменять. Разблокировка доступна уполномоченному специалисту ДПО.</p><small>В этом предпросмотре ответы не блокируются и боевые состояния этапов не создаются.</small></div>}
+      {stages.length > 0 && <div className="contract-stage-lock-setting"><label><input type="checkbox" checked={lockValue} disabled={busy || published || lockSaving} onChange={event => void saveStageLocking(event.target.checked)}/><b>Блокировать редактирование завершённых этапов</b></label><p>После завершения этапа сотрудник сможет просматривать ранее введённые ответы, но не сможет их изменять. Разблокировка доступна уполномоченному специалисту ДПО.</p><small>В этом предпросмотре ответы не блокируются и боевые состояния этапов не создаются.</small>{lockSaving && <small role="status">Сохраняем настройку…</small>}{lockError && <small role="alert">{lockError}</small>}</div>}
       {published && lockCompletedStages && <section className="contract-stage-unlock-list"><h3>Завершённые этапы сотрудников</h3>{lockedDrafts.length ? lockedDrafts.map((draft: any) => <article key={draft.id}><b>{draft.title} · {draft.owner}</b>{draft.stage_progress.filter((stage: any) => stage.state === "COMPLETED").map((stage: any) => <div key={stage.id}><span>{stage.name}</span><button type="button" className="secondary" disabled={busy} onClick={() => void unlockStage(draft.id, stage.id)}>Разблокировать</button></div>)}</article>) : <p>Завершённых этапов пока нет.</p>}</section>}
       {steps.length > 1 && <nav className="questionnaire-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" className={index === sectionIndex ? "active" : ""} aria-current={index === sectionIndex ? "step" : undefined} onClick={() => setSectionIndex(index)}>{index + 1}. {step.name}</button>)}</nav>}
       {displayError && <div className="platform-error" role="alert">{displayError}</div>}
@@ -65,7 +78,7 @@ export function TemplateQuestionnairePreview({ schema, answers, change, selected
       {document && <a className="document-ready" href={document.download_url}><FileText size={20}/><span><b>Тестовый DOCX готов</b><small>Скачайте документ и проверьте результат</small></span><Download size={20}/></a>}
       <footer className="template-questionnaire-actions">
         <button type="button" className="secondary" disabled={busy || published || (stages.length > 0 && selectedStageIds.length === 0)} onClick={() => { if (checkAll()) generate(); }}><FileText size={16}/>Сформировать тестовый DOCX</button>
-        <button type="button" className="primary" disabled={busy || published || !publicationCheck || !!publicationCheck.errors?.length} onClick={publish}><Send size={16}/>{publicationCheck?.warnings?.length && !publicationCheck?.errors?.length ? "Опубликовать с предупреждениями" : "Опубликовать шаблон"}</button>
+        <button type="button" className="primary" disabled={busy || lockSaving || published || !publicationCheck || !!publicationCheck.errors?.length} onClick={publish}><Send size={16}/>{publicationCheck?.warnings?.length && !publicationCheck?.errors?.length ? "Опубликовать с предупреждениями" : "Опубликовать шаблон"}</button>
         {published && !notice && <p>Версия опубликована и доступна сотрудникам.</p>}
       </footer>
     </div>

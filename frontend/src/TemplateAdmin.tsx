@@ -1016,12 +1016,16 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
     return () => { current = false; };
   }, [api, stage, selected?.id, version?.id, version?.status, version?.lock_completed_stages, schema, bindings, regions, repeatingGroups]);
   async function changeStageLocking(enabled: boolean) {
-    if (!version) return;
-    await run(async () => {
+    if (!version) return false;
+    try {
       const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/stage-locking`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
       setVersion(updated);
       setTestDocument(null);
-    });
+      return true;
+    } catch (e: any) {
+      setError(e.message || "Не удалось сохранить настройку блокировки этапов");
+      return false;
+    }
   }
   useEffect(() => {
     if (stage !== 6 || !version?.id || !version.lock_completed_stages || version.status === "DRAFT") { setLockedDrafts([]); return; }

@@ -16,6 +16,42 @@ test("step 6 shows the optional locking setting without completing a real draft"
   } finally { await server.close(); }
 });
 
+test("stage lock switch updates before save and restores its value after an error", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost/templates" });
+  const globals = { window: dom.window, document: dom.window.document, navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const previous = Object.fromEntries(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
+  const { TemplateQuestionnairePreview } = await server.ssrLoadModule("/src/TemplateQuestionnairePreview.tsx");
+  const React = await import("react");
+  const { act } = React;
+  const { createRoot } = await import("react-dom/client");
+  const root = createRoot(dom.window.document.getElementById("root"));
+  const schema = { fields: [], repeating_groups: [], stages: [{ id: "s1", name: "Этап", position: 1, status: "ACTIVE" }] };
+  let resolveSave;
+  const changeStageLocking = () => new Promise(resolve => { resolveSave = resolve; });
+  const props = { schema, answers: {}, selectedStageIds: ["s1"], change() {}, changeStages() {}, changeStageLocking, lockCompletedStages: false, busy: false, published: false };
+  const switchInput = () => dom.window.document.querySelector(".contract-stage-lock-setting input");
+  try {
+    await act(async () => root.render(React.createElement(TemplateQuestionnairePreview, props)));
+    act(() => switchInput().click());
+    assert.equal(switchInput().checked, true, "the check appears while the save request is pending");
+    assert.equal(switchInput().disabled, true, "a second request cannot start");
+    await act(async () => resolveSave(false));
+    assert.equal(switchInput().checked, false);
+    assert.match(dom.window.document.querySelector(".contract-stage-lock-setting").textContent, /Не удалось сохранить настройку/);
+    act(() => switchInput().click());
+    assert.equal(switchInput().checked, true);
+    await act(async () => { root.render(React.createElement(TemplateQuestionnairePreview, { ...props, lockCompletedStages: true })); resolveSave(true); });
+    assert.equal(switchInput().checked, true);
+    assert.equal(switchInput().disabled, false);
+  } finally {
+    await act(async () => root.unmount());
+    await server.close(); dom.window.close();
+    for (const [key, descriptor] of Object.entries(previous)) descriptor ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key];
+  }
+});
+
 test("employee completes a stage, reviews locked answers, and continues", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost/contracts" });
   dom.window.confirm = () => true;

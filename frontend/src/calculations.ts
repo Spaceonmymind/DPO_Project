@@ -79,6 +79,18 @@ export function calculateAnswers(schema: any, answers: any) {
       try { values[field.field_key] = evaluateExpression(field.config.expression, values, groups); return false; }
       catch { return true; }
     });
-  for (let field of pending) errors[field.field_key] = "Расчёт недоступен: проверьте активные исходные поля";
+  for (let field of pending) {
+    const inactiveSource = (node: any): string | undefined => {
+      if (!node || typeof node !== "object") return undefined;
+      if (Array.isArray(node)) return node.map(inactiveSource).find(Boolean);
+      if ((["FIELD", "CALCULATED"].includes(node.source) || (node.field_key && node.format)) && node.field_key && !activeKeys.has(node.field_key)) return node.field_key;
+      return [node.operands, node.parts, node.then, node.else].map(inactiveSource).find(Boolean);
+    };
+    const sourceKey = inactiveSource(field.config?.expression || field.config?.text_expression);
+    const source = (schema?.fields || []).find((candidate: any) => candidate.field_key === sourceKey);
+    errors[field.field_key] = source && !activeKeys.has(source.field_key)
+      ? `Источник «${source.label}» скрыт или исключён этапом. Обратитесь к специалисту ДПО для исправления настройки шаблона.`
+      : "Расчёт недоступен: проверьте активные исходные поля";
+  }
   return { values, groups, errors };
 }

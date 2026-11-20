@@ -2305,6 +2305,97 @@ def test_r34_calculated_rows_total_words_and_untrusted_values():
     assert hashlib.sha256(manager.get(base+'/source',headers=headers).content).hexdigest()==hashlib.sha256(original).hexdigest()
 
 
+def test_calculation_hidden_prepayment_source_requires_aligned_visibility():
+    from types import SimpleNamespace
+    from decimal import Decimal
+    from app.calculations import CalculationEngine
+    from app.conditions import ConditionEngine
+    from app.contract_platform import calculation_availability_warnings
+    payment='question_mwm019ye_qud2pu9r';advance='question_mwnbnt36_8fp7ujme';balance='question_mwnj9i6f_ew3vpgz3'
+    partial={'operator':'EQUALS','field_key':payment,'value':'Частичная предоплата + остаток после акта приемки'}
+    def field(key,label,kind,config=None):return SimpleNamespace(field_key=key,label=label,field_type=kind,required=False,config=config or {})
+    payment_field=field(payment,'Порядок оплаты','SINGLE_SELECT',{'options':['100% предоплата (аванс)','Частичная предоплата + остаток после акта приемки']})
+    source=field(advance,'2.18.1.Укажите размер предоплаты, %','DECIMAL',{'visible_when':partial,'stage_ids':['payment']})
+    result=field(balance,'2.18.4. Размер остатка, %','DECIMAL',{'calculated':True,'stage_ids':['payment'],'expression':{'operation':'SUBTRACT','operands':[{'source':'CONSTANT','value':100},{'source':'FIELD','field_key':advance}]},'precision':2,'rounding':'HALF_UP'})
+    fields=[payment_field,source,result];CalculationEngine.validate(fields,[])
+    assert any('Размер остатка' in warning and advance in warning for warning in calculation_availability_warnings(fields))
+    full={payment:'100% предоплата (аванс)',advance:'25'}
+    active={x.field_key for x in ConditionEngine.active_fields(fields,full)}
+    assert advance not in active and balance in active
+    with pytest.raises(CalculationError,match='Размер остатка.*размер предоплаты'):CalculationEngine.calculate(fields,[],full,active,set())
+    result.config['visible_when']=partial
+    assert calculation_availability_warnings(fields)==[]
+    active={x.field_key for x in ConditionEngine.active_fields(fields,full)}
+    assert advance not in active and balance not in active
+    values,_=CalculationEngine.calculate(fields,[],full,active,set())
+    assert advance not in values and balance not in values
+    for percent,expected in [('30',Decimal('70.00')),('100',Decimal('0.00'))]:
+        answers={payment:'Частичная предоплата + остаток после акта приемки',advance:percent}
+        active={x.field_key for x in ConditionEngine.active_fields(fields,answers)}
+        values,_=CalculationEngine.calculate(fields,[],answers,active,set())
+        assert values[balance]==expected
+    result.config['stage_ids']=[];source.config['stage_ids']=['payment']
+    assert any('этапы' in warning for warning in calculation_availability_warnings(fields))
+    with pytest.raises(CalculationError,match='неактивного источника'):CalculationEngine.calculate(fields,[],{}, {balance},set())
+    assert CalculationEngine.calculate(fields,[],{},set(),set())[0]=={}
+
+
+def test_calculation_dependency_validation_cycles_missing_source_and_text():
+    from types import SimpleNamespace
+    from app.calculations import CalculationEngine, TextExpressionEngine
+    def field(key,config,kind='DECIMAL'):
+        return SimpleNamespace(field_key=key,label=key,field_type=kind,required=False,config=config)
+    a=field('a',{'calculated':True,'expression':{'source':'CALCULATED','field_key':'b'}})
+    b=field('b',{'calculated':True,'expression':{'source':'CALCULATED','field_key':'a'}})
+    with pytest.raises(CalculationError,match='цикл'):CalculationEngine.validate([a,b],[])
+    with pytest.raises(CalculationError,match='не найдено'):CalculationEngine.validate([a],[])
+    empty_constant=field('empty',{'calculated':True,'expression':{'source':'CONSTANT','value':None}})
+    with pytest.raises(CalculationError,match='не заполнено'):CalculationEngine.validate([empty_constant],[])
+    text_field=field('text',{'calculated':True,'text_expression':{'field_key':'a'}},'TEXT')
+    with pytest.raises(CalculationError,match='неактивного источника'):CalculationEngine.calculate([field('a',{}),text_field],[],{}, {'text'},set())
+    assert TextExpressionEngine.evaluate({'literal':'Готово'}, {})=='Готово'
+
+
+def test_prepayment_calculation_publication_warning_and_generation_guard():
+    client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'PREPAYMENT_CALC_GUARD')
+    document=Document();document.add_paragraph('Остаток: BALANCE')
+    raw=io.BytesIO();document.save(raw)
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('payment.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    payment='question_mwm019ye_qud2pu9r';advance='question_mwnbnt36_8fp7ujme';balance='question_mwnj9i6f_ew3vpgz3'
+    partial={'operator':'EQUALS','field_key':payment,'value':'Частичная предоплата + остаток после акта приемки'}
+    for position,payload in enumerate([
+        {'field_key':payment,'label':'Порядок оплаты','field_type':'SINGLE_SELECT','options':['100% предоплата (аванс)','Частичная предоплата + остаток после акта приемки']},
+        {'field_key':advance,'label':'Размер предоплаты, %','field_type':'DECIMAL','visible_when':partial},
+        {'field_key':balance,'label':'Размер остатка, %','field_type':'DECIMAL','calculated':True,'expression':{'operation':'SUBTRACT','operands':[{'source':'CONSTANT','value':100},{'source':'FIELD','field_key':advance}]},'precision':2},
+    ],1):
+        response=client.post(base+'/fields',headers=headers,json={**payload,'position':position})
+        assert response.status_code==201,response.text
+        if position==3:result=response.json()
+    node=client.get(base+'/preview',headers=headers).json()['nodes'][0]
+    binding=client.post(base+'/bindings',headers=headers,json={'field_id':result['id'],'locator':node['locator'],'start':9,'end':16,'selected_text':'BALANCE'})
+    assert binding.status_code==201,binding.text
+    checked=client.get(base+'/publication-check',headers=headers)
+    if checked.status_code==404:checked=client.get(base+'/publication-readiness',headers=headers)
+    assert checked.status_code==200,checked.text
+    assert any('Размер остатка' in item and advance in item for item in checked.json()['warnings'])
+    published=client.post(base+'/publish',headers=headers)
+    assert published.status_code==200,published.text
+    employee=TestClient(app);employee_headers=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=employee_headers,json={'template_id':template['id']})
+    assert draft.status_code==201,draft.text
+    did=draft.json()['id'];url=f'/api/v1/contract-drafts/{did}'
+    assert employee.patch(url,headers=employee_headers,json={'answers':{payment:'100% предоплата (аванс)',advance:'25'}}).status_code==200
+    blocked=employee.post(url+'/generate',headers=employee_headers)
+    assert blocked.status_code==422 and 'Размер остатка' in blocked.text and 'Размер предоплаты' in blocked.text
+    assert employee.patch(url,headers=employee_headers,json={'answers':{payment:'Частичная предоплата + остаток после акта приемки',advance:'30'}}).status_code==200
+    made=employee.post(url+'/generate',headers=employee_headers)
+    assert made.status_code==201,made.text
+    output=Document(io.BytesIO(employee.get(made.json()['download_url'],headers=employee_headers).content))
+    assert '70' in output.paragraphs[0].text
+
+
 def test_r35_product_resolver_and_unified_document_flow():
     manager=TestClient(app); headers=auth(manager)
     def published(code,marker):

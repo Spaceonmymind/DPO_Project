@@ -345,7 +345,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           </div>
         )}
         <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); advance(); }}>
-          {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{choiceText(f, answers[f.field_key]) || "—"}</b></div>)}</section>}
+          {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{Object.entries(calculated.errors || {}).map(([key, message]) => <p className="platform-error" role="alert" key={key}>{selectedSchema.fields.find((field: any) => field.field_key === key)?.label || key}: {String(message)}</p>)}{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{choiceText(f, answers[f.field_key]) || "—"}</b></div>)}</section>}
           {!review && <>
           {currentStep && <fieldset key={currentStep.name}>
               <legend>{currentStep.name}</legend>

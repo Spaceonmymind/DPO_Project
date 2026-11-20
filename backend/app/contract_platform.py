@@ -485,6 +485,27 @@ def validate_calculations(version_id,s):
  schema=schema_for(version_id,s); fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
  try: CalculationEngine.validate(fields,calculation_groups(version_id,s))
  except CalculationError as exc: raise HTTPException(422,detail=f'Некорректные вычисления: {exc}')
+def calculation_availability_warnings(fields):
+ by_key={field.field_key:field for field in fields};warnings=[]
+ def references(expression):
+  if isinstance(expression,list):
+   for item in expression:yield from references(item)
+  elif isinstance(expression,dict):
+   if expression.get('source') in {'FIELD','CALCULATED'} or 'field_key' in expression and 'format' in expression:yield expression['field_key']
+   for key in ('operands','parts','then','else'):yield from references(expression.get(key))
+ for field in fields:
+  cfg=field.config or {}
+  if not cfg.get('calculated'):continue
+  for key in set(references(cfg.get('text_expression') if field.field_type=='TEXT' else cfg.get('expression'))):
+   source=by_key.get(key)
+   if not source:continue # validate_calculations blocks missing sources
+   source_cfg=source.config or {};target_stages=set(cfg.get('stage_ids') or []);source_stages=set(source_cfg.get('stage_ids') or [])
+   stage_risk=bool(source_stages) and (not target_stages or not target_stages.issubset(source_stages))
+   visibility_risk=source_cfg.get('visible_when') is not None and cfg.get('visible_when')!=source_cfg.get('visible_when')
+   if stage_risk or visibility_risk:
+    reason='этапы' if stage_risk else 'условия видимости'
+    warnings.append(f'Вычисляемый вопрос «{field.label}» может использовать неактивный источник «{source.label}» ({key}): проверьте {reason}')
+ return warnings
 def calculated_document_values(version_id,s,fields,answers,selected_stage_ids=None,has_stages=False):
  groups=calculation_groups(version_id,s); legal_fields=stage_fields(fields,selected_stage_ids or [],has_stages); legal_groups=stage_groups(groups,selected_stage_ids or [],has_stages); active_keys={x.field_key for x in ConditionEngine.active_fields(legal_fields,answers)}; active_groups={x.group_key for x in legal_groups if group_is_active(x,legal_fields,answers)}
  try:
@@ -1040,6 +1061,7 @@ def publication_check(v,s):
   except (HTTPException,ConditionConfigurationError,CalculationError) as exc: errors.append(str(exc.detail) if isinstance(exc,HTTPException) else str(exc))
  if not errors:
   known={field.id:field for field in fields}
+  warnings.extend(calculation_availability_warnings(fields))
   for binding in bindings:
    if binding.field_id not in known: errors.append(f'Привязка «{binding.binding_key}» ссылается на отсутствующий вопрос')
    elif binding.binding_key!=known[binding.field_id].field_key: errors.append(f'Привязка «{binding.binding_key}» ссылается на другой ключ вопроса')

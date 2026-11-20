@@ -12,6 +12,11 @@ NUMERIC_TYPES={'INTEGER','DECIMAL','MONEY'}
 
 class CalculationError(ValueError): pass
 
+class InactiveCalculationSource(CalculationError):
+ def __init__(self,key):
+  self.key=key
+  super().__init__(f'Поле-источник «{key}» неактивно')
+
 class TextExpressionEngine:
  MAX_DEPTH=8; MAX_NODES=100; MAX_OUTPUT=20000
  @classmethod
@@ -38,7 +43,9 @@ class TextExpressionEngine:
  @classmethod
  def evaluate(cls,e,values):
   if 'literal' in e:return e['literal']
-  if 'field_key' in e:return ValueFormatter.format(values.get(e['field_key'],''),e.get('format','RAW'))
+  if 'field_key' in e:
+   if e['field_key'] not in values:raise InactiveCalculationSource(e['field_key'])
+   return ValueFormatter.format(values[e['field_key']],e.get('format','RAW'))
   if e['operation']=='IF':return cls.evaluate(e['then'] if ConditionEngine.evaluate(e['condition'],values) else e['else'],values)
   result=''.join(cls.evaluate(x,values) for x in e['parts'])
   if len(result)>cls.MAX_OUTPUT:raise CalculationError('Текстовый результат превышает 20000 символов')
@@ -80,7 +87,7 @@ class CalculationEngine:
   if not isinstance(e,dict): raise CalculationError('Формула не задана')
   source=e.get('source')
   if source:
-   if source=='CONSTANT': decimal_value(e.get('value')); return
+   if source=='CONSTANT': decimal_value(e.get('value'),empty_zero=False); return
    key=e.get('field_key')
    if source in {'FIELD','CALCULATED'}:
     if key not in regular: raise CalculationError(f'Поле-источник «{key}» не найдено')
@@ -138,34 +145,50 @@ class CalculationEngine:
    for row in rows:
     for key,field in fields.items():
      if not (field.config or {}).get('calculated'): row.setdefault(key,None)
-    cls._resolve_fields(pending,row,values,group_values,row)
+    cls._resolve_fields(pending,row,values,group_values,row,regular)
    group_values[group.group_key]=rows
   pending={x.field_key:x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys and x.field_type!='TEXT'}
-  cls._resolve_fields(pending,values,values,group_values,None)
+  cls._resolve_fields(pending,values,values,group_values,None,regular)
   for field in [x for x in regular_fields if (x.config or {}).get('calculated') and x.field_key in active_keys and x.field_type=='TEXT']:
-   values[field.field_key]=TextExpressionEngine.evaluate((field.config or {})['text_expression'],values)
+   try:values[field.field_key]=TextExpressionEngine.evaluate((field.config or {})['text_expression'],values)
+   except InactiveCalculationSource as exc:
+    source=regular.get(exc.key)
+    raise CalculationError(f'Вычисляемый вопрос «{field.label}» зависит от неактивного источника «{source.label if source else exc.key}» ({exc.key}). Согласуйте условия видимости и этапы этих вопросов') from exc
   return values,group_values
  @classmethod
- def _resolve_fields(cls,pending,target,values,groups,row):
+ def _resolve_fields(cls,pending,target,values,groups,row,regular):
   left=dict(pending)
   while left:
    progress=False
    for key,field in list(left.items()):
     try:value=cls.evaluate((field.config or {})['expression'],values,groups,row)
     except KeyError:continue
+    except InactiveCalculationSource as exc:
+     source=regular.get(exc.key)
+     raise CalculationError(f'Вычисляемый вопрос «{field.label}» зависит от неактивного источника «{source.label if source else exc.key}» ({exc.key}). Согласуйте условия видимости и этапы этих вопросов') from exc
     precision=(field.config or {}).get('precision',2);value=cls.quantize(value,precision,(field.config or {}).get('rounding','HALF_UP'));target[key]=value;del left[key];progress=True
-   if not progress:raise CalculationError('Не удалось определить порядок вычислений')
+   if not progress:
+    for field in left.values():
+     def missing(node):
+      if not isinstance(node,dict):return None
+      if node.get('source') in {'FIELD','CALCULATED'} and node.get('field_key') not in values and node.get('field_key') not in left:return node['field_key']
+      return next((key for child in ([node.get('then'),node.get('else'),*(node.get('operands') or [])]) if (key:=missing(child))),None)
+     key=missing((field.config or {})['expression'])
+     if key:
+      source=regular.get(key)
+      raise CalculationError(f'Вычисляемый вопрос «{field.label}» зависит от неактивного источника «{source.label if source else key}» ({key}). Согласуйте условия видимости и этапы этих вопросов')
+    raise CalculationError('Не удалось определить порядок вычислений')
  @classmethod
  def evaluate(cls,e,values,groups,row=None):
   if 'source' in e:
    source=e['source'];key=e.get('field_key')
-   if source=='CONSTANT':return decimal_value(e.get('value'))
+   if source=='CONSTANT':return decimal_value(e.get('value'),empty_zero=False)
    if source=='ROW_FIELD':return decimal_value((row or {}).get(key))
    if source=='ROW_CALCULATED':
     if key not in (row or {}):raise KeyError(key)
     return decimal_value(row[key])
    if source=='FIELD':
-    if key not in values: raise CalculationError(f'Поле-источник «{key}» неактивно')
+    if key not in values: raise InactiveCalculationSource(key)
     return decimal_value(values.get(key))
    if key not in values:raise KeyError(key)
    return decimal_value(values[key])

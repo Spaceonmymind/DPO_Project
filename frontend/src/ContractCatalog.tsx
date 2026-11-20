@@ -12,13 +12,14 @@ import {
   Trash2,
   ArrowUp,
   ArrowDown,
+  LockKeyhole,
 } from "lucide-react";
 import { evaluateCondition, fieldState } from "./conditions";
 import { calculateAnswers } from "./calculations";
 import { ProductQuestionnaire } from "./ProductQuestionnaire";
 import { QuestionHint } from "./QuestionHint";
 import { questionHelp } from "./questionHelp";
-import { selectedQuestionnaire } from "./contractStages";
+import { lockedStageSteps, owningStage, selectedQuestionnaire } from "./contractStages";
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 import { OTHER, choiceAnswer, choiceComplete, choiceOtherValues, choiceText, isStructuredChoice } from "./choices";
 import { textRuleHint } from "./textRules";
@@ -160,21 +161,46 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     }, 0);
   }
   function groupActive(g: any) {
-    const activeAnswers = Object.fromEntries(selectedSchema.fields.filter((f: any) => fieldState(f, relevantAnswers).visible).map((f: any) => [f.field_key, relevantAnswers[f.field_key]]));
+    const activeAnswers = Object.fromEntries(selectedSchema.fields.filter((f: any) => fieldState(f, currentAnswers).visible).map((f: any) => [f.field_key, currentAnswers[f.field_key]]));
     return evaluateCondition(g.config?.visible_when, activeAnswers);
   }
   const selectedSchema = draft ? selectedQuestionnaire(draft.schema, selectedStageIds) : { fields: [], groups: [] };
   const relevantAnswers = Object.fromEntries([...selectedSchema.fields.map((field: any) => field.field_key), ...selectedSchema.groups.map((group: any) => group.group_key)].filter(key => key in answers).map(key => [key, answers[key]]));
-  const steps = draft ? questionnaireSteps(selectedSchema.fields, selectedSchema.groups) : [];
+  const lockingStages = !!draft?.lock_completed_stages && selectedStageIds.length > 0;
+  const steps: any[] = draft ? lockingStages ? lockedStageSteps(draft.schema, selectedStageIds, questionnaireSteps) : questionnaireSteps(selectedSchema.fields, selectedSchema.groups) : [];
   const currentStep = steps[Math.min(stepIndex, Math.max(steps.length - 1, 0))];
+  const currentStageState = lockingStages ? draft?.stage_progress?.find((stage: any) => stage.id === currentStep?.stageId)?.state || "NOT_STARTED" : "IN_PROGRESS";
+  const orderedStages = lockingStages ? (draft.schema.stages || []).filter((stage: any) => stage.status === "ACTIVE" && selectedStageIds.includes(stage.id)).sort((a: any, b: any) => a.position - b.position) : [];
+  const currentStageIndex = orderedStages.findIndex((stage: any) => stage.id === currentStep?.stageId);
+  const availableKeys = lockingStages ? new Set([...selectedSchema.fields.filter((field: any) => { const owner = orderedStages.findIndex((stage: any) => stage.id === owningStage(field, orderedStages)); return owner >= 0 && owner <= currentStageIndex; }).map((field: any) => field.field_key), ...selectedSchema.groups.filter((group: any) => { const owner = orderedStages.findIndex((stage: any) => stage.id === owningStage(group, orderedStages)); return owner >= 0 && owner <= currentStageIndex; }).map((group: any) => group.group_key)]) : null;
+  const currentAnswers = availableKeys ? Object.fromEntries(Object.entries(relevantAnswers).filter(([key]) => availableKeys.has(key))) : relevantAnswers;
   function checkCurrentStep() {
     if (!draft || !currentStep) return true;
-    const nextErrors = validateStep(currentStep, relevantAnswers, selectedSchema.fields);
+    const nextErrors = validateStep(currentStep, currentAnswers, selectedSchema.fields);
     setErrors(nextErrors);
     setError(Object.keys(nextErrors).length ? "Исправьте поля текущего раздела." : "");
     return !Object.keys(nextErrors).length;
   }
-  function advance() {
+  async function advance() {
+    if (lockingStages && currentStep?.stageId) {
+      if (currentStageState === "COMPLETED") {
+        if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
+        else setReview(true);
+        return;
+      }
+      if (currentStageState === "NOT_STARTED") { setStepIndex(Math.max(0, steps.findIndex(step => draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "IN_PROGRESS"))); return; }
+      if (!checkCurrentStep()) return;
+      if (!window.confirm("Вы завершаете этап. После подтверждения изменить ответы самостоятельно будет нельзя. Продолжить?")) return;
+      await run(async () => {
+        const result = await api(`/contract-drafts/${draft.id}/stages/${currentStep.stageId}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }) });
+        setDraft((current: any) => ({ ...current, completed_stage_ids: result.completed_stage_ids, stage_progress: result.stage_progress }));
+        setAnswers(result.answers);
+        savedSnapshot.current = JSON.stringify(result.answers);
+        if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
+        else setReview(true);
+      });
+      return;
+    }
     if (!checkCurrentStep()) return;
     if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
     else if (validate()) setReview(true);
@@ -207,7 +233,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     if (!selectedStageIds.length) { setError("Выберите хотя бы один этап договора."); return; }
     await run(async () => {
       const result = await api(`/contract-drafts/${draft.id}/stages`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected_stage_ids: selectedStageIds }) });
-      setDraft((current: any) => ({ ...current, selected_stage_ids: result.selected_stage_ids }));
+      setDraft((current: any) => ({ ...current, selected_stage_ids: result.selected_stage_ids, stage_progress: result.stage_progress }));
       setDocument(null);
       setChoosingStages(false);
       setReview(false);
@@ -264,7 +290,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [catalog, query],
   );
   const calculated: any = draft
-    ? calculateAnswers({ ...draft.schema, fields: selectedSchema.fields, repeating_groups: selectedSchema.groups }, relevantAnswers)
+    ? calculateAnswers({ ...draft.schema, fields: selectedSchema.fields, repeating_groups: selectedSchema.groups }, lockingStages && !review ? currentAnswers : relevantAnswers)
     : { values: {}, groups: {}, errors: {} };
   const activeFields = draft
     ? selectedSchema.fields.filter((f: any) => fieldState(f, relevantAnswers).visible && !f.config?.calculated)
@@ -305,11 +331,11 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
-        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
+        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" disabled={lockingStages && !!draft.completed_stage_ids?.length} onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
         <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
-          <nav className="questionnaire-steps" data-tour="q-steps" aria-label="Разделы анкеты">{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], relevantAnswers, selectedSchema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}</button>)}</nav>
+          <nav className="questionnaire-steps" data-tour="q-steps" aria-label={lockingStages ? "Этапы договора" : "Разделы анкеты"}>{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (lockingStages) { setReview(false); setStepIndex(index); setErrors({}); setError(""); return; } if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], relevantAnswers, selectedSchema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}{lockingStages && <small>{draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "COMPLETED" ? <><LockKeyhole size={13}/> Завершён</> : draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "IN_PROGRESS" ? "Заполняется" : "Не начат"}</small>}</button>)}</nav>
         </section>
         {error && (
           <div className="platform-error" role="alert">
@@ -347,9 +373,11 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); advance(); }}>
           {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{Object.entries(calculated.errors || {}).map(([key, message]) => <p className="platform-error" role="alert" key={key}>{selectedSchema.fields.find((field: any) => field.field_key === key)?.label || key}: {String(message)}</p>)}{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{choiceText(f, answers[f.field_key]) || "—"}</b></div>)}</section>}
           {!review && <>
-          {currentStep && <fieldset key={currentStep.name}>
+          {lockingStages && currentStageState === "COMPLETED" && <p className="platform-success" role="status">Этап завершён. Редактирование ответов заблокировано.</p>}
+          {lockingStages && currentStageState === "NOT_STARTED" && <p className="platform-error" role="status">Сначала завершите предыдущий этап.</p>}
+          {currentStep && <fieldset key={currentStep.name} disabled={lockingStages && currentStageState !== "IN_PROGRESS"}>
               <legend>{currentStep.name}</legend>
-              {currentStep.items.map((item, itemIndex) => item.kind === "field" ? (fieldState(item.value, relevantAnswers).visible ? <Question key={item.value.id} field={item.value} required={fieldState(item.value, relevantAnswers).required} value={answers[item.value.field_key]} error={errors[item.value.field_key]} change={(value: any) => { setAnswers({ ...answers, [item.value.field_key]: value }); setErrors({ ...errors, [item.value.field_key]: undefined }); }}/> : null) : (groupActive(item.value) ? <RepeatingGroupForm key={item.value.id} tourTarget={itemIndex === 0} group={item.value} items={answers[item.value.group_key] || []} calculatedItems={calculated.groups[item.value.group_key] || []} calculationErrors={calculated.errors || {}} error={errors[item.value.group_key]} add={() => addItem(item.value)} remove={(i: number) => setItems(item.value, (answers[item.value.group_key] || []).filter((_: any, n: number) => n !== i))} move={(i: number, o: number) => moveItem(item.value, i, o)} change={(i: number, k: string, v: any) => changeItem(item.value, i, k, v)}/> : null))}
+              {currentStep.items.map((item: any, itemIndex: number) => item.kind === "field" ? (fieldState(item.value, currentAnswers).visible ? <Question key={item.value.id} field={item.value} required={fieldState(item.value, currentAnswers).required} value={answers[item.value.field_key]} error={errors[item.value.field_key]} change={(value: any) => { setAnswers({ ...answers, [item.value.field_key]: value }); setErrors({ ...errors, [item.value.field_key]: undefined }); }}/> : null) : (groupActive(item.value) ? <RepeatingGroupForm key={item.value.id} tourTarget={itemIndex === 0} group={item.value} items={answers[item.value.group_key] || []} calculatedItems={calculated.groups[item.value.group_key] || []} calculationErrors={calculated.errors || {}} error={errors[item.value.group_key]} add={() => addItem(item.value)} remove={(i: number) => setItems(item.value, (answers[item.value.group_key] || []).filter((_: any, n: number) => n !== i))} move={(i: number, o: number) => moveItem(item.value, i, o)} change={(i: number, k: string, v: any) => changeItem(item.value, i, k, v)}/> : null))}
             </fieldset>}
           </>}
           <div className="form-actions" data-tour="q-actions">
@@ -359,13 +387,13 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
               type="button"
               className="secondary"
               onClick={save}
-              disabled={busy}
+              disabled={busy || (lockingStages && currentStageState !== "IN_PROGRESS")}
             >
               <Save size={16} />
               Сохранить ответы
             </button>
             <button className="primary" data-tour={review?"q-generate":undefined} disabled={busy}>
-              {review ? "Сформировать DOCX" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
+              {review ? "Сформировать DOCX" : lockingStages ? currentStageState === "IN_PROGRESS" ? "Завершить этап и перейти далее" : currentStageState === "COMPLETED" ? "Перейти далее" : "Вернуться к текущему этапу" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
             </button>
           </div>
           {document && (

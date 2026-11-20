@@ -153,6 +153,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
   const runningRef = useRef(false);
   const [operation, setOperation] = useState<TemplateOperation | null>(null);
   const [publicationCheck, setPublicationCheck] = useState<{ errors: string[]; warnings: string[]; tested_current_revision: boolean } | null>(null);
+  const [lockedDrafts, setLockedDrafts] = useState<any[]>([]);
   const [paneWidths, setPaneWidths] = useState<PaneWidths>(readPaneWidths);
   const [paneAvailable, setPaneAvailable] = useState(0);
   const [requisiteSets, setRequisiteSets] = useState<any[]>([]);
@@ -1013,7 +1014,30 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       .then(result => { if (current) setPublicationCheck(result); })
       .catch(() => { if (current) setPublicationCheck({ errors: ["Не удалось проверить готовность шаблона. Повторите попытку после обновления страницы."], warnings: [], tested_current_revision: false }); });
     return () => { current = false; };
-  }, [api, stage, selected?.id, version?.id, version?.status, schema, bindings, regions, repeatingGroups]);
+  }, [api, stage, selected?.id, version?.id, version?.status, version?.lock_completed_stages, schema, bindings, regions, repeatingGroups]);
+  async function changeStageLocking(enabled: boolean) {
+    if (!version) return;
+    await run(async () => {
+      const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/stage-locking`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
+      setVersion(updated);
+      setTestDocument(null);
+    });
+  }
+  useEffect(() => {
+    if (stage !== 6 || !version?.id || !version.lock_completed_stages || version.status === "DRAFT") { setLockedDrafts([]); return; }
+    let active = true;
+    api(`/document-templates/${version.template_id}/versions/${version.id}/locked-drafts`).then(rows => { if (active) setLockedDrafts(rows); }).catch(() => { if (active) setLockedDrafts([]); });
+    return () => { active = false; };
+  }, [api, stage, version?.id, version?.status, version?.lock_completed_stages]);
+  async function unlockStage(draftId: string, stageId: string) {
+    const reason = window.prompt("Причина разблокировки этапа");
+    if (!reason?.trim()) return;
+    await run(async () => {
+      await api(`/contract-drafts/${draftId}/stages/${stageId}/unlock`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: reason.trim() }) });
+      setLockedDrafts(await api(`/document-templates/${version.template_id}/versions/${version.id}/locked-drafts`));
+      setNotice("Этап разблокирован. Завершение последующих этапов также снято.");
+    });
+  }
   async function manageTemplate() {
     if (!selected || !pendingAction) return;
     const action = pendingAction;
@@ -1438,7 +1462,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   </button>
                 ))}
               </nav>
-              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} lockCompletedStages={version.lock_completed_stages} changeStageLocking={changeStageLocking} lockedDrafts={lockedDrafts} unlockStage={unlockStage} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (

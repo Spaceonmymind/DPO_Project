@@ -2396,6 +2396,80 @@ def test_prepayment_calculation_publication_warning_and_generation_guard():
     assert '70' in output.paragraphs[0].text
 
 
+def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'LOCKED_STAGE_FLOW')
+    document=Document();document.add_paragraph('FIRST SECOND COMMON SHARED');table=document.add_table(rows=2,cols=1);table.cell(0,0).text='Услуги';table.cell(1,0).text='ITEM'
+    raw=io.BytesIO();document.save(raw)
+    response=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert response.status_code==201,response.text
+    version=response.json();base=f"/api/v1/document-templates/{template['id']}/versions/{version['id']}"
+    stage_ids=[]
+    for name in ('Первый этап','Второй этап'):
+        response=manager.post(base+'/stages',headers=mh,json={'name':name,'description':'','status':'ACTIVE'})
+        assert response.status_code==201,response.text
+        stage_ids.append(response.json()['id'])
+    configured=manager.patch(base+'/stage-locking',headers=mh,json={'enabled':True})
+    assert configured.status_code==200 and configured.json()['lock_completed_stages']
+    for position,(key,label,assigned) in enumerate([('first','Первый',[stage_ids[0]]),('second','Второй',[stage_ids[1]]),('common','Общий',[]),('shared','Общий для двух',stage_ids)],1):
+        response=manager.post(base+'/fields',headers=mh,json={'field_key':key,'label':label,'field_type':'TEXT','required':True,'position':position,'stage_ids':assigned})
+        assert response.status_code==201,response.text
+        if key=='first':first_field=response.json()
+    node=manager.get(base+'/preview',headers=mh).json()['nodes'][0]
+    bound=manager.post(base+'/bindings',headers=mh,json={'field_id':first_field['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'FIRST'})
+    assert bound.status_code==201,bound.text
+    row_node=next(item for item in manager.get(base+'/preview',headers=mh).json()['nodes'] if item['text']=='ITEM')
+    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'items','name':'Услуги','min_items':1,'max_items':5,'required':True,'position':1,'row_locator':row_node['locator'],'stage_ids':[stage_ids[0]]})
+    assert group.status_code==201,group.text
+    row_field=manager.post(base+f"/repeating-groups/{group.json()['id']}/fields",headers=mh,json={'field_key':'value','label':'Услуга','field_type':'TEXT','required':True,'position':1})
+    assert row_field.status_code==201,row_field.text
+    row_binding=manager.put(base+f"/repeating-groups/{group.json()['id']}/fields/{row_field.json()['id']}/binding",headers=mh,json={'locator':row_node['locator'],'start':0,'end':4,'selected_text':'ITEM'})
+    assert row_binding.status_code==200,row_binding.text
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    assert manager.patch(base+'/stage-locking',headers=mh,json={'enabled':False}).status_code==409
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
+    assert created.status_code==201,created.text
+    did=created.json()['id'];url=f'/api/v1/contract-drafts/{did}'
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':stage_ids}).status_code==200
+    assert employee.post(url+'/generate',headers=eh).status_code==409
+    assert employee.post(url+f'/stages/{stage_ids[1]}/complete',headers=eh,json={'answers':{'second':'Б'}}).status_code==409
+    missing=employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':{'first':'А'}})
+    assert missing.status_code==422 and 'common' in missing.text
+    first={'first':'А','common':'Общее','shared':'Разделяемое','items':[{'_id':'1','value':'Подготовка'}]}
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':first}).status_code==200
+    completed=employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first})
+    assert completed.status_code==200,completed.text
+    assert completed.json()['completed_stage_ids']==[stage_ids[0]]
+    assert employee.get(url,headers=eh).json()['stage_progress'][0]['state']=='COMPLETED'
+    assert employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first}).status_code==200
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==409
+    for endpoint in (url,url+'/autosave'):
+        changed=employee.patch(endpoint,headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}})
+        assert changed.status_code==409,changed.text
+        assert employee.patch(endpoint,headers=eh,json={'answers':{'common':'ИЗМЕНЕНО'}}).status_code==409
+        assert employee.patch(endpoint,headers=eh,json={'answers':{'shared':'ИЗМЕНЕНО'}}).status_code==409
+        assert employee.patch(endpoint,headers=eh,json={'answers':{'items':[{'_id':'1','value':'ИЗМЕНЕНО'}]}}).status_code==409
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Б'}}).status_code==200
+    assert employee.post(url+f'/stages/{stage_ids[1]}/complete',headers=eh,json={'answers':{'second':'Б'}}).status_code==200
+    assert employee.post(url+'/generate',headers=eh).status_code==201
+    assert employee.post(url+f'/stages/{stage_ids[0]}/unlock',headers=eh,json={'reason':'Исправление данных'}).status_code in (403,404)
+    unlocked=manager.post(url+f'/stages/{stage_ids[0]}/unlock',headers=mh,json={'reason':'Исправление данных'})
+    assert unlocked.status_code==200,unlocked.text
+    assert unlocked.json()['unlocked_stage_ids']==stage_ids
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}}).status_code==200
+    assert employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}}).status_code==200
+    assert employee.get(url,headers=eh).json()['completed_stage_ids']==[stage_ids[0]]
+    with SessionLocal() as session:
+        from app.db import DraftStageEvent
+        events=session.query(DraftStageEvent).filter_by(draft_id=did).all()
+        assert [x.event_type for x in events].count('COMPLETED')==3
+        assert [x.event_type for x in events].count('UNLOCKED')==2
+        assert all(x.reason=='Исправление данных' for x in events if x.event_type=='UNLOCKED')
+    cloned=manager.post(base+'/clone',headers=mh)
+    assert cloned.status_code==201,cloned.text
+    assert cloned.json()['lock_completed_stages'] is True
+
+
 def test_r35_product_resolver_and_unified_document_flow():
     manager=TestClient(app); headers=auth(manager)
     def published(code,marker):

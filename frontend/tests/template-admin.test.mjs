@@ -86,7 +86,7 @@ test('condition editor is visual, localized and supports boolean groups',()=>{
 });
 
 test('employee questionnaire reacts to conditions without dropping answers',()=>{
-  assert.match(catalog,/fieldState\(item\.value,\s*relevantAnswers\)\.visible/);
+  assert.match(catalog,/fieldState\(item\.value,\s*currentAnswers\)\.visible/);
   assert.match(catalog,/setAnswers\(\{\s*\.\.\.answers/);
   assert.match(conditions,/EQUALS/);
   assert.match(conditions,/GREATER_OR_EQUAL/);

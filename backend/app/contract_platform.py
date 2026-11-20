@@ -18,7 +18,7 @@ from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
 from app import choices
 from app.calculations import CalculationEngine,CalculationError,ValueFormatter
-from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductFieldMapping,ContractProductVariant,ContractProductVersion,ContractStage,DocumentBinding,DocumentDraft,DocumentTemplate,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,RequisiteSet,SessionLocal,TemplateAuditEvent,TemplateVersion,now,settings
+from app.db import ConditionalDocumentRegion,ContractProduct,ContractProductDraft,ContractProductFieldMapping,ContractProductVariant,ContractProductVersion,ContractStage,DocumentBinding,DocumentDraft,DocumentTemplate,DraftStageEvent,GeneratedDocument,QuestionnaireField,QuestionnaireSchema,RepeatingGroup,RepeatingGroupField,RequisiteSet,SessionLocal,TemplateAuditEvent,TemplateVersion,User,now,settings
 
 
 DOCX_MIME='application/vnd.openxmlformats-officedocument.wordprocessingml.document'; DOCX_MIMES={DOCX_MIME,'application/octet-stream','application/zip'}
@@ -128,7 +128,7 @@ class DocxXmlAdapter(DocumentEditorAdapter):
 adapter=DocxXmlAdapter()
 
 def template_out(x,s): return {'id':x.id,'code':x.code,'name':x.name,'category':x.category,'description':x.description,'status':x.status,'owner_id':x.owner_id,'current_version_id':x.current_version_id,'version_count':s.query(TemplateVersion).filter_by(template_id=x.id).count()}
-def version_out(x): return {'id':x.id,'template_id':x.template_id,'version_number':x.version_number,'status':x.status,'original_filename':x.original_filename,'source_sha256':x.source_sha256,'structure_fingerprint':x.structure_fingerprint,'preview_metadata':x.preview_metadata,'created_at':x.created_at,'published_at':x.published_at}
+def version_out(x): return {'id':x.id,'template_id':x.template_id,'version_number':x.version_number,'status':x.status,'original_filename':x.original_filename,'source_sha256':x.source_sha256,'structure_fingerprint':x.structure_fingerprint,'preview_metadata':x.preview_metadata,'lock_completed_stages':x.lock_completed_stages,'created_at':x.created_at,'published_at':x.published_at}
 def field_out(x): return {'id':x.id,'schema_id':x.schema_id,'field_key':x.field_key,'label':x.label,'field_type':x.field_type,'required':x.required,'position':x.position,'config':x.config}
 def binding_out(x): return {'id':x.id,'field_id':x.field_id,'binding_key':x.binding_key,'occurrence_index':x.occurrence_index,'selected_text':x.selected_text,'locator':x.locator,'format_config':x.format_config or {},'status':x.status}
 def requisite_set_out(x): return {'id':x.id,'name':x.name,'status':x.status,'entries':x.entries,'revision':x.revision,'updated_at':x.updated_at}
@@ -181,6 +181,15 @@ class StageOrderPayload(BaseModel):
 
 class StageSelectionPayload(BaseModel):
  selected_stage_ids:list[str]=Field(max_length=100)
+
+class StageCompletionPayload(BaseModel):
+ answers:dict[str,Any]
+
+class StageUnlockPayload(BaseModel):
+ reason:str=Field(min_length=3,max_length=1000)
+
+class StageLockSettingPayload(BaseModel):
+ enabled:bool
 
 class StageAssignmentPayload(BaseModel):
  stage_ids:list[str]=Field(max_length=100)
@@ -476,6 +485,33 @@ def stage_fields(fields,selected,has_stages):
  return [x for x in fields if stage_applies(x.config,selected,has_stages)]
 def stage_groups(groups,selected,has_stages):
  return [x for x in groups if stage_applies(x.config,selected,has_stages)]
+def draft_stage_order(d,s):
+ selected=set(d.selected_stage_ids or [])
+ return [stage for stage in version_stages(d.template_version_id,s,True) if stage.id in selected]
+def owning_stage(item,ordered):
+ assigned=set((item.config or {}).get('stage_ids') or [])
+ return next((stage.id for stage in ordered if not assigned or stage.id in assigned),None)
+def locked_draft(s,id,u):
+ d=own_draft(id,u,s)
+ return s.query(DocumentDraft).filter_by(id=d.id).with_for_update().populate_existing().one()
+def check_stage_answer_changes(d,v,s,updates):
+ if not v.lock_completed_stages or not (d.selected_stage_ids or []):return
+ ordered=draft_stage_order(d,s);completed=set(d.completed_stage_ids or [])
+ current=next((stage.id for stage in ordered if stage.id not in completed),None)
+ schema=schema_for(v.id,s)
+ fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all() if schema else []
+ groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all()
+ owners={item.field_key:owning_stage(item,ordered) for item in fields}
+ owners.update({item.group_key:owning_stage(item,ordered) for item in groups})
+ for key,value in updates.items():
+  if key not in owners or (d.answers or {}).get(key)==value:continue
+  owner=owners[key]
+  if owner in completed:raise HTTPException(409,detail=f'Ответ «{key}» относится к завершённому этапу и заблокирован')
+  if owner!=current:raise HTTPException(409,detail=f'Ответ «{key}» можно изменить только на текущем этапе')
+def stage_progress(d,v,s):
+ ordered=draft_stage_order(d,s);completed=set(d.completed_stage_ids or []) if v.lock_completed_stages else set()
+ current=next((stage.id for stage in ordered if stage.id not in completed),None)
+ return [{'id':stage.id,'name':stage.name,'position':stage.position,'state':'COMPLETED' if stage.id in completed else 'IN_PROGRESS' if stage.id==current else 'NOT_STARTED'} for stage in ordered]
 def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'calculation_schema_version':x.calculation_schema_version,'stages':[stage_out(stage) for stage in version_stages(x.template_version_id,s)],'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()],'repeating_groups':[repeating_group_out(g,s) for g in s.query(RepeatingGroup).filter_by(template_version_id=x.template_version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()]}
 def calculation_groups(version_id,s):
  groups=s.query(RepeatingGroup).filter_by(template_version_id=version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()
@@ -1029,6 +1065,7 @@ def publication_fingerprint(v,s):
  groups=sorted(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),key=lambda x:x.id)
  payload={
   'source':v.source_sha256,
+  'lock_completed_stages':v.lock_completed_stages,
   'stages':[(x.id,x.name,x.description,x.position,x.status) for x in sorted(version_stages(v.id,s),key=lambda x:x.id)],
   'fields':[(x.id,x.field_key,x.label,x.field_type,x.required,x.position,x.config) for x in fields],
   'bindings':[(x.id,x.field_id,x.binding_key,x.locator,x.selected_text,x.format_config) for x in bindings],
@@ -1264,7 +1301,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
     if entry and entry['value'] not in (None,'') and not validate_answer(field,entry['value']):value=entry['value']
     elif source.get('fallback')!='FIXED':value=None
    if value is not None:defaults[field.field_key]=copy.deepcopy(value)
-  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults,selected_stage_ids=[]); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids,'schema':schema_out(schema,s)}
+  d=DocumentDraft(owner_id=u.id,template_version_id=v.id,questionnaire_schema_id=schema.id,answers=defaults,selected_stage_ids=[]); s.add(d); s.commit(); return {'id':d.id,'template':template_out(t,s),'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids,'completed_stage_ids':[],'lock_completed_stages':v.lock_completed_stages,'schema':schema_out(schema,s)}
  @r.get('/api/v1/contract-drafts')
  def drafts(u=Depends(current_dependency),s:DBS=Depends(db)):
   out=[]
@@ -1274,7 +1311,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids or [],'template':template_out(t,s),'schema':schema_out(schema,s)}
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids or [],'completed_stage_ids':d.completed_stage_ids or [],'lock_completed_stages':v.lock_completed_stages,'stage_progress':stage_progress(d,v,s),'template':template_out(t,s),'schema':schema_out(schema,s)}
  @r.delete('/api/v1/contract-drafts/{id}')
  def delete_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s)
@@ -1286,35 +1323,82 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   import copy
   source=own_draft(id,u,s); version=s.get(TemplateVersion,source.template_version_id); template=s.get(DocumentTemplate,version.template_id)
   title=validated_draft_title((payload or {}).get('title',f'Копия — {source.title or template.name}'[:200]))
-  new=DocumentDraft(owner_id=u.id,template_version_id=source.template_version_id,questionnaire_schema_id=source.questionnaire_schema_id,title=title,answers=copy.deepcopy(source.answers or {}),selected_stage_ids=list(source.selected_stage_ids or []),status='DRAFT')
+  new=DocumentDraft(owner_id=u.id,template_version_id=source.template_version_id,questionnaire_schema_id=source.questionnaire_schema_id,title=title,answers=copy.deepcopy(source.answers or {}),selected_stage_ids=list(source.selected_stage_ids or []),completed_stage_ids=[],status='DRAFT')
   s.add(new); s.commit(); return draft(new.id,u,s)
  @r.patch('/api/v1/contract-drafts/{id}/title')
  def rename_draft(id:str,payload:dict,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); d.title=validated_draft_title(payload.get('title')); d.updated_at=now(); s.commit(); return {'id':d.id,'title':d.title}
  @r.patch('/api/v1/contract-drafts/{id}/stages')
  def select_draft_stages(id:str,p:StageSelectionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s);active=version_stages(d.template_version_id,s,True)
+  d=locked_draft(s,id,u);active=version_stages(d.template_version_id,s,True)
   validate_stage_ids(d.template_version_id,p.selected_stage_ids,s,True)
   if active and not p.selected_stage_ids:raise HTTPException(422,detail='Выберите хотя бы один этап договора')
   if not active and p.selected_stage_ids:raise HTTPException(422,detail='В шаблоне нет активных этапов')
-  d.selected_stage_ids=list(p.selected_stage_ids);d.status='DRAFT';d.updated_at=now();s.commit();return {'id':d.id,'selected_stage_ids':d.selected_stage_ids}
+  if d.completed_stage_ids and set(p.selected_stage_ids)!=set(d.selected_stage_ids or []):raise HTTPException(409,detail='Нельзя менять выбранные этапы после завершения этапа. Обратитесь к специалисту ДПО для разблокировки')
+  d.selected_stage_ids=list(p.selected_stage_ids);d.status='DRAFT';d.updated_at=now();s.commit();return {'id':d.id,'selected_stage_ids':d.selected_stage_ids,'stage_progress':stage_progress(d,s.get(TemplateVersion,d.template_version_id),s)}
+ @r.post('/api/v1/contract-drafts/{id}/stages/{sid}/complete')
+ def complete_draft_stage(id:str,sid:str,p:StageCompletionPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  d=locked_draft(s,id,u);v=s.get(TemplateVersion,d.template_version_id);ordered=draft_stage_order(d,s)
+  if not v.lock_completed_stages or not ordered:raise HTTPException(409,detail='Фиксация этапов для этого шаблона не включена')
+  stage_ids=[stage.id for stage in ordered]
+  if sid not in stage_ids:raise HTTPException(404,detail='Этап не выбран в этом договоре')
+  schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id);fields=s.query(QuestionnaireField).filter_by(schema_id=schema.id).all();groups=s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all()
+  known={field.field_key for field in fields}|{group.group_key for group in groups}
+  if set(p.answers)-known:raise HTTPException(422,detail='Анкета содержит неизвестные поля')
+  if any(field.field_key in p.answers and (field.config or {}).get('calculated') for field in fields):raise HTTPException(422,detail='Вычисляемые поля нельзя изменять')
+  check_stage_answer_changes(d,v,s,p.answers)
+  if sid in (d.completed_stage_ids or []):return {'id':d.id,'completed_stage_ids':d.completed_stage_ids,'stage_progress':stage_progress(d,v,s),'answers':d.answers}
+  if sid!=next((stage_id for stage_id in stage_ids if stage_id not in (d.completed_stage_ids or [])),None):raise HTTPException(409,detail='Завершайте выбранные этапы последовательно')
+  merged={**(d.answers or {}),**p.answers};scope=stage_ids[:stage_ids.index(sid)+1]
+  scope_fields=[field for field in stage_fields(fields,scope,True) if owning_stage(field,ordered) in scope]
+  scope_groups=[group for group in stage_groups(groups,scope,True) if owning_stage(group,ordered) in scope]
+  scope_answers={field.field_key:merged[field.field_key] for field in scope_fields if field.field_key in merged}
+  current_fields=[field for field in scope_fields if owning_stage(field,ordered)==sid]
+  current_groups=[group for group in scope_groups if owning_stage(group,ordered)==sid]
+  validate_condition_schema(fields)
+  errors=validate_active_answers(current_fields,scope_answers)
+  errors.update(validate_repeating_answers(current_groups,s,scope_fields,merged,True))
+  if errors:raise HTTPException(422,detail={'message':'Этап не завершён: исправьте ответы','fields':errors})
+  calculated_document_values(v.id,s,fields,{**scope_answers,**{group.group_key:merged[group.group_key] for group in scope_groups if group.group_key in merged}},scope,True)
+  d.answers=merged;d.completed_stage_ids=[*(d.completed_stage_ids or []),sid];d.status='DRAFT';d.updated_at=now()
+  s.add(DraftStageEvent(draft_id=d.id,stage_id=sid,actor_id=u.id,event_type='COMPLETED'))
+  s.commit();return {'id':d.id,'completed_stage_ids':d.completed_stage_ids,'stage_progress':stage_progress(d,v,s),'answers':d.answers}
+ @r.post('/api/v1/contract-drafts/{id}/stages/{sid}/unlock')
+ def unlock_draft_stage(id:str,sid:str,p:StageUnlockPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u)
+  d=s.query(DocumentDraft).filter_by(id=id).with_for_update().populate_existing().first()
+  if not d or d.deleted_at:raise HTTPException(404,detail='Черновик не найден')
+  v=s.get(TemplateVersion,d.template_version_id);owned_template(v.template_id,u,s)
+  ordered=draft_stage_order(d,s);ids=[stage.id for stage in ordered]
+  if not v.lock_completed_stages or sid not in ids or sid not in (d.completed_stage_ids or []):raise HTTPException(409,detail='Этап не завершён')
+  affected=[key for key in ids[ids.index(sid):] if key in (d.completed_stage_ids or [])]
+  d.completed_stage_ids=[key for key in d.completed_stage_ids if key not in affected];d.status='DRAFT';d.updated_at=now()
+  for key in affected:s.add(DraftStageEvent(draft_id=d.id,stage_id=key,actor_id=u.id,event_type='UNLOCKED',reason=p.reason.strip()))
+  s.commit();return {'id':d.id,'completed_stage_ids':d.completed_stage_ids,'unlocked_stage_ids':affected,'stage_progress':stage_progress(d,v,s)}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})
+  d=locked_draft(s,id,u); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})
   validate_condition_schema(fields)
   if set(payload.answers)-set(known): raise HTTPException(422,detail='Анкета содержит неизвестные поля')
   if any(k in payload.answers and (f.config or {}).get('calculated') for k,f in known.items() if isinstance(f,QuestionnaireField)): raise HTTPException(422,detail='Вычисляемые поля нельзя изменять')
+  check_stage_answer_changes(d,v,s,payload.answers)
   answers={**(d.answers or {}),**payload.answers}; has_stages=bool(version_stages(d.template_version_id,s));selected=d.selected_stage_ids or []
   if has_stages and not selected:raise HTTPException(422,detail='Выберите этапы договора')
   legal_fields=stage_fields(fields,selected,has_stages);legal_groups=stage_groups(groups,selected,has_stages);legal_answers={x.field_key:answers[x.field_key] for x in legal_fields if x.field_key in answers}
-  errors=validate_active_answers(legal_fields,legal_answers);errors.update(validate_repeating_answers(legal_groups,s,legal_fields,answers,True))
+  errors={} if v.lock_completed_stages and selected else validate_active_answers(legal_fields,legal_answers)
+  errors.update(validate_repeating_answers(legal_groups,s,legal_fields,answers,not (v.lock_completed_stages and selected)))
+  if v.lock_completed_stages and selected:
+   for field in legal_fields:
+    value=answers.get(field.field_key)
+    if not (field.config or {}).get('calculated') and value not in (None,'') and (message:=validate_answer(field,value)):errors[field.field_key]=message
   if errors: raise HTTPException(422,detail={'message':'Исправьте ответы','fields':errors})
   d.answers=answers; d.status='DRAFT'; d.updated_at=now(); s.commit(); return {'id':d.id,'status':d.status,'answers':d.answers}
  @r.patch('/api/v1/contract-drafts/{id}/autosave')
  def autosave(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key for x in fields}|{x.group_key for x in groups}
+  d=locked_draft(s,id,u); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key for x in fields}|{x.group_key for x in groups}
   if set(payload.answers)-known: raise HTTPException(422,detail='Анкета содержит неизвестные поля')
   if any(x.field_key in payload.answers and (x.config or {}).get('calculated') for x in fields): raise HTTPException(422,detail='Вычисляемые поля нельзя изменять')
+  check_stage_answer_changes(d,v,s,payload.answers)
   answers={**(d.answers or {}),**payload.answers};has_stages=bool(version_stages(d.template_version_id,s));selected=d.selected_stage_ids or [];legal_fields=stage_fields(fields,selected,has_stages);legal_groups=stage_groups(groups,selected,has_stages);errors=validate_repeating_answers(legal_groups,s,legal_fields,answers,False)
   if errors: raise HTTPException(422,detail={'message':'Не удалось сохранить черновик','fields':errors})
   for field in fields:
@@ -1326,6 +1410,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  def generate(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); validate_condition_schema(fields); answers=d.answers or {};stages=version_stages(v.id,s,True);selected=validate_stage_ids(v.id,d.selected_stage_ids or [],s,True)
   if stages and not selected:raise HTTPException(422,detail='Выберите этапы договора')
+  if v.lock_completed_stages and set(selected)-set(d.completed_stage_ids or []):raise HTTPException(409,detail='Завершите все выбранные этапы перед формированием DOCX')
   legal_fields=stage_fields(fields,selected,bool(version_stages(v.id,s)));legal_answers={x.field_key:answers[x.field_key] for x in legal_fields if x.field_key in answers};errors=validate_active_answers(legal_fields,legal_answers)
   groups=stage_groups(s.query(RepeatingGroup).filter_by(template_version_id=v.id,status='ACTIVE').all(),selected,bool(version_stages(v.id,s))); errors.update(validate_repeating_answers(groups,s,legal_fields,answers,True))
   if errors: raise HTTPException(422,detail={'message':'Заполните обязательные поля','fields':errors})
@@ -1541,6 +1626,19 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u);v,t=owned_version(vid,u,s)
   if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
   return [stage_out(x) for x in version_stages(v.id,s)]
+ @r.patch(prefix+'/{tid}/versions/{vid}/stage-locking')
+ def set_stage_locking(tid:str,vid:str,p:StageLockSettingPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s);require_draft(v)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  v.lock_completed_stages=p.enabled
+  s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='STAGE_LOCKING_CHANGED',metadata_json={'enabled':p.enabled}))
+  s.commit();return version_out(v)
+ @r.get(prefix+'/{tid}/versions/{vid}/locked-drafts')
+ def locked_version_drafts(tid:str,vid:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u);v,t=owned_version(vid,u,s)
+  if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
+  rows=s.query(DocumentDraft).filter_by(template_version_id=v.id).filter(DocumentDraft.deleted_at.is_(None)).order_by(DocumentDraft.updated_at.desc()).all()
+  return [{'id':d.id,'title':d.title or t.name,'owner':s.get(User,d.owner_id).external_id,'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s)} for d in rows if d.completed_stage_ids]
  @r.post(prefix+'/{tid}/versions/{vid}/stages',status_code=201)
  def create_stage(tid:str,vid:str,p:StagePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u);v,t=owned_version(vid,u,s)

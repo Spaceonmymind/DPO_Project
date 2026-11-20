@@ -1,6 +1,7 @@
 .questionnaire-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .questionnaire-steps button{max-width:100%;min-height:34px;padding:6px 10px;border:1px solid #cbdad4;border-radius:8px;background:#f7faf9;color:#426055;font-size:12px;font-weight:700;text-align:left;cursor:pointer}
 .questionnaire-steps button.active,.questionnaire-steps button[aria-current="step"]{border-color:#087d64;background:#e6f5ef;color:#076a55}
+.questionnaire-steps button small{display:flex;align-items:center;gap:4px;margin-top:3px;color:#637c70;font-size:11px;font-weight:500}
 .questionnaire-steps button:focus-visible,.question-hint-trigger:focus-visible,.document-dialog button:focus-visible,.document-dialog input:focus-visible{outline:2px solid #08755b;outline-offset:2px}
 .question-hint{position:relative;display:inline-flex;align-items:center;margin-left:2px;vertical-align:-4px;white-space:nowrap}
 .question-hint-trigger{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:#087d64;cursor:pointer}
@@ -28,6 +29,12 @@
 .contract-stage-selection label span,.contract-stage-start fieldset label span{display:grid;gap:2px}
 .contract-stage-selection label small,.contract-stage-start fieldset label small{color:#587168;line-height:1.4}
 .contract-stage-change{margin:0 0 12px}
+.contract-stage-lock-setting,.contract-stage-unlock-list{max-width:760px;margin:16px 0;padding:16px;border:1px solid #d6e7dc;border-radius:10px;background:#f8fbf9}
+.contract-stage-lock-setting>label{display:flex;align-items:center;gap:10px;cursor:pointer}
+.contract-stage-lock-setting input{accent-color:#07856b}
+.contract-stage-lock-setting p,.contract-stage-lock-setting small{display:block;margin:8px 0 0;color:#587168;line-height:1.5}
+.contract-stage-unlock-list article{padding:12px 0;border-top:1px solid #d6e7dc}
+.contract-stage-unlock-list article>div{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px}
 .contract-questionnaire .question-required,.template-questionnaire-preview .question-required{color:#b84b40;font-weight:800}
 .documents-list article>div{flex-wrap:wrap}
 .document-dialog-backdrop{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;padding:16px;background:#152c2580}

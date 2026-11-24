@@ -23,6 +23,7 @@ import { lockedStageSteps, owningStage, selectedQuestionnaire } from "./contract
 import { questionnaireSteps, validateStep } from "./questionnaireSteps";
 import { OTHER, choiceAnswer, choiceComplete, choiceOtherValues, choiceText, isStructuredChoice } from "./choices";
 import { textRuleHint } from "./textRules";
+import { ConfirmAction } from "./ConfirmAction";
 type Api = (path: string, options?: any) => Promise<any>;
 const itemId = () =>
   globalThis.crypto?.randomUUID?.() ||
@@ -63,6 +64,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [busy, setBusy] = useState(false),
     [document, setDocument] = useState<any>(),
     [review, setReview] = useState(false),
+    [stageAction, setStageAction] = useState<"save" | "generate" | null>(null),
     [stepIndex, setStepIndex] = useState(0),
     [loading, setLoading] = useState(true);
   const autosaveReady = useRef(false);
@@ -166,11 +168,14 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   }
   const selectedSchema = draft ? selectedQuestionnaire(draft.schema, selectedStageIds) : { fields: [], groups: [] };
   const relevantAnswers = Object.fromEntries([...selectedSchema.fields.map((field: any) => field.field_key), ...selectedSchema.groups.map((group: any) => group.group_key)].filter(key => key in answers).map(key => [key, answers[key]]));
-  const lockingStages = !!draft?.lock_completed_stages && selectedStageIds.length > 0;
+  const lockingStages = !!draft && selectedStageIds.length > 0;
   const steps: any[] = draft ? lockingStages ? lockedStageSteps(draft.schema, selectedStageIds, questionnaireSteps) : questionnaireSteps(selectedSchema.fields, selectedSchema.groups) : [];
   const currentStep = steps[Math.min(stepIndex, Math.max(steps.length - 1, 0))];
-  const currentStageState = lockingStages ? draft?.stage_progress?.find((stage: any) => stage.id === currentStep?.stageId)?.state || "NOT_STARTED" : "IN_PROGRESS";
   const orderedStages = lockingStages ? (draft.schema.stages || []).filter((stage: any) => stage.status === "ACTIVE" && selectedStageIds.includes(stage.id)).sort((a: any, b: any) => a.position - b.position) : [];
+  const completedStages = new Set<string>(draft?.completed_stage_ids || []);
+  const activeStageId = orderedStages.find((stage: any) => !completedStages.has(stage.id))?.id;
+  const stageState = (id: string) => completedStages.has(id) ? "COMPLETED" : id === activeStageId ? "IN_PROGRESS" : "NOT_STARTED";
+  const currentStageState = lockingStages && currentStep?.stageId ? stageState(currentStep.stageId) : "IN_PROGRESS";
   const currentStageIndex = orderedStages.findIndex((stage: any) => stage.id === currentStep?.stageId);
   const availableKeys = lockingStages ? new Set([...selectedSchema.fields.filter((field: any) => { const owner = orderedStages.findIndex((stage: any) => stage.id === owningStage(field, orderedStages)); return owner >= 0 && owner <= currentStageIndex; }).map((field: any) => field.field_key), ...selectedSchema.groups.filter((group: any) => { const owner = orderedStages.findIndex((stage: any) => stage.id === owningStage(group, orderedStages)); return owner >= 0 && owner <= currentStageIndex; }).map((group: any) => group.group_key)]) : null;
   const currentAnswers = availableKeys ? Object.fromEntries(Object.entries(relevantAnswers).filter(([key]) => availableKeys.has(key))) : relevantAnswers;
@@ -188,22 +193,37 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         else setReview(true);
         return;
       }
-      if (currentStageState === "NOT_STARTED") { setStepIndex(Math.max(0, steps.findIndex(step => draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "IN_PROGRESS"))); return; }
-      if (!checkCurrentStep()) return;
-      if (!window.confirm("Вы завершаете этап. После подтверждения изменить ответы самостоятельно будет нельзя. Продолжить?")) return;
-      await run(async () => {
-        const result = await api(`/contract-drafts/${draft.id}/stages/${currentStep.stageId}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }) });
-        setDraft((current: any) => ({ ...current, completed_stage_ids: result.completed_stage_ids, stage_progress: result.stage_progress }));
-        setAnswers(result.answers);
-        savedSnapshot.current = JSON.stringify(result.answers);
-        if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
-        else setReview(true);
-      });
+      if (currentStageState === "NOT_STARTED") { setStepIndex(Math.max(0, steps.findIndex(step => stageState(step.stageId) === "IN_PROGRESS"))); return; }
+      setStageAction("save");
       return;
     }
     if (!checkCurrentStep()) return;
     if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
     else if (validate()) setReview(true);
+  }
+  async function confirmStageAction() {
+    const action = stageAction;
+    setStageAction(null);
+    if (!action || !draft || !currentStep?.stageId) return;
+    if (currentStageState === "IN_PROGRESS" && !checkCurrentStep()) return;
+    await run(async () => {
+      if (currentStageState === "IN_PROGRESS") {
+        const result = await api(`/contract-drafts/${draft.id}/stages/${currentStep.stageId}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }) });
+        setDraft((current: any) => ({ ...current, completed_stage_ids: result.completed_stage_ids, stage_progress: result.stage_progress, status: "DRAFT" }));
+        setAnswers(result.answers);
+        savedSnapshot.current = JSON.stringify(result.answers);
+      }
+      if (action === "generate") {
+        let generated;
+        try { generated = await api(`/contract-drafts/${draft.id}/generate?stage_id=${encodeURIComponent(currentStep.stageId)}`, { method: "POST" }); }
+        catch (e: any) { throw new Error(`Ответы этапа сохранены и заблокированы, но DOCX не сформирован: ${e.message || e}. Повторите формирование без разблокировки.`); }
+        setDocument(generated);
+        setDraft((current: any) => ({ ...current, status: generated.status }));
+        setNotice("DOCX сформирован. Ответы этапа сохранены и заблокированы.");
+        await load();
+      } else setNotice("Ответы этапа сохранены и заблокированы.");
+      if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
+    });
   }
   function validate() {
     const e = Object.assign({}, ...steps.map((step) => validateStep(step, relevantAnswers, selectedSchema.fields)));
@@ -217,6 +237,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     return !Object.keys(e).length;
   }
   async function save() {
+    if (lockingStages) { if (currentStageState === "IN_PROGRESS") setStageAction("save"); return; }
     if (!validate()) return;
     await run(async () => {
       await api(`/contract-drafts/${draft.id}`, {
@@ -335,7 +356,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
-          <nav className="questionnaire-steps" data-tour="q-steps" aria-label={lockingStages ? "Этапы договора" : "Разделы анкеты"}>{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} onClick={() => { if (lockingStages) { setReview(false); setStepIndex(index); setErrors({}); setError(""); return; } if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], relevantAnswers, selectedSchema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}{lockingStages && <small>{draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "COMPLETED" ? <><LockKeyhole size={13}/> Завершён</> : draft.stage_progress?.find((stage: any) => stage.id === step.stageId)?.state === "IN_PROGRESS" ? "Заполняется" : "Не начат"}</small>}</button>)}</nav>
+          <nav className="questionnaire-steps" data-tour="q-steps" aria-label={lockingStages ? "Этапы договора" : "Разделы анкеты"}>{steps.map((step, index) => <button key={step.name} type="button" aria-current={!review && index === stepIndex ? "step" : undefined} className={index === stepIndex && !review ? "active" : ""} disabled={lockingStages && stageState(step.stageId) === "NOT_STARTED"} onClick={() => { if (lockingStages) { setReview(false); setStepIndex(index); setErrors({}); setError(""); return; } if (index < stepIndex) { setReview(false); setStepIndex(index); setErrors({}); setError(""); } else if (index > stepIndex) { for (let n = stepIndex; n < index; n++) { const found = validateStep(steps[n], relevantAnswers, selectedSchema.fields); if (Object.keys(found).length) { setStepIndex(n); setErrors(found); setError("Исправьте поля текущего раздела."); return; } } setStepIndex(index); setErrors({}); setError(""); } else setReview(false); }}>{index + 1}. {step.name}{lockingStages && <small>{stageState(step.stageId) === "COMPLETED" ? <><LockKeyhole size={13}/> Завершён</> : stageState(step.stageId) === "IN_PROGRESS" ? "Заполняется" : "Не начат"}</small>}</button>)}</nav>
         </section>
         {error && (
           <div className="platform-error" role="alert">
@@ -370,7 +391,8 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             </ul>
           </div>
         )}
-        <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); advance(); }}>
+        {stageAction && <ConfirmAction title={stageAction === "generate" ? "Сформировать DOCX" : "Сохранить ответы"} body="После подтверждения ответы текущего этапа будут сохранены и заблокированы для редактирования. Продолжить?" action="Подтвердить" busy={busy} onConfirm={() => void confirmStageAction()} onCancel={() => setStageAction(null)}/>}
+        <form className="dynamic-form" noValidate onSubmit={review ? generate : (event) => { event.preventDefault(); void advance(); }}>
           {review && <section className="answers-review"><h2>Проверьте ответы</h2><p>Платформа сформирует документ из закреплённой версии шаблона. При необходимости вернитесь к анкете.</p>{Object.entries(calculated.errors || {}).map(([key, message]) => <p className="platform-error" role="alert" key={key}>{selectedSchema.fields.find((field: any) => field.field_key === key)?.label || key}: {String(message)}</p>)}{activeFields.map((f:any)=><div key={f.id}><span>{f.label}</span><b>{choiceText(f, answers[f.field_key]) || "—"}</b></div>)}</section>}
           {!review && <>
           {lockingStages && currentStageState === "COMPLETED" && <p className="platform-success" role="status">Этап завершён. Редактирование ответов заблокировано.</p>}
@@ -383,7 +405,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
           <div className="form-actions" data-tour="q-actions">
             {review && <button type="button" className="secondary" onClick={() => setReview(false)}><ArrowLeft size={16}/>Вернуться к анкете</button>}
             {!review && stepIndex > 0 && <button type="button" className="secondary" onClick={() => { setStepIndex(stepIndex - 1); setErrors({}); setError(""); }}><ArrowLeft size={16}/>Назад</button>}
-            <button
+            {!lockingStages && <button
               type="button"
               className="secondary"
               onClick={save}
@@ -391,9 +413,10 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             >
               <Save size={16} />
               Сохранить ответы
-            </button>
+            </button>}
+            {lockingStages && currentStageState !== "NOT_STARTED" && <button type="button" className="secondary" disabled={busy} onClick={() => setStageAction("generate")}><FileText size={16}/>Сформировать DOCX</button>}
             <button className="primary" data-tour={review?"q-generate":undefined} disabled={busy}>
-              {review ? "Сформировать DOCX" : lockingStages ? currentStageState === "IN_PROGRESS" ? "Завершить этап и перейти далее" : currentStageState === "COMPLETED" ? "Перейти далее" : "Вернуться к текущему этапу" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
+              {review ? "Сформировать DOCX" : lockingStages ? currentStageState === "IN_PROGRESS" ? "Сохранить ответы" : currentStageState === "COMPLETED" ? "Перейти далее" : "Вернуться к текущему этапу" : stepIndex === steps.length - 1 ? "Завершить заполнение" : "Далее"}
             </button>
           </div>
           {document && (
@@ -467,7 +490,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
                     ? "Ответы изменены — продолжите заполнение"
                     : x.status === "GENERATED"
                       ? "Документ сформирован"
-                      : "Черновик сохранён"}
+                      : x.has_stages ? "В работе" : "Черновик сохранён"}
                 </small>
               </span>
               <span className="primary">Продолжить</span>

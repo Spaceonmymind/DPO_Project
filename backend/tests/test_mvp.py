@@ -2398,7 +2398,7 @@ def test_prepayment_calculation_publication_warning_and_generation_guard():
 
 def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'LOCKED_STAGE_FLOW')
-    document=Document();document.add_paragraph('FIRST SECOND COMMON SHARED');table=document.add_table(rows=2,cols=1);table.cell(0,0).text='Услуги';table.cell(1,0).text='ITEM'
+    document=Document();document.add_paragraph('FIRST SECOND COMMON SHARED');document.add_paragraph('LATER REGION');table=document.add_table(rows=2,cols=1);table.cell(0,0).text='Услуги';table.cell(1,0).text='ITEM'
     raw=io.BytesIO();document.save(raw)
     response=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
     assert response.status_code==201,response.text
@@ -2408,15 +2408,20 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
         response=manager.post(base+'/stages',headers=mh,json={'name':name,'description':'','status':'ACTIVE'})
         assert response.status_code==201,response.text
         stage_ids.append(response.json()['id'])
-    configured=manager.patch(base+'/stage-locking',headers=mh,json={'enabled':True})
-    assert configured.status_code==200 and configured.json()['lock_completed_stages']
-    for position,(key,label,assigned) in enumerate([('first','Первый',[stage_ids[0]]),('second','Второй',[stage_ids[1]]),('common','Общий',[]),('shared','Общий для двух',stage_ids)],1):
+    configured=manager.patch(base+'/stage-locking',headers=mh,json={'enabled':False})
+    assert configured.status_code==200 and not configured.json()['lock_completed_stages']
+    invalid_assignment=manager.post(base+'/fields',headers=mh,json={'field_key':'invalid_multi','label':'Два этапа','field_type':'TEXT','position':5,'stage_ids':stage_ids})
+    assert invalid_assignment.status_code==422
+    for position,(key,label,assigned) in enumerate([('first','Первый',[stage_ids[0]]),('second','Второй',[stage_ids[1]]),('common','Общий',[]),('shared','Общий без назначения',[])],1):
         response=manager.post(base+'/fields',headers=mh,json={'field_key':key,'label':label,'field_type':'TEXT','required':True,'position':position,'stage_ids':assigned})
         assert response.status_code==201,response.text
         if key=='first':first_field=response.json()
     node=manager.get(base+'/preview',headers=mh).json()['nodes'][0]
     bound=manager.post(base+'/bindings',headers=mh,json={'field_id':first_field['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'FIRST'})
     assert bound.status_code==201,bound.text
+    later_node=next(item for item in manager.get(base+'/preview',headers=mh).json()['nodes'] if item['text']=='LATER REGION')
+    later_region=manager.post(base+'/conditional-regions',headers=mh,json={'region_key':'later','region_type':'CONDITIONAL_PARAGRAPH','start_locator':later_node['locator'],'include_when':{'operator':'ALWAYS'},'stage_ids':[stage_ids[1]]})
+    assert later_region.status_code==201,later_region.text
     row_node=next(item for item in manager.get(base+'/preview',headers=mh).json()['nodes'] if item['text']=='ITEM')
     group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'items','name':'Услуги','min_items':1,'max_items':5,'required':True,'position':1,'row_locator':row_node['locator'],'stage_ids':[stage_ids[0]]})
     assert group.status_code==201,group.text
@@ -2440,6 +2445,11 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     completed=employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first})
     assert completed.status_code==200,completed.text
     assert completed.json()['completed_stage_ids']==[stage_ids[0]]
+    intermediate=employee.post(url+f'/generate?stage_id={stage_ids[0]}',headers=eh)
+    assert intermediate.status_code==201,intermediate.text
+    assert intermediate.json()['status']=='DRAFT'
+    intermediate_doc=Document(io.BytesIO(employee.get(intermediate.json()['download_url'],headers=eh).content))
+    assert 'LATER REGION' not in ' '.join(p.text for p in intermediate_doc.paragraphs)
     assert employee.get(url,headers=eh).json()['stage_progress'][0]['state']=='COMPLETED'
     assert employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first}).status_code==200
     assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==409
@@ -2451,7 +2461,12 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
         assert employee.patch(endpoint,headers=eh,json={'answers':{'items':[{'_id':'1','value':'ИЗМЕНЕНО'}]}}).status_code==409
     assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Б'}}).status_code==200
     assert employee.post(url+f'/stages/{stage_ids[1]}/complete',headers=eh,json={'answers':{'second':'Б'}}).status_code==200
-    assert employee.post(url+'/generate',headers=eh).status_code==201
+    final_doc=employee.post(url+'/generate',headers=eh)
+    assert final_doc.status_code==201 and final_doc.json()['status']=='GENERATED'
+    assert 'LATER REGION' in ' '.join(p.text for p in Document(io.BytesIO(employee.get(final_doc.json()['download_url'],headers=eh).content)).paragraphs)
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Б'}}).json()['status']=='GENERATED'
+    repeated=employee.post(url+f'/generate?stage_id={stage_ids[0]}',headers=eh)
+    assert repeated.status_code==201 and repeated.json()['status']=='GENERATED'
     assert employee.post(url+f'/stages/{stage_ids[0]}/unlock',headers=eh,json={'reason':'Исправление данных'}).status_code in (403,404)
     unlocked=manager.post(url+f'/stages/{stage_ids[0]}/unlock',headers=mh,json={'reason':'Исправление данных'})
     assert unlocked.status_code==200,unlocked.text
@@ -2467,7 +2482,7 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
         assert all(x.reason=='Исправление данных' for x in events if x.event_type=='UNLOCKED')
     cloned=manager.post(base+'/clone',headers=mh)
     assert cloned.status_code==201,cloned.text
-    assert cloned.json()['lock_completed_stages'] is True
+    assert cloned.json()['lock_completed_stages'] is False
 
 
 def test_r35_product_resolver_and_unified_document_flow():
@@ -2978,7 +2993,7 @@ def test_contract_stages_filter_questions_regions_and_restore_draft():
     assert manager.patch(base+'/stages/order',headers=mh,json={'stage_ids':[b['id'],a['id']]}).status_code==200
     with SessionLocal() as session:assert publication_fingerprint(session.get(TemplateVersion,uploaded.json()['id']),session)!=before
     fields=[]
-    for position,(key,stages) in enumerate([('common',[]),('only_a',[a['id']]),('only_b',[b['id']]),('shared',[a['id'],b['id']])],1):
+    for position,(key,stages) in enumerate([('common',[]),('only_a',[a['id']]),('only_b',[b['id']]),('shared',[])],1):
         response=manager.post(base+'/fields',headers=mh,json={'field_key':key,'label':key,'field_type':'TEXT','required':True,'position':position,'stage_ids':stages})
         assert response.status_code==201,response.text
         fields.append(response.json())
@@ -3006,48 +3021,25 @@ def test_contract_stages_filter_questions_regions_and_restore_draft():
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
     assert created.status_code==201,created.text
     did=created.json()['id'];path=f'/api/v1/contract-drafts/{did}'
-    assert len(created.json()['schema']['stages'])==2
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':['unknown']}).status_code==422
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
-    assert employee.patch(path,headers=eh,json={'answers':{'common':'C','only_a':'A','shared':'S','show_a':True}}).status_code==200
-    first=employee.post(path+'/generate',headers=eh)
-    assert first.status_code==201,first.text
-    content=Document(io.BytesIO(employee.get(first.json()['download_url']).content))
-    text=' '.join(p.text for p in content.paragraphs)
-    assert 'STAGE A' in text and 'STAGE B' not in text
-    assert employee.patch(path,headers=eh,json={'answers':{'show_a':False}}).status_code==200
-    hidden=employee.post(path+'/generate',headers=eh)
-    assert hidden.status_code==201,hidden.text
-    assert 'STAGE A' not in ' '.join(p.text for p in Document(io.BytesIO(employee.get(hidden.json()['download_url']).content)).paragraphs)
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
-    assert employee.post(path+'/generate',headers=eh).status_code==422
-    assert employee.patch(path,headers=eh,json={'answers':{'only_b':'B'}}).status_code==200
-    second=employee.post(path+'/generate',headers=eh)
-    assert second.status_code==201,second.text
-    content=Document(io.BytesIO(employee.get(second.json()['download_url']).content))
-    text=' '.join(p.text for p in content.paragraphs)
-    assert 'STAGE A' not in text and 'STAGE B' in text
-    restored=employee.get(path).json()
-    assert restored['selected_stage_ids']==[b['id']] and restored['answers']['only_a']=='A'
     assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==200
-    both=employee.post(path+'/generate',headers=eh)
-    assert both.status_code==201,both.text
-    both_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(both.json()['download_url']).content)).paragraphs)
-    assert 'STAGE B' in both_text and 'STAGE A' not in both_text  # Existing false business condition still applies.
-    assert employee.patch(path,headers=eh,json={'answers':{'show_a':True}}).status_code==200
-    both=employee.post(path+'/generate',headers=eh)
-    both_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(both.json()['download_url']).content)).paragraphs)
-    assert 'STAGE A' in both_text and 'STAGE B' in both_text
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
-    only_a=employee.post(path+'/generate',headers=eh)
-    assert only_a.status_code==201,only_a.text
-    only_a_text=' '.join(p.text for p in Document(io.BytesIO(employee.get(only_a.json()['download_url']).content)).paragraphs)
-    assert 'STAGE A' in only_a_text and 'STAGE B' not in only_a_text
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==200
-    assert employee.get(path).json()['answers']['only_b']=='B'
-    restored_both=employee.post(path+'/generate',headers=eh)
-    assert restored_both.status_code==201,restored_both.text
-    assert 'STAGE B' in ' '.join(p.text for p in Document(io.BytesIO(employee.get(restored_both.json()['download_url']).content)).paragraphs)
+    assert employee.post(path+'/generate',headers=eh).status_code==409
+    first_answers={'common':'C','shared':'S','only_b':'B','show_a':True}
+    completed=employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':first_answers})
+    assert completed.status_code==200,completed.text
+    first=employee.post(path+f"/generate?stage_id={b['id']}",headers=eh)
+    assert first.status_code==201 and first.json()['status']=='DRAFT',first.text
+    text=' '.join(p.text for p in Document(io.BytesIO(employee.get(first.json()['download_url'],headers=eh).content)).paragraphs)
+    assert 'STAGE B' in text and 'STAGE A' not in text
+    assert employee.patch(path,headers=eh,json={'answers':{'show_a':False}}).status_code==409
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==409
+    second=employee.post(path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'only_a':'A'}})
+    assert second.status_code==200,second.text
+    final=employee.post(path+'/generate',headers=eh)
+    assert final.status_code==201 and final.json()['status']=='GENERATED',final.text
+    text=' '.join(p.text for p in Document(io.BytesIO(employee.get(final.json()['download_url'],headers=eh).content)).paragraphs)
+    assert 'STAGE A' in text and 'STAGE B' in text
+    restored=employee.get(path,headers=eh).json()
+    assert restored['completed_stage_ids']==[b['id'],a['id']]
     cloned=manager.post(base+'/clone',headers=mh)
     assert cloned.status_code==201,cloned.text
     clone_schema=manager.get(f"/api/v1/document-templates/{template['id']}/versions/{cloned.json()['id']}/questionnaire",headers=mh).json()
@@ -3072,24 +3064,25 @@ def test_contract_stage_excludes_unselected_repeating_row():
     assert row_field['config']['description']=='Укажите услугу'
     assert manager.put(base+f"/repeating-groups/{group['id']}/fields/{row_field['id']}/binding",headers=mh,json={'locator':row_node['locator'],'start':0,'end':5,'selected_text':'VALUE'}).status_code==200
     assert manager.post(base+'/publish',headers=mh).status_code==200
-    employee=TestClient(app);eh=auth(employee,'petrova');draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{draft['id']}"
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
+    path=f"/api/v1/contract-drafts/{draft['id']}"
     assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
-    assert employee.patch(path,headers=eh,json={'answers':{'name':'Иван'}}).status_code==200
+    completed=employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}})
+    assert completed.status_code==200,completed.text
     generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
     table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
     assert len(table.rows)==1
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
-    assert employee.patch(path,headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Кейтеринг'}]}}).status_code==200
-    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==409
+    second=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
+    second_path=f"/api/v1/contract-drafts/{second['id']}"
+    assert employee.patch(second_path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    completed=employee.post(second_path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'name':'Иван','services':[{'_id':'row-1','value':'Кейтеринг'}]}})
+    assert completed.status_code==200,completed.text
+    generated=employee.post(second_path+'/generate',headers=eh);assert generated.status_code==201,generated.text
     table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
     assert len(table.rows)==2 and table.cell(1,0).text=='Кейтеринг'
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
-    assert employee.get(path,headers=eh).json()['answers']['services'][0]['value']=='Кейтеринг'
-    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
-    assert len(Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0].rows)==1
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
-    assert employee.get(path,headers=eh).json()['answers']['services'][0]['value']=='Кейтеринг'
-
+    assert employee.patch(second_path+'/autosave',headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Другое'}]}}).status_code==409
 
 def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
     from app.db import ContractStage

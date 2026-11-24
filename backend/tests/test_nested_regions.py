@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 from docx import Document
+from docx.enum.section import WD_SECTION_START
 
 from app.contract_platform import _regions_overlap, render_docx
 
@@ -26,6 +27,22 @@ def render(source: Path, target: Path, regions, included):
             if name.endswith('.xml'):
                 ET.fromstring(archive.read(name))
     return Document(target)
+
+
+def test_conditional_paragraph_preserves_unrelated_page_and_section_breaks(tmp_path):
+    source=tmp_path/'source.docx';target=tmp_path/'result.docx'
+    document=Document();document.add_paragraph('MAIN');document.add_paragraph('HIDDEN');document.add_page_break();document.add_paragraph('APPENDIX')
+    document.add_section(WD_SECTION_START.NEW_PAGE);document.add_paragraph('FINAL');document.save(source)
+    hidden=region('hidden','CONDITIONAL_PARAGRAPH',nodes=[f'{PART}#/p[2]'])
+    result=render(source,target,[hidden],set())
+    assert 'HIDDEN' not in [paragraph.text for paragraph in result.paragraphs]
+    assert 'APPENDIX' in [paragraph.text for paragraph in result.paragraphs]
+    assert len(result.sections)==2
+    def breaks(path):
+        with zipfile.ZipFile(path) as archive: root=ET.fromstring(archive.read(PART))
+        word='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        return sum(element.get(word+'type')=='page' for element in root.iter(word+'br'))
+    assert breaks(source)==breaks(target)==1
 
 
 @pytest.mark.parametrize('included,expected', [

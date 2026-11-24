@@ -82,7 +82,8 @@ test("employee keeps the specialist's saved order after selecting one or two sta
     await page.getByRole("button", { name: "Изменить этапы договора" }).click();
     await page.getByRole("checkbox", { name: /Проведение/ }).check();
     await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Третий вопрос", "Четвёртый вопрос"]);
+    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Четвёртый вопрос"]);
+    assert.equal(await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).isDisabled(), true);
   } finally { await browser.close(); await server.close(); }
 });
 

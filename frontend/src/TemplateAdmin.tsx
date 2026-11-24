@@ -1015,26 +1015,14 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       .catch(() => { if (current) setPublicationCheck({ errors: ["Не удалось проверить готовность шаблона. Повторите попытку после обновления страницы."], warnings: [], tested_current_revision: false }); });
     return () => { current = false; };
   }, [api, stage, selected?.id, version?.id, version?.status, version?.lock_completed_stages, schema, bindings, regions, repeatingGroups]);
-  async function changeStageLocking(enabled: boolean) {
-    if (!version) return false;
-    try {
-      const updated = await api(`/document-templates/${version.template_id}/versions/${version.id}/stage-locking`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
-      setVersion(updated);
-      setTestDocument(null);
-      return true;
-    } catch (e: any) {
-      setError(e.message || "Не удалось сохранить настройку блокировки этапов");
-      return false;
-    }
-  }
   useEffect(() => {
-    if (stage !== 6 || !version?.id || !version.lock_completed_stages || version.status === "DRAFT") { setLockedDrafts([]); return; }
+    if (stage !== 6 || !version?.id || version.status === "DRAFT") { setLockedDrafts([]); return; }
     let active = true;
     api(`/document-templates/${version.template_id}/versions/${version.id}/locked-drafts`).then(rows => { if (active) setLockedDrafts(rows); }).catch(() => { if (active) setLockedDrafts([]); });
     return () => { active = false; };
-  }, [api, stage, version?.id, version?.status, version?.lock_completed_stages]);
+  }, [api, stage, version?.id, version?.status]);
   async function unlockStage(draftId: string, stageId: string) {
-    const reason = window.prompt("Причина разблокировки этапа");
+    const reason = window.prompt("Укажите причину разблокировки. Все последующие завершённые этапы также будут разблокированы; ответы сохранятся.");
     if (!reason?.trim()) return;
     await run(async () => {
       await api(`/contract-drafts/${draftId}/stages/${stageId}/unlock`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: reason.trim() }) });
@@ -1174,11 +1162,11 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       if (sourceId) moveQuestion(sourceId, item.id, after);
       setDraggedQuestion(null); setQuestionDrop(null);
     }} onDragEnd={() => { setDraggedQuestion(null); setQuestionDrop(null); }}>
-      <button className={`workspace-question-open ${editing === item.id && showFieldEditor ? "active" : ""}`} type="button" onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small><em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>
+      <button className={`workspace-question-open ${editing === item.id && showFieldEditor ? "active" : ""}`} type="button" onClick={() => questionActions.current.editField(item)}><span>{questionGroup(item)}</span><b>{item.label}</b><small>{TYPES[item.field_type]} · {count} привязок</small>{contractStages.length > 0 && !(item.config?.stage_ids || []).length && <small>Этап не выбран. Вопрос будет отображаться только на первом этапе</small>}<em className={count ? "linked" : "unlinked"}>{count ? "Привязан" : "Без привязки"}</em><ChevronRight size={14}/></button>
       {showOrderControls && <div className="workspace-question-order" title={questionQuery.trim() ? "Очистите поиск, чтобы изменить порядок вопросов" : undefined}><GripVertical size={14} aria-hidden="true"/><button type="button" aria-label={`Переместить «${item.label}» вверх`} disabled={!canReorder || !previous} onClick={() => moveQuestion(item.id, previous.id)}><ArrowUp size={13}/></button><button type="button" aria-label={`Переместить «${item.label}» вниз`} disabled={!canReorder || !next} onClick={() => moveQuestion(item.id, next.id, true)}><ArrowDown size={13}/></button></div>}
     </div>;
     return heading ? [heading, card] : [card];
-  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, questionSectionNames, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
+  }), [filteredQuestions, bindingCounts, editing, showFieldEditor, field.group, schema?.fields, questionSectionNames, contractStages, stage, version?.status, questionQuery, busy, draggedQuestion, questionDrop]);
   const existingGroups=Array.from(new Map<string,string>((schema?.fields||[]).map((item:any)=>String(item.config?.group||"Основные сведения").trim()).filter(Boolean).map((group:string)=>[group.toLocaleLowerCase("ru"),group])).values());
   const availableCopyKeys=new Set([...(schema?.fields||[]).map((item:any)=>item.field_key),...selectedCopyFields.map(item=>item.field_key)]);
   const missingCopyFields=copyFields.filter(item=>!availableCopyKeys.has(item.field_key)&&selectedCopyFields.some(selectedField=>[...conditionFieldKeys(selectedField.config?.visible_when),...conditionFieldKeys(selectedField.config?.required_when)].includes(item.field_key)));
@@ -1466,7 +1454,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   </button>
                 ))}
               </nav>
-              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} lockCompletedStages={version.lock_completed_stages} changeStageLocking={changeStageLocking} lockedDrafts={lockedDrafts} unlockStage={unlockStage} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} lockedDrafts={lockedDrafts} unlockStage={unlockStage} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (
@@ -1942,7 +1930,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                                   }
                                 />
                               </label>
-                              {stagePicker(field.stage_ids || [], ids => setField({ ...field, stage_ids: ids }), "Показывать вопрос на этапах")}
+                              {contractStages.length > 0 && <label>Этап вопроса<select disabled={version?.status !== "DRAFT"} value={field.stage_ids?.[0] || ""} onChange={event => setField({ ...field, stage_ids: event.target.value ? [event.target.value] : [] })}><option value="">Не выбран — первый этап</option>{contractStages.map(item => <option key={item.id} value={item.id}>{item.name}{item.status !== "ACTIVE" ? " · неактивен" : ""}</option>)}</select>{!field.stage_ids?.length && <small>Этап не выбран. Вопрос будет отображаться только на первом этапе</small>}</label>}
                               <details className="workspace-advanced"><summary>Дополнительные настройки</summary><label>
                                 Служебный ключ поля
                                 <input

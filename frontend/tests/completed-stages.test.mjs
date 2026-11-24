@@ -3,53 +3,16 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
-test("step 6 shows the optional locking setting without completing a real draft", async () => {
+test("step 6 explains fixed stages without a locking switch", async () => {
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
   try {
     const { TemplateQuestionnairePreview } = await server.ssrLoadModule("/src/TemplateQuestionnairePreview.tsx");
     const React = await import("react");
     const { renderToStaticMarkup } = await import("react-dom/server");
     const html = renderToStaticMarkup(React.createElement(TemplateQuestionnairePreview, { schema: { fields: [], repeating_groups: [], stages: [{ id: "s1", name: "Первый этап", position: 1, status: "ACTIVE" }] }, answers: {}, selectedStageIds: ["s1"], change() {}, changeStages() {}, changeStageLocking() {}, lockCompletedStages: true, busy: false, published: false }));
-    assert.match(html, /Блокировать редактирование завершённых этапов/);
-    assert.match(html, /боевые состояния этапов не создаются/);
-    assert.match(html, /checked=""/);
+    assert.match(html, /Предпросмотр не фиксирует реальные этапы/);
+    assert.doesNotMatch(html, /Блокировать редактирование завершённых этапов/);
   } finally { await server.close(); }
-});
-
-test("stage lock switch updates before save and restores its value after an error", async () => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost/templates" });
-  const globals = { window: dom.window, document: dom.window.document, navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true };
-  const previous = Object.fromEntries(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
-  const { TemplateQuestionnairePreview } = await server.ssrLoadModule("/src/TemplateQuestionnairePreview.tsx");
-  const React = await import("react");
-  const { act } = React;
-  const { createRoot } = await import("react-dom/client");
-  const root = createRoot(dom.window.document.getElementById("root"));
-  const schema = { fields: [], repeating_groups: [], stages: [{ id: "s1", name: "Этап", position: 1, status: "ACTIVE" }] };
-  let resolveSave;
-  const changeStageLocking = () => new Promise(resolve => { resolveSave = resolve; });
-  const props = { schema, answers: {}, selectedStageIds: ["s1"], change() {}, changeStages() {}, changeStageLocking, lockCompletedStages: false, busy: false, published: false };
-  const switchInput = () => dom.window.document.querySelector(".contract-stage-lock-setting input");
-  try {
-    await act(async () => root.render(React.createElement(TemplateQuestionnairePreview, props)));
-    act(() => switchInput().click());
-    assert.equal(switchInput().checked, true, "the check appears while the save request is pending");
-    assert.equal(switchInput().disabled, true, "a second request cannot start");
-    await act(async () => resolveSave(false));
-    assert.equal(switchInput().checked, false);
-    assert.match(dom.window.document.querySelector(".contract-stage-lock-setting").textContent, /Не удалось сохранить настройку/);
-    act(() => switchInput().click());
-    assert.equal(switchInput().checked, true);
-    await act(async () => { root.render(React.createElement(TemplateQuestionnairePreview, { ...props, lockCompletedStages: true })); resolveSave(true); });
-    assert.equal(switchInput().checked, true);
-    assert.equal(switchInput().disabled, false);
-  } finally {
-    await act(async () => root.unmount());
-    await server.close(); dom.window.close();
-    for (const [key, descriptor] of Object.entries(previous)) descriptor ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key];
-  }
 });
 
 test("employee completes a stage, reviews locked answers, and continues", async () => {
@@ -95,7 +58,13 @@ test("employee completes a stage, reviews locked answers, and continues", async 
     await click(button("Заполнить договор"));
     assert.ok(dom.window.document.querySelector("#field-f1"));
     await type(dom.window.document.querySelector("#field-f1"), "Ответ 1");
-    await click(button("Завершить этап и перейти далее"));
+    await click(button("Сохранить ответы"));
+    assert.equal(calls.length, 0);
+    await click(button("Отмена"));
+    assert.equal(calls.length, 0);
+    assert.equal(dom.window.document.querySelector("#field-f1").disabled, false);
+    await click(button("Сохранить ответы"));
+    await click(button("Подтвердить"));
     assert.deepEqual(calls, ["/contract-drafts/d1/stages/s1/complete"]);
     assert.ok(dom.window.document.querySelector("#field-f2"));
     await click(button("Первый этап"));

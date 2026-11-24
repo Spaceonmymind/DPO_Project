@@ -3212,3 +3212,56 @@ def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
         with SessionLocal() as session:
             rows=session.query(ContractStage).filter_by(template_version_id=uploaded.json()['id']).all()
             assert sorted(row.position for row in rows)==[1,2,3,4,5]
+
+
+def test_contract_administration_lists_filters_and_authorizes_consecutive_stages():
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'ADMIN_CENTER')
+    document=Document();document.add_paragraph('Договор');raw=io.BytesIO();document.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    ids=[]
+    for index in range(3):
+        response=manager.post(base+'/stages',headers=mh,json={'name':f'Этап {index+1}'})
+        assert response.status_code==201,response.text
+        ids.append(response.json()['id'])
+        field=manager.post(base+'/fields',headers=mh,json={'field_key':f'admin_answer_{index+1}','label':f'Ответ {index+1}','field_type':'TEXT','required':True,'position':index+1,'stage_ids':[ids[-1]]})
+        assert field.status_code==201,field.text
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    employee_name='adminemployee'+uuid.uuid4().hex[:8]
+    with SessionLocal() as session:
+        session.add(User(external_id=employee_name,full_name='Анна Петрова',email=employee_name+'@example.test',department='ДПО',roles=['employee'],password=hash_password(employee_name.capitalize()),is_active=True))
+        session.commit()
+    employee=TestClient(app);eh=auth(employee,employee_name)
+    created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{created['id']}"
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[ids[0]]}).status_code==200
+    assert employee.post(path+f'/stages/{ids[0]}/complete',headers=eh,json={'answers':{'admin_answer_1':'Первый'}}).status_code==200
+    assert employee.get('/api/v1/admin/contracts',headers=eh).status_code==403
+    assert employee.get('/api/v1/admin/users',headers=eh).status_code==403
+    assert employee.get('/api/v1/admin/events',headers=eh).status_code==403
+    listing=manager.get('/api/v1/admin/contracts',headers=mh,params={'q':employee_name,'page_size':1}).json()
+    assert listing['total']>=1 and len(listing['items'])==1
+    assert listing['items'][0]['completed_count']==1 and listing['items'][0]['total_stages']==3
+    assert manager.get('/api/v1/admin/contracts',headers=mh,params={'progress':'COMPLETED','template_id':template['id']}).json()['total']==1
+    assert manager.get('/api/v1/admin/contracts',headers=mh,params={'status':'NONEXISTENT'}).json()['total']==0
+    detail=manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()
+    assert detail['can_allow_next'] and [stage['state'] for stage in detail['stages']]==['COMPLETED','NOT_CONNECTED','NOT_CONNECTED']
+    assert employee.post(path+'/stages/allow-next',headers=eh,json={'count':2}).status_code==403
+    assert manager.post(path+'/stages/allow-next',headers=mh,json={'count':3}).status_code==422
+    allowed=manager.post(path+'/stages/allow-next',headers=mh,json={'count':2})
+    assert allowed.status_code==200,allowed.text
+    assert allowed.json()['selected_stage_ids']==ids and allowed.json()['completed_stage_ids']==ids[:1]
+    assert [stage['id'] for stage in allowed.json()['authorized_stages']]==ids[1:]
+    detail=manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()
+    assert [stage['state'] for stage in detail['stages']]==['COMPLETED','AVAILABLE','AUTHORIZED']
+    assert employee.get(path,headers=eh).json()['answers']['admin_answer_1']=='Первый'
+    assert employee.patch(path,headers=eh,json={'answers':{'admin_answer_1':'Замена'}}).status_code==409
+    assert employee.post(path+f'/stages/{ids[2]}/complete',headers=eh,json={'answers':{'admin_answer_3':'Рано'}}).status_code in (404,409)
+    events=manager.get('/api/v1/admin/events',headers=mh,params={'event_type':'AUTHORIZED','template_id':template['id']}).json()
+    assert events['total']==2 and {item['stage_name'] for item in events['items']}=={'Этап 2','Этап 3'}
+    users=manager.get('/api/v1/admin/users',headers=mh,params={'q':employee_name}).json()
+    assert any(item['contract_count']>=1 for item in users['items'])
+    unlocked=manager.post(path+f'/stages/{ids[0]}/unlock',headers=mh,json={'reason':'Исправление данных'})
+    assert unlocked.status_code==200,unlocked.text
+    assert manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()['stages'][0]['state']=='UNLOCKED'
+    assert employee.get(path,headers=eh).json()['answers']['admin_answer_1']=='Первый'

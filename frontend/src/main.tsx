@@ -24,6 +24,7 @@ import {
   FileCheck2,
   Handshake,
   GraduationCap,
+  Users,
 } from "lucide-react";
 import { OnboardingProvider, useOnboarding } from "./onboarding/OnboardingProvider";
 import "./styles.css";
@@ -39,6 +40,7 @@ import { RequisiteDirectory } from "./RequisiteDirectory";
 import { ContractCatalog } from "./ContractCatalog";
 import { ContractHome } from "./ContractHome";
 import { MyDocuments } from "./MyDocuments";
+import { ContractAdministration } from "./ContractAdministration";
 import { parseApiResponse } from "./apiResponse";
 const API = "/api/v1",
   S: any = {
@@ -283,6 +285,7 @@ function Sidebar({ u, route, go, logout }: any) {
           </button>
         )}
         {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/requisites" ? "active" : ""} title={closed ? "Справочник реквизитов" : ""} onClick={() => go("/requisites")}><FileCheck2 />{!closed && "Справочник реквизитов"}</button>}
+        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/administration" ? "active" : ""} title={closed ? "Пользователи и договоры" : ""} onClick={() => go("/administration")}><Users />{!closed && "Пользователи и договоры"}</button>}
         <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && 'Обучение'}</button>
       </nav>
       <footer>
@@ -1040,6 +1043,8 @@ function Shell({ u, logout }: any) {
           />
         ) : route === "/requisites" ? (
           u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) ? <RequisiteDirectory api={api} /> : <div className="page platform-empty"><h2>Раздел недоступен</h2></div>
+        ) : route === "/administration" ? (
+          u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) ? <ContractAdministration api={api} /> : <div className="page platform-empty"><h2>Раздел недоступен</h2></div>
         ) : route === "/templates" ? (
           u.roles?.some((r: string) =>
             ["dpo_specialist", "administrator"].includes(r),

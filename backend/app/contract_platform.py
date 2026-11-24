@@ -12,7 +12,8 @@ from fastapi import APIRouter,Body,Depends,File,HTTPException,UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
-from sqlalchemy import func,update
+from sqlalchemy import func,or_,update
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import IntegrityError
 from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
@@ -187,6 +188,9 @@ class StageCompletionPayload(BaseModel):
 
 class StageUnlockPayload(BaseModel):
  reason:str=Field(min_length=3,max_length=1000)
+
+class StageAuthorizationPayload(BaseModel):
+ count:int=Field(default=1,ge=1,le=100)
 
 class StageLockSettingPayload(BaseModel):
  enabled:bool
@@ -1245,6 +1249,65 @@ def render_docx(v,bindings,values,target,regions=None,included_region_ids=None,r
 
 def build_contract_platform_router(current_dependency:Callable)->APIRouter:
  r=APIRouter(tags=['contract-platform']); prefix='/api/v1/document-templates'
+ def admin_drafts(u,s):
+  require_manager(u)
+  query=s.query(DocumentDraft,User,DocumentTemplate).join(User,User.id==DocumentDraft.owner_id).join(TemplateVersion,TemplateVersion.id==DocumentDraft.template_version_id).join(DocumentTemplate,DocumentTemplate.id==TemplateVersion.template_id).filter(DocumentDraft.deleted_at.is_(None),DocumentTemplate.deleted_at.is_(None))
+  if 'administrator' not in roles(u):query=query.filter(DocumentTemplate.owner_id==u.id)
+  return query
+ def admin_draft_out(row,s,stage_cache=None):
+  draft,owner,template=row
+  if stage_cache is None:stage_cache={}
+  if draft.template_version_id not in stage_cache:stage_cache[draft.template_version_id]=version_stages(draft.template_version_id,s,True)
+  stages=stage_cache[draft.template_version_id];selected=set(draft.selected_stage_ids or []);completed=set(draft.completed_stage_ids or [])
+  current=next((stage for stage in stages if stage.id in selected and stage.id not in completed),None)
+  return {'id':draft.id,'title':draft.title or template.name,'status':draft.status,'created_at':draft.created_at,'updated_at':draft.updated_at,'owner':{'id':owner.id,'full_name':owner.full_name,'external_id':owner.external_id},'template':{'id':template.id,'name':template.name},'template_version_id':draft.template_version_id,'selected_stage_ids':draft.selected_stage_ids or [],'completed_stage_ids':draft.completed_stage_ids or [],'completed_count':len(completed.intersection({stage.id for stage in stages})),'total_stages':len(stages),'current_stage':stage_out(current) if current else None}
+ @r.get('/api/v1/admin/contracts')
+ def admin_contracts(q:str='',status:str='',template_id:str='',progress:str='',user_id:str='',page:int=1,page_size:int=20,u=Depends(current_dependency),s:DBS=Depends(db)):
+  if page<1 or page_size<1 or page_size>100:raise HTTPException(422,detail='Некорректная страница')
+  query=admin_drafts(u,s)
+  if q.strip():
+   pattern=f'%{q.strip()}%';query=query.filter(or_(User.full_name.ilike(pattern),User.external_id.ilike(pattern),DocumentTemplate.name.ilike(pattern),DocumentDraft.title.ilike(pattern),DocumentDraft.id.ilike(pattern)))
+  if status:query=query.filter(DocumentDraft.status==status)
+  if template_id:query=query.filter(DocumentTemplate.id==template_id)
+  if user_id:query=query.filter(User.id==user_id)
+  if progress in {'COMPLETED','IN_PROGRESS','NOT_STARTED'}:
+   completed=func.json_array_length(DocumentDraft.completed_stage_ids)
+   if progress=='COMPLETED':query=query.filter(completed>0,completed==func.json_array_length(DocumentDraft.selected_stage_ids))
+   elif progress=='IN_PROGRESS':query=query.filter(completed>0,completed<func.json_array_length(DocumentDraft.selected_stage_ids))
+   else:query=query.filter(completed==0)
+  total=query.count();rows=query.order_by(DocumentDraft.updated_at.desc(),DocumentDraft.id).offset((page-1)*page_size).limit(page_size).all();cache={}
+  return {'items':[admin_draft_out(row,s,cache) for row in rows],'total':total,'page':page,'page_size':page_size}
+ @r.get('/api/v1/admin/contracts/{draft_id}')
+ def admin_contract_detail(draft_id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  row=admin_drafts(u,s).filter(DocumentDraft.id==draft_id).first()
+  if not row:raise HTTPException(404,detail='Договор не найден')
+  draft=row[0];result=admin_draft_out(row,s);stages=version_stages(draft.template_version_id,s,True);selected=set(draft.selected_stage_ids or []);completed=set(draft.completed_stage_ids or []);current=next((stage.id for stage in stages if stage.id in selected and stage.id not in completed),None)
+  events=s.query(DraftStageEvent,User).join(User,User.id==DraftStageEvent.actor_id).filter(DraftStageEvent.draft_id==draft.id).order_by(DraftStageEvent.created_at, DraftStageEvent.id).all();last={}
+  for event,actor in events:last[event.stage_id]=event
+  result['stages']=[{**stage_out(stage),'state':('NOT_CONNECTED' if stage.id not in selected else 'COMPLETED' if stage.id in completed else 'UNLOCKED' if last.get(stage.id) and last[stage.id].event_type=='UNLOCKED' else 'AVAILABLE' if stage.id==current else 'AUTHORIZED'),'selected':stage.id in selected,'completed_at':next((event.created_at for event,actor in reversed(events) if event.stage_id==stage.id and event.event_type=='COMPLETED'),None) if stage.id in completed else None} for stage in stages]
+  result['events']=[{'id':event.id,'stage_id':event.stage_id,'stage_name':next((stage.name for stage in stages if stage.id==event.stage_id),''),'event_type':event.event_type,'created_at':event.created_at,'actor':actor.full_name,'reason':event.reason,'result':'SUCCESS'} for event,actor in reversed(events)]
+  result['can_allow_next']=bool(stages and len(selected)<len(stages) and selected=={stage.id for stage in stages[:len(selected)]} and all(stage.id in completed for stage in stages[:len(selected)]))
+  return result
+ @r.get('/api/v1/admin/users')
+ def admin_contract_users(q:str='',page:int=1,page_size:int=20,u=Depends(current_dependency),s:DBS=Depends(db)):
+  if page<1 or page_size<1 or page_size>100:raise HTTPException(422,detail='Некорректная страница')
+  query=admin_drafts(u,s)
+  if q.strip():query=query.filter(or_(User.full_name.ilike(f'%{q.strip()}%'),User.external_id.ilike(f'%{q.strip()}%')))
+  grouped=query.with_entities(User.id,User.full_name,User.external_id,func.count(DocumentDraft.id),func.coalesce(func.sum(func.json_array_length(DocumentDraft.completed_stage_ids)),0),func.coalesce(func.sum(func.json_array_length(DocumentDraft.selected_stage_ids)),0)).group_by(User.id,User.full_name,User.external_id)
+  total=grouped.count();rows=grouped.order_by(User.full_name,User.id).offset((page-1)*page_size).limit(page_size).all()
+  return {'items':[{'id':id,'full_name':name,'external_id':external,'contract_count':count,'completed_stages':completed,'connected_stages':connected} for id,name,external,count,completed,connected in rows],'total':total,'page':page,'page_size':page_size}
+ @r.get('/api/v1/admin/events')
+ def admin_contract_events(q:str='',event_type:str='',template_id:str='',user_id:str='',page:int=1,page_size:int=20,u=Depends(current_dependency),s:DBS=Depends(db)):
+  if page<1 or page_size<1 or page_size>100:raise HTTPException(422,detail='Некорректная страница')
+  require_manager(u);owner=aliased(User);actor=aliased(User)
+  query=s.query(DraftStageEvent,DocumentDraft,DocumentTemplate,owner,actor,ContractStage).join(DocumentDraft,DocumentDraft.id==DraftStageEvent.draft_id).join(TemplateVersion,TemplateVersion.id==DocumentDraft.template_version_id).join(DocumentTemplate,DocumentTemplate.id==TemplateVersion.template_id).join(owner,owner.id==DocumentDraft.owner_id).join(actor,actor.id==DraftStageEvent.actor_id).join(ContractStage,ContractStage.id==DraftStageEvent.stage_id).filter(DocumentDraft.deleted_at.is_(None),DocumentTemplate.deleted_at.is_(None))
+  if 'administrator' not in roles(u):query=query.filter(DocumentTemplate.owner_id==u.id)
+  if q.strip():query=query.filter(or_(owner.full_name.ilike(f'%{q.strip()}%'),owner.external_id.ilike(f'%{q.strip()}%'),DocumentDraft.title.ilike(f'%{q.strip()}%'),DocumentTemplate.name.ilike(f'%{q.strip()}%')))
+  if event_type:query=query.filter(DraftStageEvent.event_type==event_type)
+  if template_id:query=query.filter(DocumentTemplate.id==template_id)
+  if user_id:query=query.filter(owner.id==user_id)
+  total=query.count();rows=query.order_by(DraftStageEvent.created_at.desc(),DraftStageEvent.id.desc()).offset((page-1)*page_size).limit(page_size).all()
+  return {'items':[{'id':e.id,'draft_id':d.id,'draft_title':d.title or t.name,'owner':{'id':o.id,'full_name':o.full_name,'external_id':o.external_id},'template_name':t.name,'stage_name':stage.name,'event_type':e.event_type,'created_at':e.created_at,'actor':a.full_name,'reason':e.reason,'result':'SUCCESS'} for e,d,t,o,a,stage in rows],'total':total,'page':page,'page_size':page_size}
  @r.get('/api/v1/requisite-sets')
  def requisite_sets(include_archived:bool=False,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u)
@@ -1385,7 +1448,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   for key in affected:s.add(DraftStageEvent(draft_id=d.id,stage_id=key,actor_id=u.id,event_type='UNLOCKED',reason=p.reason.strip()))
   s.commit();return {'id':d.id,'completed_stage_ids':d.completed_stage_ids,'unlocked_stage_ids':affected,'stage_progress':stage_progress(d,v,s)}
  @r.post('/api/v1/contract-drafts/{id}/stages/allow-next')
- def allow_next_draft_stage(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+ def allow_next_draft_stage(id:str,p:StageAuthorizationPayload|None=Body(default=None),u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u)
   d=s.query(DocumentDraft).filter_by(id=id).with_for_update().populate_existing().first()
   if not d or d.deleted_at:raise HTTPException(404,detail='Черновик не найден')
@@ -1396,11 +1459,13 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if [stage.id for stage in ordered]!=[stage.id for stage in stages[:len(ordered)]]:raise HTTPException(409,detail='Порядок подключённых этапов требует проверки специалиста')
   if len(ordered)==len(stages):raise HTTPException(409,detail='Все этапы договора уже подключены')
   if any(stage.id not in (d.completed_stage_ids or []) for stage in ordered):raise HTTPException(409,detail='Сначала завершите текущий этап')
-  next_stage=stages[len(ordered)]
-  d.selected_stage_ids=[stage.id for stage in stages[:len(ordered)+1]];d.status='DRAFT';d.updated_at=now()
-  s.add(DraftStageEvent(draft_id=d.id,stage_id=next_stage.id,actor_id=u.id,event_type='AUTHORIZED'))
+  count=p.count if p else 1
+  if len(ordered)+count>len(stages):raise HTTPException(422,detail='Запрошено больше этапов, чем осталось в договоре')
+  next_stages=stages[len(ordered):len(ordered)+count]
+  d.selected_stage_ids=[stage.id for stage in stages[:len(ordered)+count]];d.status='DRAFT';d.updated_at=now()
+  for stage in next_stages:s.add(DraftStageEvent(draft_id=d.id,stage_id=stage.id,actor_id=u.id,event_type='AUTHORIZED'))
   s.commit()
-  return {'id':d.id,'selected_stage_ids':d.selected_stage_ids,'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s),'next_stage':stage_out(next_stage)}
+  return {'id':d.id,'selected_stage_ids':d.selected_stage_ids,'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s),'next_stage':stage_out(next_stages[0]),'authorized_stages':[stage_out(stage) for stage in next_stages]}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=locked_draft(s,id,u); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})

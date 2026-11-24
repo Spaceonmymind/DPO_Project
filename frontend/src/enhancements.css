@@ -44,3 +44,5 @@
 @media(max-width:900px){.documents-list>header{display:none}.documents-list>article{grid-template-columns:28px minmax(0,1fr);gap:8px}.documents-list>article>em,.documents-list>article>div{grid-column:2}.documents-list>article>div{justify-content:flex-start}}
 .template-management-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.template-management-actions .document-delete,.document-dialog .document-delete{color:#a43d37;border-color:#e8c8c5}.template-management-actions .document-delete:hover{background:#fff0ef}
 @media(max-width:640px){.template-management-actions{width:100%}}
+.side nav .side-admin-link{height:auto;min-height:42px;padding-top:7px;padding-bottom:7px;white-space:normal;overflow:visible}
+.side nav .side-admin-link span{min-width:0;line-height:1.2;overflow-wrap:anywhere}

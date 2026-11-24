@@ -285,7 +285,7 @@ function Sidebar({ u, route, go, logout }: any) {
           </button>
         )}
         {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/requisites" ? "active" : ""} title={closed ? "Справочник реквизитов" : ""} onClick={() => go("/requisites")}><FileCheck2 />{!closed && "Справочник реквизитов"}</button>}
-        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/administration" ? "active" : ""} title={closed ? "Пользователи и договоры" : ""} onClick={() => go("/administration")}><Users />{!closed && "Пользователи и договоры"}</button>}
+        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={`side-admin-link${route === "/administration" ? " active" : ""}`} title={closed ? "Пользователи и договоры" : ""} onClick={() => go("/administration")}><Users />{!closed && <span>Пользователи и договоры</span>}</button>}
         <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && 'Обучение'}</button>
       </nav>
       <footer>

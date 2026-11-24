@@ -12,7 +12,7 @@ from fastapi import APIRouter,Body,Depends,File,HTTPException,UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session as DBS
-from sqlalchemy import update
+from sqlalchemy import func,update
 from sqlalchemy.exc import IntegrityError
 from docx import Document
 from app.conditions import ConditionConfigurationError,ConditionEngine
@@ -1861,10 +1861,20 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
    path=safe_source(v); loc=adapter.get_structural_locator(path,adapter.select_range(path,p.locator,p.start,p.end,p.selected_text))
    replace_range(copy.deepcopy(paragraph_for(_part_root(path,loc['part']),loc['node'])),p.start,p.end,'ПРОВЕРКА',not _form_protected(path))
   except (ValueError,CalculationError) as exc: raise HTTPException(422,detail=str(exc))
+  # Serialize all binding allocations for this version before checking overlaps
+  # and assigning the next occurrence number. COUNT()+1 reuses occupied numbers
+  # after deletion and races when two requests create a binding together.
+  s.query(TemplateVersion).filter_by(id=v.id).with_for_update().one()
   for old in s.query(DocumentBinding).filter_by(template_version_id=v.id,status='ACTIVE'):
    o=old.locator
    if o.get('node')==loc['node'] and loc['text_start']<o['text_end'] and loc['text_end']>o['text_start']: raise HTTPException(409,detail='Выделенный диапазон пересекается с существующей привязкой')
-  n=s.query(DocumentBinding).filter_by(template_version_id=v.id,binding_key=key).count()+1; x=DocumentBinding(template_version_id=v.id,field_id=field.id if field else None,binding_key=key,occurrence_index=n,locator=loc,selected_text=p.selected_text,format_config={'format':p.output_format,'options':p.format_options},created_by_id=u.id); s.add(x); s.flush(); s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='BINDING_CREATED',metadata_json={'binding_id':x.id})); s.commit(); return binding_out(x)
+  n=(s.query(func.max(DocumentBinding.occurrence_index)).filter_by(template_version_id=v.id,binding_key=key).scalar() or 0)+1
+  x=DocumentBinding(template_version_id=v.id,field_id=field.id if field else None,binding_key=key,occurrence_index=n,locator=loc,selected_text=p.selected_text,format_config={'format':p.output_format,'options':p.format_options},created_by_id=u.id)
+  try:
+   s.add(x);s.flush();s.add(TemplateAuditEvent(template_id=t.id,template_version_id=v.id,actor_id=u.id,event_type='BINDING_CREATED',metadata_json={'binding_id':x.id}));s.commit()
+  except IntegrityError:
+   s.rollback();raise HTTPException(409,detail='Привязка была изменена одновременно с вашим запросом. Повторите сохранение.')
+  return binding_out(x)
  @r.patch(prefix+'/{tid}/versions/{vid}/bindings/{bid}/format')
  def update_binding_format(tid:str,vid:str,bid:str,p:BindingFormatPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u); v,t=owned_version(vid,u,s); require_draft(v); x=s.get(DocumentBinding,bid)

@@ -183,7 +183,9 @@ export function useDocxVirtualPreview<T extends PreviewNode>(
     const end = Math.min(blocks.length, indexAt(offsets, offsets[index + 1] + canvas.clientHeight / scale + OVERSCAN / scale) + 2);
     setRange({ start, end });
     scheduleFrame(() => {
-      const target = page.querySelector<HTMLElement>(`[data-locator="${CSS.escape(locator)}"]`);
+      // A structural locator is an opaque DOCX path, not a CSS selector.
+      // Compare it as data so punctuation in a locator cannot break selector parsing.
+      const target = Array.from(page.querySelectorAll<HTMLElement>("[data-locator]")).find(node => node.dataset.locator === locator);
       target?.scrollIntoView({ behavior: "auto", block: "center" });
     });
     return true;

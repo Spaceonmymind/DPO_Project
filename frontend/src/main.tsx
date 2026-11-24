@@ -39,6 +39,7 @@ import { RequisiteDirectory } from "./RequisiteDirectory";
 import { ContractCatalog } from "./ContractCatalog";
 import { ContractHome } from "./ContractHome";
 import { MyDocuments } from "./MyDocuments";
+import { parseApiResponse } from "./apiResponse";
 const API = "/api/v1",
   S: any = {
     NEW: "Новое",
@@ -75,17 +76,7 @@ const api = (p: string, o: any = {}) =>
         : {}),
       ...o.headers,
     },
-  }).then(async (r) => {
-    if (!r.ok) {
-      const body = await r.json();
-      throw Error(
-        typeof body.detail === "string"
-          ? body.detail
-          : JSON.stringify(body.detail),
-      );
-    }
-    return r.status === 204 ? null : r.json();
-  });
+  }).then(parseApiResponse);
 const init = (n: string) =>
   n
     .split(" ")

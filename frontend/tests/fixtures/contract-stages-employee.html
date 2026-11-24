@@ -18,11 +18,15 @@ if(new URLSearchParams(location.search).has("ordered"))schema.fields=[
   {id:"q3",field_key:"third",label:"Третий вопрос",field_type:"TEXT",required:false,position:4,config:{group:"Основные сведения",stage_ids:["stage-b"]}},
   {id:"q4",field_key:"fourth",label:"Четвёртый вопрос",field_type:"TEXT",required:false,position:5,config:{group:"Основные сведения"}},
 ];
-let draft=null;window.__selectedStages=[];window.__savedAnswers={};
+if(new URLSearchParams(location.search).has("resumed")){
+  schema.stages.push({id:"stage-c",name:"Подписание",description:"Будущий этап",position:3,status:"ACTIVE"});
+  schema.fields.push({id:"c",field_key:"only_c",label:"Вопрос подписания",field_type:"TEXT",required:true,position:5,config:{group:"Основные сведения",stage_ids:["stage-c"]}});
+}
+let draft=new URLSearchParams(location.search).has("resumed")?{id:"draft-1",template,schema,answers:{common:"Общее",only_a:"Подготовлено"},selected_stage_ids:["stage-a","stage-b"],completed_stage_ids:["stage-a"],status:"DRAFT",stage_progress:[{id:"stage-a",name:"Подготовка",state:"COMPLETED"},{id:"stage-b",name:"Проведение",state:"IN_PROGRESS"}]}:null;window.__selectedStages=[];window.__savedAnswers={};
 const api=async(path,options={})=>{
   if(path==="/contract-catalog")return[template];
   if(path==="/contract-drafts"&&options.method==="POST"){draft={id:"draft-1",template,schema,answers:{},selected_stage_ids:[],status:"DRAFT"};return draft;}
-  if(path==="/contract-drafts"&&!options.method)return draft?[{id:draft.id,title:template.name,template_name:template.name,status:draft.status}]:[];
+  if(path==="/contract-drafts"&&!options.method)return draft?[{id:draft.id,title:template.name,template_name:template.name,status:draft.status,has_stages:true,generated:new URLSearchParams(location.search).has("resumed")?"first-stage-docx":null}]:[];
   if(path==="/contract-drafts/draft-1"){
     if(options.method==="PATCH"){draft.answers={...draft.answers,...JSON.parse(options.body).answers};window.__savedAnswers=draft.answers;return draft;}
     return draft;

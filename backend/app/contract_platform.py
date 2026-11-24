@@ -515,6 +515,8 @@ def stage_progress(d,v,s):
  ordered=draft_stage_order(d,s);completed=set(d.completed_stage_ids or [])
  current=next((stage.id for stage in ordered if stage.id not in completed),None)
  return [{'id':stage.id,'name':stage.name,'position':stage.position,'state':'COMPLETED' if stage.id in completed else 'IN_PROGRESS' if stage.id==current else 'NOT_STARTED'} for stage in ordered]
+def stage_selection_frozen(d,s):
+ return bool(d.completed_stage_ids or s.query(DraftStageEvent.id).filter_by(draft_id=d.id,event_type='COMPLETED').first())
 def schema_out(x,s): return {'id':x.id,'title':x.title,'status':x.status,'condition_schema_version':x.condition_schema_version,'calculation_schema_version':x.calculation_schema_version,'stages':[stage_out(stage) for stage in version_stages(x.template_version_id,s)],'fields':[field_out(f) for f in s.query(QuestionnaireField).filter_by(schema_id=x.id).order_by(QuestionnaireField.position).all()],'repeating_groups':[repeating_group_out(g,s) for g in s.query(RepeatingGroup).filter_by(template_version_id=x.template_version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()]}
 def calculation_groups(version_id,s):
  groups=s.query(RepeatingGroup).filter_by(template_version_id=version_id,status='ACTIVE').order_by(RepeatingGroup.position).all()
@@ -1314,7 +1316,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   return out
  @r.get('/api/v1/contract-drafts/{id}')
  def draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
-  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids or [],'completed_stage_ids':d.completed_stage_ids or [],'lock_completed_stages':v.lock_completed_stages,'stage_progress':stage_progress(d,v,s),'template':template_out(t,s),'schema':schema_out(schema,s)}
+  d=own_draft(id,u,s); v=s.get(TemplateVersion,d.template_version_id); t=s.get(DocumentTemplate,v.template_id); schema=s.get(QuestionnaireSchema,d.questionnaire_schema_id); return {'id':d.id,'title':d.title or t.name,'status':d.status,'answers':d.answers,'selected_stage_ids':d.selected_stage_ids or [],'completed_stage_ids':d.completed_stage_ids or [],'stage_selection_frozen':stage_selection_frozen(d,s),'lock_completed_stages':v.lock_completed_stages,'stage_progress':stage_progress(d,v,s),'template':template_out(t,s),'schema':schema_out(schema,s)}
  @r.delete('/api/v1/contract-drafts/{id}')
  def delete_draft(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=own_draft(id,u,s)
@@ -1337,7 +1339,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   validate_stage_ids(d.template_version_id,p.selected_stage_ids,s,True)
   if active and not p.selected_stage_ids:raise HTTPException(422,detail='Выберите хотя бы один этап договора')
   if not active and p.selected_stage_ids:raise HTTPException(422,detail='В шаблоне нет активных этапов')
-  if d.completed_stage_ids and set(p.selected_stage_ids)!=set(d.selected_stage_ids or []):raise HTTPException(409,detail='Нельзя менять выбранные этапы после завершения этапа. Обратитесь к специалисту ДПО для разблокировки')
+  if stage_selection_frozen(d,s) and set(p.selected_stage_ids)!=set(d.selected_stage_ids or []):raise HTTPException(409,detail='После завершения этапа подключение следующих этапов разрешает специалист ДПО')
   if active and {stage.id for stage in active[:len(p.selected_stage_ids)]}!=set(p.selected_stage_ids):raise HTTPException(422,detail='Выбирайте этапы последовательно, начиная с первого')
   changed=set(p.selected_stage_ids)!=set(d.selected_stage_ids or [])
   d.selected_stage_ids=list(p.selected_stage_ids)
@@ -1382,6 +1384,23 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   d.completed_stage_ids=[key for key in d.completed_stage_ids if key not in affected];d.status='DRAFT';d.updated_at=now()
   for key in affected:s.add(DraftStageEvent(draft_id=d.id,stage_id=key,actor_id=u.id,event_type='UNLOCKED',reason=p.reason.strip()))
   s.commit();return {'id':d.id,'completed_stage_ids':d.completed_stage_ids,'unlocked_stage_ids':affected,'stage_progress':stage_progress(d,v,s)}
+ @r.post('/api/v1/contract-drafts/{id}/stages/allow-next')
+ def allow_next_draft_stage(id:str,u=Depends(current_dependency),s:DBS=Depends(db)):
+  require_manager(u)
+  d=s.query(DocumentDraft).filter_by(id=id).with_for_update().populate_existing().first()
+  if not d or d.deleted_at:raise HTTPException(404,detail='Черновик не найден')
+  v=s.get(TemplateVersion,d.template_version_id);owned_template(v.template_id,u,s)
+  stages=version_stages(v.id,s,True);selected=set(d.selected_stage_ids or [])
+  if not stages or not selected:raise HTTPException(409,detail='В договоре нет подключённых этапов')
+  ordered=[stage for stage in stages if stage.id in selected]
+  if [stage.id for stage in ordered]!=[stage.id for stage in stages[:len(ordered)]]:raise HTTPException(409,detail='Порядок подключённых этапов требует проверки специалиста')
+  if len(ordered)==len(stages):raise HTTPException(409,detail='Все этапы договора уже подключены')
+  if any(stage.id not in (d.completed_stage_ids or []) for stage in ordered):raise HTTPException(409,detail='Сначала завершите текущий этап')
+  next_stage=stages[len(ordered)]
+  d.selected_stage_ids=[stage.id for stage in stages[:len(ordered)+1]];d.status='DRAFT';d.updated_at=now()
+  s.add(DraftStageEvent(draft_id=d.id,stage_id=next_stage.id,actor_id=u.id,event_type='AUTHORIZED'))
+  s.commit()
+  return {'id':d.id,'selected_stage_ids':d.selected_stage_ids,'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s),'next_stage':stage_out(next_stage)}
  @r.patch('/api/v1/contract-drafts/{id}')
  def save(id:str,payload:AnswersPayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   d=locked_draft(s,id,u); v=s.get(TemplateVersion,d.template_version_id); fields=s.query(QuestionnaireField).filter_by(schema_id=d.questionnaire_schema_id).all(); groups=s.query(RepeatingGroup).filter_by(template_version_id=d.template_version_id,status='ACTIVE').all(); known={x.field_key:x for x in fields}; known.update({x.group_key:x for x in groups})
@@ -1657,7 +1676,8 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   require_manager(u);v,t=owned_version(vid,u,s)
   if t.id!=tid:raise HTTPException(404,detail='Версия не найдена')
   rows=s.query(DocumentDraft).filter_by(template_version_id=v.id).filter(DocumentDraft.deleted_at.is_(None)).order_by(DocumentDraft.updated_at.desc()).all()
-  return [{'id':d.id,'title':d.title or t.name,'owner':s.get(User,d.owner_id).external_id,'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s)} for d in rows if d.completed_stage_ids]
+  active=version_stages(v.id,s,True)
+  return [{'id':d.id,'title':d.title or t.name,'owner':s.get(User,d.owner_id).external_id,'selected_stage_ids':d.selected_stage_ids or [],'completed_stage_ids':d.completed_stage_ids or [],'stage_progress':stage_progress(d,v,s),'next_stage':stage_out(active[len(d.selected_stage_ids or [])]) if len(d.selected_stage_ids or [])<len(active) and set(d.selected_stage_ids or [])=={stage.id for stage in active[:len(d.selected_stage_ids or [])]} and all(stage.id in (d.completed_stage_ids or []) for stage in draft_stage_order(d,s)) else None} for d in rows if d.completed_stage_ids]
  @r.post(prefix+'/{tid}/versions/{vid}/stages',status_code=201)
  def create_stage(tid:str,vid:str,p:StagePayload,u=Depends(current_dependency),s:DBS=Depends(db)):
   require_manager(u);v,t=owned_version(vid,u,s)

@@ -36,6 +36,9 @@ if(savedOrder){const index=new Map(savedOrder.map((id,position)=>[id,position]))
 const group={id:"group-1",group_key:"extras",name:"Иные услуги",required:false,min_items:0,max_items:5,position:1,config:{group:"Дополнительно"},fields:[{id:"row-description",field_key:"description",label:"Описание услуги",field_type:"TEXT",required:true,position:1,config:{}}]};
 const nodes=Array.from({length:3500},(_,index)=>({locator:`word/document.xml#/p[${index+1}]`,kind:"paragraph",text:`Фрагмент ${index+1}`}));
 window.__previewRequests=0;window.__testAnswers=null;window.__testStageIds=null;window.__publishes=0;window.__testCalls=0;window.__downloads=0;window.__orderCalls=0;window.__orderPayloads=[];
+const managerFlow=new URLSearchParams(location.search).has("manager-flow");
+let managedDrafts=managerFlow?[{id:"employee-draft",title:"Договор сотрудника",owner:"petrova",selected_stage_ids:["stage-a"],completed_stage_ids:["stage-a"],stage_progress:[{id:"stage-a",name:"Подготовка",state:"COMPLETED"}],next_stage:{id:"stage-b",name:"Проведение"}}]:[];
+window.__managerActions=[];
 const api=async(path,options={})=>{
   if(path==="/requisite-sets?include_archived=true")return [];
   if(path==="/document-templates")return [template];
@@ -59,6 +62,13 @@ const api=async(path,options={})=>{
   }
   if(path.endsWith("/repeating-groups"))return[group];
   if(path.endsWith("/publication-check"))return{errors:new URLSearchParams(location.search).has("errors")?["Привязка «Имя» ссылается на отсутствующий вопрос"]:[],warnings:new URLSearchParams(location.search).has("warnings")?["Вопрос «Служебный вопрос» не используется в документе или правилах"]:[],tested_current_revision:false};
+  if(path.endsWith("/locked-drafts"))return structuredClone(managedDrafts);
+  if(path==="/contract-drafts/employee-draft/stages/allow-next"&&options.method==="POST"){
+    window.__managerActions.push("allow-next");const item=managedDrafts[0];item.selected_stage_ids.push("stage-b");item.stage_progress.push({id:"stage-b",name:"Проведение",state:"IN_PROGRESS"});item.next_stage=null;return{next_stage:{id:"stage-b",name:"Проведение"},selected_stage_ids:item.selected_stage_ids,completed_stage_ids:item.completed_stage_ids,stage_progress:item.stage_progress};
+  }
+  if(path==="/contract-drafts/employee-draft/stages/stage-a/unlock"&&options.method==="POST"){
+    window.__managerActions.push("unlock");managedDrafts[0].completed_stage_ids=[];managedDrafts[0].stage_progress[0].state="IN_PROGRESS";return{completed_stage_ids:[],stage_progress:managedDrafts[0].stage_progress};
+  }
   if(/\/(bindings|conditional-regions|binding-candidates)$/.test(path))return[];
   if(path.endsWith("/test-drive")&&options.method==="POST"){
     window.__testCalls++;window.__testAnswers=JSON.parse(options.body).answers;window.__testStageIds=JSON.parse(options.body).selected_stage_ids;

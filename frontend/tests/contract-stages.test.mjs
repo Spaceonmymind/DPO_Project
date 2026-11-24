@@ -6,6 +6,59 @@ import { chromium } from "playwright-core";
 
 const chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
+test("manager authorization adds the next stage without using unlock", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?published=1&stages=1&manager-flow=1`);
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
+    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Проверка и публикация/ }).click();
+    await page.getByRole("button", { name: "Разрешить следующий этап" }).click();
+    await page.getByText(/Этап «Проведение» подключён/).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.__managerActions), ["allow-next"]);
+    assert.equal(await page.getByRole("button", { name: "Разблокировать для исправления" }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "Разрешить следующий этап" }).count(), 0);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("resumed employee draft opens the newly allowed stage and keeps the first read only", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?resumed=1&draft=draft-1`);
+    await page.getByLabel("Вопрос проведения").waitFor();
+    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(), false);
+    await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Подготовка/ }).click();
+    assert.equal(await page.getByLabel("Вопрос подготовки").isDisabled(), true);
+    assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(), "Подготовлено");
+    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
+    assert.equal(await page.getByRole("checkbox", { name: /Подписание/ }).count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: /Проведение/ }).isDisabled(), true);
+    await page.getByRole("button", { name: "Вернуться к вопросам" }).click();
+    await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).click();
+    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(), false);
+  } finally { await browser.close(); await server.close(); }
+});
+
+test("stage draft with an earlier DOCX remains in the continue list", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
+  await server.listen();
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?resumed=1`);
+    assert.match(await page.locator(".saved-drafts .draft-continue").innerText(), /Доступен следующий этап/);
+    await page.locator(".saved-drafts .draft-continue").click();
+    await page.getByLabel("Вопрос проведения").waitFor();
+    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(), false);
+  } finally { await browser.close(); await server.close(); }
+});
+
 test("builder stages filter step 6 and test generation uses selected IDs", { skip: !existsSync(chromePath), timeout: 60000 }, async () => {
   const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
   await server.listen();

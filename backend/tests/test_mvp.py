@@ -3139,6 +3139,60 @@ def test_single_contract_stage_completes_and_generates_normally():
     generated=employee.post(path+'/generate',headers=eh)
     assert generated.status_code==201 and generated.json()['status']=='GENERATED',generated.text
 
+
+def test_manager_allows_next_stage_without_unlocking_completed_answers():
+    from app.db import DraftStageEvent
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'ALLOW_NEXT_STAGE')
+    document=Document();document.add_paragraph('Договор');raw=io.BytesIO();document.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    ids=[]
+    for index in range(3):
+        stage=manager.post(base+'/stages',headers=mh,json={'name':f'Этап {index+1}'})
+        assert stage.status_code==201,stage.text
+        ids.append(stage.json()['id'])
+        field=manager.post(base+'/fields',headers=mh,json={'field_key':f'answer_{index+1}','label':f'Ответ {index+1}','field_type':'TEXT','required':True,'position':index+1,'stage_ids':[ids[-1]]})
+        assert field.status_code==201,field.text
+    assert manager.post(base+'/publish',headers=mh).status_code==200
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{created['id']}"
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[ids[0]]}).status_code==200
+    assert employee.post(path+f"/stages/{ids[0]}/complete",headers=eh,json={'answers':{'answer_1':'Первый'}}).status_code==200
+    assert employee.post(path+'/generate',headers=eh).status_code==201
+    assert employee.patch(path,headers=eh,json={'answers':{'answer_1':'Изменён'}}).status_code==409
+    assert employee.post(path+'/stages/allow-next',headers=eh).status_code in (403,404)
+    assert employee.post(path+f"/stages/{ids[1]}/complete",headers=eh,json={'answers':{'answer_2':'Рано'}}).status_code==404
+    listed=manager.get(base+'/locked-drafts',headers=mh).json()
+    assert next(item for item in listed if item['id']==created['id'])['next_stage']['id']==ids[1]
+    permitted=manager.post(path+'/stages/allow-next',headers=mh)
+    assert permitted.status_code==200,permitted.text
+    assert permitted.json()['selected_stage_ids']==ids[:2]
+    assert permitted.json()['completed_stage_ids']==ids[:1]
+    assert permitted.json()['stage_progress'][1]['state']=='IN_PROGRESS'
+    reopened=employee.get(path,headers=eh).json()
+    assert reopened['answers']['answer_1']=='Первый' and reopened['completed_stage_ids']==ids[:1]
+    assert reopened['selected_stage_ids']==ids[:2] and reopened['status']=='DRAFT'
+    history=next(item for item in employee.get('/api/v1/contract-drafts',headers=eh).json() if item['id']==created['id'])
+    assert history['has_stages'] and history['status']=='DRAFT' and history['generated']
+    assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_1':'Изменён'}}).status_code==409
+    assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_3':'Рано'}}).status_code==409
+    assert manager.post(path+'/stages/allow-next',headers=mh).status_code==409
+    assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_2':'Второй'}}).status_code==200
+    assert employee.post(path+f"/stages/{ids[1]}/complete",headers=eh,json={'answers':{}}).status_code==200
+    assert manager.post(path+'/stages/allow-next',headers=mh).json()['selected_stage_ids']==ids
+    assert employee.post(path+f"/stages/{ids[2]}/complete",headers=eh,json={'answers':{'answer_3':'Третий'}}).status_code==200
+    assert manager.post(path+'/stages/allow-next',headers=mh).status_code==409
+    unlocked=manager.post(path+f"/stages/{ids[0]}/unlock",headers=mh,json={'reason':'Исправление первого ответа'})
+    assert unlocked.status_code==200 and unlocked.json()['completed_stage_ids']==[],unlocked.text
+    assert employee.get(path,headers=eh).json()['answers']=={'answer_1':'Первый','answer_2':'Второй','answer_3':'Третий'}
+    assert employee.get(path,headers=eh).json()['stage_selection_frozen'] is True
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':ids[:1]}).status_code==409
+    with SessionLocal() as session:
+        events=session.query(DraftStageEvent).filter_by(draft_id=created['id']).all()
+        assert [event.event_type for event in events].count('AUTHORIZED')==2
+        assert [event.event_type for event in events].count('UNLOCKED')==3
+
 def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
     from app.db import ContractStage
     client=TestClient(app);headers=auth(client);template=create_platform_template(client,headers,'STAGE_ORDER_REVERSE')

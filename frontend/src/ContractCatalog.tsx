@@ -157,7 +157,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     setErrors({});
     setDocument(null);
     setReview(false);
-    setStepIndex(0);
+    setStepIndex(Math.max(0, (x.stage_progress || []).findIndex((stage: any) => stage.state === "IN_PROGRESS")));
     setTimeout(() => {
       autosaveReady.current = true;
     }, 0);
@@ -336,8 +336,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   if (productDraft)
     return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
   if (draft && choosingStages) {
-    const stages = (draft.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE");
-    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>Выберите этапы по порядку. Заполнение следующего откроется после завершения предыдущего.</p><fieldset><legend>Что включить в договор</legend><button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>{stages.map((stage: any, index: number) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} onChange={event => setSelectedStageIds(event.target.checked ? stages.slice(0, index + 1).map((item: any) => item.id) : stages.slice(0, index).map((item: any) => item.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || !selectedStageIds.length} onClick={() => void confirmStages()}>Продолжить к вопросам</button></section></div>;
+    const fixed = !!draft.completed_stage_ids?.length || !!draft.stage_selection_frozen;
+    const stages = (draft.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE" && (!fixed || (draft.selected_stage_ids || []).includes(stage.id)));
+    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>{fixed ? "Показаны подключённые этапы. Следующий этап разрешает специалист ДПО; завершённые ответы остаются доступны только для просмотра." : "Выберите этапы по порядку. Заполнение следующего откроется после завершения предыдущего."}</p><fieldset><legend>Что включить в договор</legend>{!fixed && <button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>}{stages.map((stage: any, index: number) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} disabled={fixed} onChange={event => setSelectedStageIds(event.target.checked ? stages.slice(0, index + 1).map((item: any) => item.id) : stages.slice(0, index).map((item: any) => item.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || (!fixed && !selectedStageIds.length)} onClick={() => fixed ? setChoosingStages(false) : void confirmStages()}>{fixed ? "Вернуться к вопросам" : "Продолжить к вопросам"}</button></section></div>;
   }
   if (draft)
     return (
@@ -352,7 +353,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
-        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" disabled={lockingStages && !!draft.completed_stage_ids?.length} onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
+        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
         <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
@@ -481,12 +482,14 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       {drafts.length > 0 && (
         <section className="saved-drafts" data-tour="catalog-drafts">
           <h2>Продолжить заполнение</h2>
-          {drafts.filter((x) => !x.generated).map((x) => (
+          {drafts.filter((x) => !x.generated || (x.has_stages && x.status === "DRAFT")).map((x) => (
             <button className="draft-continue" key={x.id} onClick={() => restore(x.id)}>
               <span>
                 <b>{x.title || x.template_name}</b>
                 <small>
-                  {x.generated_stale
+                  {x.has_stages && x.status === "DRAFT" && x.generated
+                    ? "Доступен следующий этап"
+                    : x.generated_stale
                     ? "Ответы изменены — продолжите заполнение"
                     : x.status === "GENERATED"
                       ? "Документ сформирован"

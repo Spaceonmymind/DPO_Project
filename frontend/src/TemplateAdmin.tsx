@@ -1030,6 +1030,13 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
       setNotice("Этап разблокирован. Завершение последующих этапов также снято.");
     });
   }
+  async function allowNextStage(draftId: string) {
+    await run(async () => {
+      const result = await api(`/contract-drafts/${draftId}/stages/allow-next`, { method: "POST" });
+      setLockedDrafts(await api(`/document-templates/${version.template_id}/versions/${version.id}/locked-drafts`));
+      setNotice(`Этап «${result.next_stage.name}» подключён. Ранее завершённые этапы остались заблокированными.`);
+    });
+  }
   async function manageTemplate() {
     if (!selected || !pendingAction) return;
     const action = pendingAction;
@@ -1454,7 +1461,7 @@ function TemplateBuilder({ api, downloadFile }: { api: Api; downloadFile?: (path
                   </button>
                 ))}
               </nav>
-              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} lockedDrafts={lockedDrafts} unlockStage={unlockStage} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
+              {stage === 6 ? (version && schema ? <TemplateQuestionnairePreview schema={schema} answers={testAnswers} change={setTestAnswers} selectedStageIds={testStageIds} changeStages={(ids: string[]) => { setTestStageIds(ids); setTestDocument(null); }} lockedDrafts={lockedDrafts} unlockStage={unlockStage} allowNextStage={allowNextStage} busy={busy} published={version.status !== "DRAFT"} document={testDocument} error={error} notice={notice} publicationCheck={publicationCheck} generate={generateTestDocument} publish={publish}/> : <Empty upload/>) : <div className="version-grid">
                 <section className="version-list" data-tour="tpl-versions">
                   <h3>Версии</h3>
                   {versions.map((x) => (

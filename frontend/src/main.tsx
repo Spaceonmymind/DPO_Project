@@ -254,7 +254,7 @@ function Sidebar({ u, route, go, logout }: any) {
           onClick={() => go("/")}
         >
           <Home />
-          {!closed && "Главная"}
+          {!closed && <span>Главная</span>}
         </button>
         <button
           className={route === "/contracts" ? "active" : ""}
@@ -262,7 +262,7 @@ function Sidebar({ u, route, go, logout }: any) {
           onClick={() => go("/contracts")}
         >
           <FileText />
-          {!closed && "Каталог договоров"}
+          {!closed && <span>Каталог договоров</span>}
         </button>
         <button
           className={route === "/documents" ? "active" : ""}
@@ -270,7 +270,7 @@ function Sidebar({ u, route, go, logout }: any) {
           onClick={() => go("/documents")}
         >
           <MessageSquare />
-          {!closed && "Мои документы"}
+          {!closed && <span>Мои документы</span>}
         </button>
         {u.roles?.some((r: string) =>
           ["dpo_specialist", "administrator"].includes(r),
@@ -281,12 +281,12 @@ function Sidebar({ u, route, go, logout }: any) {
             onClick={() => go("/templates")}
           >
             <FileCheck2 />
-            {!closed && "Конструктор шаблонов"}
+            {!closed && <span>Конструктор шаблонов</span>}
           </button>
         )}
-        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/requisites" ? "active" : ""} title={closed ? "Справочник реквизитов" : ""} onClick={() => go("/requisites")}><FileCheck2 />{!closed && "Справочник реквизитов"}</button>}
-        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={`side-admin-link${route === "/administration" ? " active" : ""}`} title={closed ? "Пользователи и договоры" : ""} onClick={() => go("/administration")}><Users />{!closed && <span>Пользователи и договоры</span>}</button>}
-        <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && 'Обучение'}</button>
+        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/requisites" ? "active" : ""} title={closed ? "Справочник реквизитов" : ""} onClick={() => go("/requisites")}><FileCheck2 />{!closed && <span>Справочник реквизитов</span>}</button>}
+        {u.roles?.some((r: string) => ["dpo_specialist", "administrator"].includes(r)) && <button className={route === "/administration" ? "active" : ""} title={closed ? "Пользователи и договоры" : ""} onClick={() => go("/administration")}><Users />{!closed && <span>Пользователи и договоры</span>}</button>}
+        <button className={route === '/learning' ? 'active' : ''} title={closed ? 'Обучение' : ''} onClick={() => go('/learning')}><GraduationCap />{!closed && <span>Обучение</span>}</button>
       </nav>
       <footer>
         <button

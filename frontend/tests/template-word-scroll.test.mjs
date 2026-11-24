@@ -18,10 +18,14 @@ test("Word stays on the same fragment after editor writes and step changes", { s
     await page.locator(".docx-page").waitFor();
     const stages = page.getByRole("navigation", { name: "Этапы настройки шаблона" });
     await page.locator(".workspace-word-outline summary").click();
+    // DOCX locators are opaque paths: navigation must not depend on CSS.escape
+    // or parse a locator as part of a CSS selector.
+    await page.evaluate(() => { window.__originalCssEscape = CSS.escape; CSS.escape = () => { throw new Error("Locator was parsed as CSS"); }; });
     await page.getByLabel("Найти фрагмент").fill("Фрагмент договора 2500");
     await page.locator(".workspace-structure-list button").first().click();
     const target = page.locator('.docx-page [data-locator="word/document.xml#/p[2500]"]');
     await target.waitFor();
+    await page.evaluate(() => { CSS.escape = window.__originalCssEscape; });
     const snapshot = () => page.locator(".document-canvas").evaluate(canvas => ({
       top: canvas.scrollTop,
       center: (() => {

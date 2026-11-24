@@ -1655,6 +1655,33 @@ def test_docx_preview_and_binding_use_stable_structural_locator():
     assert invalid.status_code==422
 
 
+def test_binding_occurrence_index_does_not_reuse_deleted_gap():
+    document=Document()
+    for marker in ('FIRST', 'SECOND', 'THIRD'):
+        document.add_paragraph(marker)
+    source=io.BytesIO();document.save(source)
+    client=TestClient(app);headers=auth(client)
+    template=create_platform_template(client,headers,'BINDING_OCCURRENCE_GAP')
+    uploaded=client.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('gap.docx',source.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    field=client.post(base+'/fields',headers=headers,json={'field_key':'shared','label':'Общее поле','field_type':'TEXT','required':False,'position':1})
+    assert field.status_code==201,field.text
+    nodes=client.get(base+'/preview',headers=headers).json()['nodes']
+    created=[]
+    for marker in ('FIRST','SECOND'):
+        node=next(item for item in nodes if item['text']==marker)
+        response=client.post(base+'/bindings',headers=headers,json={'field_id':field.json()['id'],'locator':node['locator'],'start':0,'end':len(marker),'selected_text':marker})
+        assert response.status_code==201,response.text
+        created.append(response.json())
+    assert client.delete(base+f"/bindings/{created[0]['id']}",headers=headers).status_code==204
+    node=next(item for item in nodes if item['text']=='THIRD')
+    response=client.post(base+'/bindings',headers=headers,json={'field_id':field.json()['id'],'locator':node['locator'],'start':0,'end':5,'selected_text':'THIRD'})
+    assert response.status_code==201,response.text
+    assert response.json()['occurrence_index']==3
+    assert {item['id'] for item in client.get(base+'/bindings',headers=headers).json()}=={created[1]['id'],response.json()['id']}
+
+
 def test_paragraph_binding_persists_and_test_docx_downloads():
     document=Document()
     document.add_paragraph('Заказчик: Иванов')

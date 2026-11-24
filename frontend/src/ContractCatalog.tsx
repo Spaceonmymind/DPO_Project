@@ -98,7 +98,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     return () => removeEventListener("beforeunload", warn);
   }, [draft, answers]);
   useEffect(() => {
-    if (!draft || !autosaveReady.current) return;
+    if (!draft || !autosaveReady.current || ((draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && !(draft.selected_stage_ids || []).length)) return;
     let timer = setTimeout(
       () =>
         api(`/contract-drafts/${draft.id}/autosave`, {
@@ -337,7 +337,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
   if (draft && choosingStages) {
     const stages = (draft.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE");
-    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>Выберите один или несколько этапов. Ответы сохранятся, если вы измените выбор позже.</p><fieldset><legend>Что включить в договор</legend><button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>{stages.map((stage: any) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} onChange={event => setSelectedStageIds(current => event.target.checked ? [...current, stage.id] : current.filter(id => id !== stage.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || !selectedStageIds.length} onClick={() => void confirmStages()}>Продолжить к вопросам</button></section></div>;
+    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>Выберите этапы по порядку. Заполнение следующего откроется после завершения предыдущего.</p><fieldset><legend>Что включить в договор</legend><button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>{stages.map((stage: any, index: number) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} onChange={event => setSelectedStageIds(event.target.checked ? stages.slice(0, index + 1).map((item: any) => item.id) : stages.slice(0, index).map((item: any) => item.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || !selectedStageIds.length} onClick={() => void confirmStages()}>Продолжить к вопросам</button></section></div>;
   }
   if (draft)
     return (

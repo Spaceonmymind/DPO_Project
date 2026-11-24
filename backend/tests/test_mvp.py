@@ -2462,13 +2462,19 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
     assert created.status_code==201,created.text
     did=created.json()['id'];url=f'/api/v1/contract-drafts/{did}'
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Рано'}}).status_code==409
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==422
     assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':stage_ids}).status_code==200
     assert employee.post(url+'/generate',headers=eh).status_code==409
     assert employee.post(url+f'/stages/{stage_ids[1]}/complete',headers=eh,json={'answers':{'second':'Б'}}).status_code==409
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Б'}}).status_code==409
+    assert employee.patch(url,headers=eh,json={'answers':{'second':'Б'}}).status_code==409
+    assert employee.post(url+f'/generate?stage_id={stage_ids[1]}',headers=eh).status_code==409
     missing=employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':{'first':'А'}})
     assert missing.status_code==422 and 'common' in missing.text
     first={'first':'А','common':'Общее','shared':'Разделяемое','items':[{'_id':'1','value':'Подготовка'}]}
     assert employee.patch(url+'/autosave',headers=eh,json={'answers':first}).status_code==200
+    assert employee.get(url,headers=eh).json()['stage_progress'][1]['state']=='NOT_STARTED'
     completed=employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first})
     assert completed.status_code==200,completed.text
     assert completed.json()['completed_stage_ids']==[stage_ids[0]]
@@ -2498,6 +2504,10 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     unlocked=manager.post(url+f'/stages/{stage_ids[0]}/unlock',headers=mh,json={'reason':'Исправление данных'})
     assert unlocked.status_code==200,unlocked.text
     assert unlocked.json()['unlocked_stage_ids']==stage_ids
+    assert employee.get(url,headers=eh).json()['stage_progress'][1]['state']=='NOT_STARTED'
+    assert employee.get(url,headers=eh).json()['answers']['second']=='Б'
+    assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'ИЗМЕНЕНО'}}).status_code==409
+    assert employee.post(url+f'/generate?stage_id={stage_ids[1]}',headers=eh).status_code==409
     assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}}).status_code==200
     assert employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}}).status_code==200
     assert employee.get(url,headers=eh).json()['completed_stage_ids']==[stage_ids[0]]
@@ -3094,13 +3104,9 @@ def test_contract_stage_excludes_unselected_repeating_row():
     employee=TestClient(app);eh=auth(employee,'petrova')
     draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
     path=f"/api/v1/contract-drafts/{draft['id']}"
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==200
-    completed=employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}})
-    assert completed.status_code==200,completed.text
-    generated=employee.post(path+'/generate',headers=eh);assert generated.status_code==201,generated.text
-    table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
-    assert len(table.rows)==1
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==409
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==422
+    assert employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}}).status_code==409
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
     second=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
     second_path=f"/api/v1/contract-drafts/{second['id']}"
     assert employee.patch(second_path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
@@ -3110,6 +3116,28 @@ def test_contract_stage_excludes_unselected_repeating_row():
     table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
     assert len(table.rows)==2 and table.cell(1,0).text=='Кейтеринг'
     assert employee.patch(second_path+'/autosave',headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Другое'}]}}).status_code==409
+
+
+def test_single_contract_stage_completes_and_generates_normally():
+    manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'SINGLE_STAGE_FLOW')
+    document=Document();document.add_paragraph('Договор');raw=io.BytesIO();document.save(raw)
+    uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=headers,files={'file':('single.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
+    assert uploaded.status_code==201,uploaded.text
+    base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded.json()['id']}"
+    stage=manager.post(base+'/stages',headers=headers,json={'name':'Единственный этап'}).json()
+    field=manager.post(base+'/fields',headers=headers,json={'field_key':'name','label':'Имя','field_type':'TEXT','required':True,'position':1,'stage_ids':[stage['id']]})
+    assert field.status_code==201,field.text
+    assert manager.post(base+'/publish',headers=headers).status_code==200
+    employee=TestClient(app);eh=auth(employee,'petrova')
+    created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
+    path=f"/api/v1/contract-drafts/{created['id']}"
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[stage['id']]}).status_code==200
+    assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'name':'Иван'}}).status_code==200
+    assert employee.get(path,headers=eh).json()['completed_stage_ids']==[]
+    completed=employee.post(path+f"/stages/{stage['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}})
+    assert completed.status_code==200,completed.text
+    generated=employee.post(path+'/generate',headers=eh)
+    assert generated.status_code==201 and generated.json()['status']=='GENERATED',generated.text
 
 def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
     from app.db import ContractStage

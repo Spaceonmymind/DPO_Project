@@ -57,7 +57,10 @@ test("employee completes a stage, reviews locked answers, and continues", async 
     await act(async () => root.render(React.createElement(ContractCatalog, { api })));
     await click(button("Заполнить договор"));
     assert.ok(dom.window.document.querySelector("#field-f1"));
+    assert.equal(button("Второй этап").disabled, true);
     await type(dom.window.document.querySelector("#field-f1"), "Ответ 1");
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+    assert.equal(button("Второй этап").disabled, true);
     await click(button("Сохранить ответы"));
     assert.equal(calls.length, 0);
     await click(button("Отмена"));

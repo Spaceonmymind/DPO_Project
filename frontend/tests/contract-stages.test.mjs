@@ -55,13 +55,13 @@ test("employee selects stages and keeps answers while switching", { skip: !exist
     assert.equal(await page.getByLabel("Вопрос проведения").count(), 0);
     await page.getByLabel("Вопрос подготовки").fill("Подготовлено");
     await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    await page.getByRole("checkbox", { name: /Подготовка/ }).uncheck();
     await page.getByRole("checkbox", { name: /Проведение/ }).check();
+    assert.equal(await page.getByRole("checkbox", { name: /Подготовка/ }).isChecked(), true);
     await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.equal(await page.getByLabel("Вопрос подготовки").count(), 0);
-    assert.equal(await page.getByLabel("Вопрос проведения").count(), 1);
+    assert.equal(await page.getByLabel("Вопрос подготовки").count(), 1);
+    assert.equal(await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).isDisabled(), true);
     await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    await page.getByRole("checkbox", { name: /Подготовка/ }).check();
+    await page.getByRole("checkbox", { name: /Проведение/ }).uncheck();
     await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
     assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(), "Подготовлено");
     assert.equal(await page.getByLabel("Общий для этапов").count(), 1);

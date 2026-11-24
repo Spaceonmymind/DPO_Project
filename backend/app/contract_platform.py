@@ -495,7 +495,9 @@ def locked_draft(s,id,u):
  d=own_draft(id,u,s)
  return s.query(DocumentDraft).filter_by(id=d.id).with_for_update().populate_existing().one()
 def check_stage_answer_changes(d,v,s,updates):
- if not (d.selected_stage_ids or []):return
+ active=version_stages(v.id,s,True)
+ if not active:return
+ if not (d.selected_stage_ids or []):raise HTTPException(409,detail='Сначала выберите этапы договора')
  ordered=draft_stage_order(d,s);completed=set(d.completed_stage_ids or [])
  current=next((stage.id for stage in ordered if stage.id not in completed),None)
  schema=schema_for(v.id,s)
@@ -506,6 +508,7 @@ def check_stage_answer_changes(d,v,s,updates):
  for key,value in updates.items():
   if key not in owners or (d.answers or {}).get(key)==value:continue
   owner=owners[key]
+  if owner is None:raise HTTPException(409,detail=f'Ответ «{key}» относится к невыбранному этапу')
   if owner in completed:raise HTTPException(409,detail=f'Ответ «{key}» относится к завершённому этапу и заблокирован')
   if owner!=current:raise HTTPException(409,detail=f'Ответ «{key}» можно изменить только на текущем этапе')
 def stage_progress(d,v,s):
@@ -1335,6 +1338,7 @@ def build_contract_platform_router(current_dependency:Callable)->APIRouter:
   if active and not p.selected_stage_ids:raise HTTPException(422,detail='Выберите хотя бы один этап договора')
   if not active and p.selected_stage_ids:raise HTTPException(422,detail='В шаблоне нет активных этапов')
   if d.completed_stage_ids and set(p.selected_stage_ids)!=set(d.selected_stage_ids or []):raise HTTPException(409,detail='Нельзя менять выбранные этапы после завершения этапа. Обратитесь к специалисту ДПО для разблокировки')
+  if active and {stage.id for stage in active[:len(p.selected_stage_ids)]}!=set(p.selected_stage_ids):raise HTTPException(422,detail='Выбирайте этапы последовательно, начиная с первого')
   changed=set(p.selected_stage_ids)!=set(d.selected_stage_ids or [])
   d.selected_stage_ids=list(p.selected_stage_ids)
   if changed:d.status='DRAFT';d.updated_at=now()

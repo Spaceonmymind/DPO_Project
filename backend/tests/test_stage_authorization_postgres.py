@@ -16,7 +16,7 @@ from app.db import (ContractStage, DocumentDraft, DocumentTemplate, DraftStageEv
 from app.main import app
 
 
-def test_allow_next_respects_postgres_check_and_rolls_back_failed_audit():
+def test_legacy_stage_sequence_and_unlock_audit_transaction_on_postgres():
     model_constraint = next(item for item in DraftStageEvent.__table__.constraints if isinstance(item, CheckConstraint) and item.name == 'ck_draft_stage_event_type')
     assert all(value in str(model_constraint.sqltext) for value in ('COMPLETED', 'UNLOCKED', 'AUTHORIZED'))
     with engine.connect() as connection:
@@ -53,14 +53,20 @@ def test_allow_next_respects_postgres_check_and_rolls_back_failed_audit():
     client = TestClient(app, raise_server_exceptions=False)
     client.cookies.set('dpo_session', token)
     path = f'/api/v1/contract-drafts/{draft_id}/stages/allow-next'
-
+    retired = client.post(path, headers={'x-csrf-token':csrf}, json={'count':2})
+    assert retired.status_code == 410, retired.text
+    detail = client.get(f'/api/v1/admin/contracts/{draft_id}')
+    assert detail.status_code == 200, detail.text
+    assert [stage['state'] for stage in detail.json()['stages']] == ['COMPLETED','AVAILABLE','NOT_STARTED']
+    assert client.get('/api/v1/admin/contracts?progress=IN_PROGRESS').status_code == 200
+    assert client.get('/api/v1/admin/users').status_code == 200
+    path = f'/api/v1/contract-drafts/{draft_id}/stages/{first_id}/unlock'
     def force_invalid(_mapper, _connection, target):
-        if target.draft_id == draft_id and target.event_type == 'AUTHORIZED':
+        if target.draft_id == draft_id and target.event_type == 'UNLOCKED':
             target.event_type = 'INVALID'
-
     event.listen(DraftStageEvent, 'before_insert', force_invalid)
     try:
-        failed = client.post(path, headers={'x-csrf-token':csrf}, json={'count':2})
+        failed = client.post(path, headers={'x-csrf-token':csrf}, json={'reason':'Исправление данных'})
         assert failed.status_code == 500
     finally:
         event.remove(DraftStageEvent, 'before_insert', force_invalid)
@@ -71,13 +77,10 @@ def test_allow_next_respects_postgres_check_and_rolls_back_failed_audit():
         assert stored.answers == {'first':'Сохранено'}
         assert stored.status == 'GENERATED'
         assert [item.event_type for item in db.query(DraftStageEvent).filter_by(draft_id=draft_id).all()] == ['COMPLETED']
-
-    allowed = client.post(path, headers={'x-csrf-token':csrf}, json={'count':2})
-    assert allowed.status_code == 200, allowed.text
-    assert allowed.json()['selected_stage_ids'] == [first_id, second_id, third_id]
-    assert allowed.json()['completed_stage_ids'] == [first_id]
+    unlocked = client.post(path, headers={'x-csrf-token':csrf}, json={'reason':'Исправление данных'})
+    assert unlocked.status_code == 200, unlocked.text
+    assert unlocked.json()['completed_stage_ids'] == []
     with SessionLocal() as db:
         stored = db.get(DocumentDraft, draft_id)
-        assert stored.answers == {'first':'Сохранено'} and stored.completed_stage_ids == [first_id]
-        assert stored.selected_stage_ids == [first_id, second_id, third_id]
-        assert [item.event_type for item in db.query(DraftStageEvent).filter_by(draft_id=draft_id).order_by(DraftStageEvent.created_at).all()] == ['COMPLETED', 'AUTHORIZED', 'AUTHORIZED']
+        assert stored.answers == {'first':'Сохранено'} and stored.selected_stage_ids == [first_id]
+        assert [item.event_type for item in db.query(DraftStageEvent).filter_by(draft_id=draft_id).order_by(DraftStageEvent.created_at).all()] == ['COMPLETED','UNLOCKED']

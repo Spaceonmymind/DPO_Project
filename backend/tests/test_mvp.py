@@ -2463,8 +2463,8 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     assert created.status_code==201,created.text
     did=created.json()['id'];url=f'/api/v1/contract-drafts/{did}'
     assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Рано'}}).status_code==409
-    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==422
-    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':stage_ids}).status_code==200
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==410
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':stage_ids}).status_code==410
     assert employee.post(url+'/generate',headers=eh).status_code==409
     assert employee.post(url+f'/stages/{stage_ids[1]}/complete',headers=eh,json={'answers':{'second':'Б'}}).status_code==409
     assert employee.patch(url+'/autosave',headers=eh,json={'answers':{'second':'Б'}}).status_code==409
@@ -2485,7 +2485,7 @@ def test_locked_contract_stages_complete_reject_edits_and_unlock_in_order():
     assert 'LATER REGION' not in ' '.join(p.text for p in intermediate_doc.paragraphs)
     assert employee.get(url,headers=eh).json()['stage_progress'][0]['state']=='COMPLETED'
     assert employee.post(url+f'/stages/{stage_ids[0]}/complete',headers=eh,json={'answers':first}).status_code==200
-    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==409
+    assert employee.patch(url+'/stages',headers=eh,json={'selected_stage_ids':[stage_ids[1]]}).status_code==410
     for endpoint in (url,url+'/autosave'):
         changed=employee.patch(endpoint,headers=eh,json={'answers':{'first':'ИЗМЕНЕНО'}})
         assert changed.status_code==409,changed.text
@@ -3058,7 +3058,7 @@ def test_contract_stages_filter_questions_regions_and_restore_draft():
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']})
     assert created.status_code==201,created.text
     did=created.json()['id'];path=f'/api/v1/contract-drafts/{did}'
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==200
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id'],b['id']]}).status_code==410
     assert employee.post(path+'/generate',headers=eh).status_code==409
     first_answers={'common':'C','shared':'S','only_b':'B','show_a':True}
     completed=employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':first_answers})
@@ -3068,7 +3068,7 @@ def test_contract_stages_filter_questions_regions_and_restore_draft():
     text=' '.join(p.text for p in Document(io.BytesIO(employee.get(first.json()['download_url'],headers=eh).content)).paragraphs)
     assert 'STAGE B' in text and 'STAGE A' not in text
     assert employee.patch(path,headers=eh,json={'answers':{'show_a':False}}).status_code==409
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==409
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==410
     second=employee.post(path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'only_a':'A'}})
     assert second.status_code==200,second.text
     final=employee.post(path+'/generate',headers=eh)
@@ -3086,8 +3086,9 @@ def test_contract_stages_filter_questions_regions_and_restore_draft():
     assert employee.get(path).json()['schema']['stages'][0]['id'] in {a['id'],b['id']}
 
 
-def test_contract_stage_excludes_unselected_repeating_row():
-    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'STAGE_REPEATING')
+@pytest.mark.parametrize('group_stage_index',[0,1])
+def test_contract_stage_repeating_rows_follow_generation_prefix(group_stage_index):
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,f'STAGE_REPEATING_{group_stage_index}')
     source=Document();source.add_paragraph('NAME');table=source.add_table(rows=2,cols=1);table.cell(0,0).text='Заголовок';table.cell(1,0).text='VALUE';raw=io.BytesIO();source.save(raw)
     uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('rows.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}).json()
     base=f"/api/v1/document-templates/{template['id']}/versions/{uploaded['id']}"
@@ -3095,7 +3096,7 @@ def test_contract_stage_excludes_unselected_repeating_row():
     field=manager.post(base+'/fields',headers=mh,json={'field_key':'name','label':'Имя','field_type':'TEXT','required':True,'position':1}).json()
     nodes=manager.get(base+'/preview',headers=mh).json()['nodes'];name_node=next(x for x in nodes if x['text']=='NAME');row_node=next(x for x in nodes if x['text']=='VALUE')
     assert manager.post(base+'/bindings',headers=mh,json={'field_id':field['id'],'locator':name_node['locator'],'start':0,'end':4,'selected_text':'NAME'}).status_code==201
-    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'services','name':'Услуги','position':1,'min_items':1,'row_locator':row_node['locator'],'stage_ids':[a['id']],'questionnaire_section':'Основные сведения','questionnaire_after_position':1,'questionnaire_after_field_id':field['id']}).json()
+    group=manager.post(base+'/repeating-groups',headers=mh,json={'group_key':'services','name':'Услуги','position':1,'min_items':1,'row_locator':row_node['locator'],'stage_ids':[[a,b][group_stage_index]['id']],'questionnaire_section':'Основные сведения','questionnaire_after_position':1,'questionnaire_after_field_id':field['id']}).json()
     assert group['config']['group']=='Основные сведения' and group['config']['questionnaire_after_position']==1 and group['config']['questionnaire_after_field_id']==field['id']
     row_field=manager.post(base+f"/repeating-groups/{group['id']}/fields",headers=mh,json={'field_key':'value','label':'Услуга','field_type':'TEXT','required':True,'position':1,'description':'Укажите услугу'}).json()
     assert row_field['config']['description']=='Укажите услугу'
@@ -3104,19 +3105,29 @@ def test_contract_stage_excludes_unselected_repeating_row():
     employee=TestClient(app);eh=auth(employee,'petrova')
     draft=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
     path=f"/api/v1/contract-drafts/{draft['id']}"
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==422
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[b['id']]}).status_code==410
     assert employee.post(path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}}).status_code==409
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==410
     second=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
     second_path=f"/api/v1/contract-drafts/{second['id']}"
-    assert employee.patch(second_path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==200
-    completed=employee.post(second_path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'name':'Иван','services':[{'_id':'row-1','value':'Кейтеринг'}]}})
+    assert employee.patch(second_path+'/stages',headers=eh,json={'selected_stage_ids':[a['id']]}).status_code==410
+    if group_stage_index==1:
+        assert employee.patch(second_path+'/autosave',headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Рано'}]}}).status_code==409
+        assert employee.post(second_path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}}).status_code==200
+        intermediate=employee.post(second_path+'/generate',headers=eh)
+        assert intermediate.status_code==201 and intermediate.json()['status']=='DRAFT',intermediate.text
+        table=Document(io.BytesIO(employee.get(intermediate.json()['download_url']).content)).tables[0]
+        assert len(table.rows)==1
+        invalid=employee.post(second_path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{}})
+        assert invalid.status_code==422,invalid.text
+        completed=employee.post(second_path+f"/stages/{b['id']}/complete",headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Кейтеринг'}]}})
+    else:
+        completed=employee.post(second_path+f"/stages/{a['id']}/complete",headers=eh,json={'answers':{'name':'Иван','services':[{'_id':'row-1','value':'Кейтеринг'}]}})
     assert completed.status_code==200,completed.text
     generated=employee.post(second_path+'/generate',headers=eh);assert generated.status_code==201,generated.text
     table=Document(io.BytesIO(employee.get(generated.json()['download_url']).content)).tables[0]
     assert len(table.rows)==2 and table.cell(1,0).text=='Кейтеринг'
     assert employee.patch(second_path+'/autosave',headers=eh,json={'answers':{'services':[{'_id':'row-1','value':'Другое'}]}}).status_code==409
-
 
 def test_single_contract_stage_completes_and_generates_normally():
     manager=TestClient(app);headers=auth(manager);template=create_platform_template(manager,headers,'SINGLE_STAGE_FLOW')
@@ -3131,7 +3142,7 @@ def test_single_contract_stage_completes_and_generates_normally():
     employee=TestClient(app);eh=auth(employee,'petrova')
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json()
     path=f"/api/v1/contract-drafts/{created['id']}"
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[stage['id']]}).status_code==200
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[stage['id']]}).status_code==410
     assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'name':'Иван'}}).status_code==200
     assert employee.get(path,headers=eh).json()['completed_stage_ids']==[]
     completed=employee.post(path+f"/stages/{stage['id']}/complete",headers=eh,json={'answers':{'name':'Иван'}})
@@ -3140,9 +3151,10 @@ def test_single_contract_stage_completes_and_generates_normally():
     assert generated.status_code==201 and generated.json()['status']=='GENERATED',generated.text
 
 
-def test_manager_allows_next_stage_without_unlocking_completed_answers():
+@pytest.mark.parametrize('legacy_count',[0,1,2,3])
+def test_legacy_partial_draft_continues_all_template_stages(legacy_count):
     from app.db import DraftStageEvent
-    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'ALLOW_NEXT_STAGE')
+    manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,f'SEQUENTIAL_LEGACY_{legacy_count}')
     document=Document();document.add_paragraph('Договор');raw=io.BytesIO();document.save(raw)
     uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
     assert uploaded.status_code==201,uploaded.text
@@ -3157,41 +3169,50 @@ def test_manager_allows_next_stage_without_unlocking_completed_answers():
     assert manager.post(base+'/publish',headers=mh).status_code==200
     employee=TestClient(app);eh=auth(employee,'petrova')
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{created['id']}"
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[ids[0]]}).status_code==200
+    assert created['selected_stage_ids']==ids
+    # Reproduce a legacy draft pinned to only the first stage without rewriting it on reads.
+    with SessionLocal() as session:
+        session.get(DocumentDraft,created['id']).selected_stage_ids=ids[:legacy_count]
+        if legacy_count>1:session.add(DraftStageEvent(draft_id=created['id'],stage_id=ids[1],actor_id=session.get(DocumentTemplate,template['id']).owner_id,event_type='AUTHORIZED'))
+        session.commit()
     assert employee.post(path+f"/stages/{ids[0]}/complete",headers=eh,json={'answers':{'answer_1':'Первый'}}).status_code==200
-    assert employee.post(path+'/generate',headers=eh).status_code==201
-    assert employee.patch(path,headers=eh,json={'answers':{'answer_1':'Изменён'}}).status_code==409
-    assert employee.post(path+'/stages/allow-next',headers=eh).status_code in (403,404)
-    assert employee.post(path+f"/stages/{ids[1]}/complete",headers=eh,json={'answers':{'answer_2':'Рано'}}).status_code==404
-    listed=manager.get(base+'/locked-drafts',headers=mh).json()
-    assert next(item for item in listed if item['id']==created['id'])['next_stage']['id']==ids[1]
-    permitted=manager.post(path+'/stages/allow-next',headers=mh)
-    assert permitted.status_code==200,permitted.text
-    assert permitted.json()['selected_stage_ids']==ids[:2]
-    assert permitted.json()['completed_stage_ids']==ids[:1]
-    assert permitted.json()['stage_progress'][1]['state']=='IN_PROGRESS'
+    first=employee.post(path+'/generate',headers=eh)
+    assert first.status_code==201 and first.json()['status']=='DRAFT',first.text
+    with SessionLocal() as session:
+        session.get(DocumentDraft,created['id']).status='GENERATED';session.commit()
     reopened=employee.get(path,headers=eh).json()
-    assert reopened['answers']['answer_1']=='Первый' and reopened['completed_stage_ids']==ids[:1]
-    assert reopened['selected_stage_ids']==ids[:2] and reopened['status']=='DRAFT'
-    history=next(item for item in employee.get('/api/v1/contract-drafts',headers=eh).json() if item['id']==created['id'])
-    assert history['has_stages'] and history['status']=='DRAFT' and history['generated']
+    assert reopened['status']=='DRAFT'
+    listed=next(item for item in employee.get('/api/v1/contract-drafts',headers=eh).json() if item['id']==created['id'])
+    assert listed['status']=='DRAFT' and listed['generated']==first.json()['id']
+    assert reopened['selected_stage_ids']==ids and reopened['completed_stage_ids']==ids[:1]
+    assert reopened['stage_progress'][1]['state']=='IN_PROGRESS'
     assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_1':'Изменён'}}).status_code==409
     assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_3':'Рано'}}).status_code==409
-    assert manager.post(path+'/stages/allow-next',headers=mh).status_code==409
+    assert manager.post(path+'/stages/allow-next',headers=mh).status_code==410
+    assert employee.post(path+f"/stages/{ids[2]}/complete",headers=eh,json={'answers':{'answer_3':'Рано'}}).status_code==409
     assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_2':'Второй'}}).status_code==200
+    assert employee.get(path,headers=eh).json()['completed_stage_ids']==ids[:1]
     assert employee.post(path+f"/stages/{ids[1]}/complete",headers=eh,json={'answers':{}}).status_code==200
-    assert manager.post(path+'/stages/allow-next',headers=mh).json()['selected_stage_ids']==ids
+    second=employee.post(path+'/generate',headers=eh)
+    assert second.status_code==201 and second.json()['status']=='DRAFT',second.text
     assert employee.post(path+f"/stages/{ids[2]}/complete",headers=eh,json={'answers':{'answer_3':'Третий'}}).status_code==200
-    assert manager.post(path+'/stages/allow-next',headers=mh).status_code==409
+    final=employee.post(path+'/generate',headers=eh)
+    assert final.status_code==201 and final.json()['status']=='GENERATED',final.text
+    assert manager.post(path+f"/stages/{ids[0]}/unlock",headers=mh,json={'reason':'   '}).status_code==422
     unlocked=manager.post(path+f"/stages/{ids[0]}/unlock",headers=mh,json={'reason':'Исправление первого ответа'})
     assert unlocked.status_code==200 and unlocked.json()['completed_stage_ids']==[],unlocked.text
     assert employee.get(path,headers=eh).json()['answers']=={'answer_1':'Первый','answer_2':'Второй','answer_3':'Третий'}
-    assert employee.get(path,headers=eh).json()['stage_selection_frozen'] is True
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':ids[:1]}).status_code==409
+    assert employee.patch(path+'/autosave',headers=eh,json={'answers':{'answer_2':'Рано'}}).status_code==409
+    assert employee.post(path+'/generate?stage_id='+ids[1],headers=eh).status_code==409
+    assert employee.post(path+f"/stages/{ids[0]}/complete",headers=eh,json={'answers':{}}).status_code==200
+    assert employee.get(path,headers=eh).json()['stage_progress'][1]['state']=='IN_PROGRESS'
+    assert employee.get(first.json()['download_url'],headers=eh).status_code==200
     with SessionLocal() as session:
+        stored=session.get(DocumentDraft,created['id'])
+        assert stored.selected_stage_ids==ids[:legacy_count]
         events=session.query(DraftStageEvent).filter_by(draft_id=created['id']).all()
-        assert [event.event_type for event in events].count('AUTHORIZED')==2
-        assert [event.event_type for event in events].count('UNLOCKED')==3
+        assert sum(event.event_type=='AUTHORIZED' for event in events)==int(legacy_count>1)
+        assert sum(event.event_type=='UNLOCKED' for event in events)==3
 
 def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
     from app.db import ContractStage
@@ -3214,7 +3235,7 @@ def test_contract_stage_order_reverse_and_repeat_preserves_unique_positions():
             assert sorted(row.position for row in rows)==[1,2,3,4,5]
 
 
-def test_contract_administration_lists_filters_and_authorizes_consecutive_stages():
+def test_contract_administration_lists_full_sequence_and_retains_unlock():
     manager=TestClient(app);mh=auth(manager);template=create_platform_template(manager,mh,'ADMIN_CENTER')
     document=Document();document.add_paragraph('Договор');raw=io.BytesIO();document.save(raw)
     uploaded=manager.post(f"/api/v1/document-templates/{template['id']}/versions",headers=mh,files={'file':('stages.docx',raw.getvalue(),'application/vnd.openxmlformats-officedocument.wordprocessingml.document')})
@@ -3234,7 +3255,7 @@ def test_contract_administration_lists_filters_and_authorizes_consecutive_stages
         session.commit()
     employee=TestClient(app);eh=auth(employee,employee_name)
     created=employee.post('/api/v1/contract-drafts',headers=eh,json={'template_id':template['id']}).json();path=f"/api/v1/contract-drafts/{created['id']}"
-    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[ids[0]]}).status_code==200
+    assert employee.patch(path+'/stages',headers=eh,json={'selected_stage_ids':[ids[0]]}).status_code==410
     assert employee.post(path+f'/stages/{ids[0]}/complete',headers=eh,json={'answers':{'admin_answer_1':'Первый'}}).status_code==200
     assert employee.get('/api/v1/admin/contracts',headers=eh).status_code==403
     assert employee.get('/api/v1/admin/users',headers=eh).status_code==403
@@ -3242,25 +3263,20 @@ def test_contract_administration_lists_filters_and_authorizes_consecutive_stages
     listing=manager.get('/api/v1/admin/contracts',headers=mh,params={'q':employee_name,'page_size':1}).json()
     assert listing['total']>=1 and len(listing['items'])==1
     assert listing['items'][0]['completed_count']==1 and listing['items'][0]['total_stages']==3
-    assert manager.get('/api/v1/admin/contracts',headers=mh,params={'progress':'COMPLETED','template_id':template['id']}).json()['total']==1
+    assert manager.get('/api/v1/admin/contracts',headers=mh,params={'progress':'IN_PROGRESS','template_id':template['id']}).json()['total']==1
     assert manager.get('/api/v1/admin/contracts',headers=mh,params={'status':'NONEXISTENT'}).json()['total']==0
     detail=manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()
-    assert detail['can_allow_next'] and [stage['state'] for stage in detail['stages']]==['COMPLETED','NOT_CONNECTED','NOT_CONNECTED']
+    assert not detail['can_allow_next']
+    assert [stage['state'] for stage in detail['stages']]==['COMPLETED','AVAILABLE','NOT_STARTED']
     assert employee.post(path+'/stages/allow-next',headers=eh,json={'count':2}).status_code==403
-    assert manager.post(path+'/stages/allow-next',headers=mh,json={'count':3}).status_code==422
-    allowed=manager.post(path+'/stages/allow-next',headers=mh,json={'count':2})
-    assert allowed.status_code==200,allowed.text
-    assert allowed.json()['selected_stage_ids']==ids and allowed.json()['completed_stage_ids']==ids[:1]
-    assert [stage['id'] for stage in allowed.json()['authorized_stages']]==ids[1:]
-    detail=manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()
-    assert [stage['state'] for stage in detail['stages']]==['COMPLETED','AVAILABLE','AUTHORIZED']
+    assert manager.post(path+'/stages/allow-next',headers=mh,json={'count':2}).status_code==410
     assert employee.get(path,headers=eh).json()['answers']['admin_answer_1']=='Первый'
     assert employee.patch(path,headers=eh,json={'answers':{'admin_answer_1':'Замена'}}).status_code==409
     assert employee.post(path+f'/stages/{ids[2]}/complete',headers=eh,json={'answers':{'admin_answer_3':'Рано'}}).status_code in (404,409)
     events=manager.get('/api/v1/admin/events',headers=mh,params={'event_type':'AUTHORIZED','template_id':template['id']}).json()
-    assert events['total']==2 and {item['stage_name'] for item in events['items']}=={'Этап 2','Этап 3'}
+    assert events['total']==0
     users=manager.get('/api/v1/admin/users',headers=mh,params={'q':employee_name}).json()
-    assert any(item['contract_count']>=1 for item in users['items'])
+    assert any(item['contract_count']>=1 and item['connected_stages']==3 for item in users['items'])
     unlocked=manager.post(path+f'/stages/{ids[0]}/unlock',headers=mh,json={'reason':'Исправление данных'})
     assert unlocked.status_code==200,unlocked.text
     assert manager.get(f"/api/v1/admin/contracts/{created['id']}",headers=mh).json()['stages'][0]['state']=='UNLOCKED'

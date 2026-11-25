@@ -37,7 +37,7 @@ test("sections block incomplete answers, preserve answers on back, and reveal hi
   const type = async (input, value) => { await act(async () => { const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set; setter.call(input, value); input.dispatchEvent(new dom.window.Event("input", { bubbles: true })); }); };
   try {
     await act(async () => root.render(React.createElement(ContractCatalog, { api })));
-    await click(button("Заполнить договор"));
+    await click(button("Начать заполнение"));
     assert.match(dom.window.document.querySelector(".questionnaire-progress").textContent, /Стороны/);
     await click(button("Далее"));
     assert.match(dom.window.document.querySelector(".questionnaire-progress").textContent, /Стороны/);

@@ -22,7 +22,7 @@ if(new URLSearchParams(location.search).has("resumed")){
   schema.stages.push({id:"stage-c",name:"Подписание",description:"Будущий этап",position:3,status:"ACTIVE"});
   schema.fields.push({id:"c",field_key:"only_c",label:"Вопрос подписания",field_type:"TEXT",required:true,position:5,config:{group:"Основные сведения",stage_ids:["stage-c"]}});
 }
-let draft=new URLSearchParams(location.search).has("resumed")?{id:"draft-1",template,schema,answers:{common:"Общее",only_a:"Подготовлено"},selected_stage_ids:["stage-a","stage-b"],completed_stage_ids:["stage-a"],status:"DRAFT",stage_progress:[{id:"stage-a",name:"Подготовка",state:"COMPLETED"},{id:"stage-b",name:"Проведение",state:"IN_PROGRESS"}]}:null;window.__selectedStages=[];window.__savedAnswers={};
+let draft=new URLSearchParams(location.search).has("resumed")?{id:"draft-1",template,schema,answers:{common:"Общее",only_a:"Подготовлено"},selected_stage_ids:["stage-a"],completed_stage_ids:["stage-a"],status:"DRAFT",stage_progress:[{id:"stage-a",name:"Подготовка",state:"COMPLETED"},{id:"stage-b",name:"Проведение",state:"IN_PROGRESS"}]}:null;window.__selectedStages=[];window.__savedAnswers={};
 const api=async(path,options={})=>{
   if(path==="/contract-catalog")return[template];
   if(path==="/contract-drafts"&&options.method==="POST"){draft={id:"draft-1",template,schema,answers:{},selected_stage_ids:[],status:"DRAFT"};return draft;}
@@ -32,6 +32,18 @@ const api=async(path,options={})=>{
     return draft;
   }
   if(path==="/contract-drafts/draft-1/stages"&&options.method==="PATCH"){draft.selected_stage_ids=JSON.parse(options.body).selected_stage_ids;window.__selectedStages=draft.selected_stage_ids;return{id:draft.id,selected_stage_ids:draft.selected_stage_ids};}
+  if(path.startsWith("/contract-drafts/draft-1/stages/")&&path.endsWith("/complete")){
+    const id=path.split("/")[4];const next=schema.stages.find(stage=>!(draft.completed_stage_ids||[]).includes(stage.id));
+    if(next?.id!==id)throw Error("Этап пока недоступен");
+    draft.answers={...draft.answers,...JSON.parse(options.body).answers};draft.completed_stage_ids=[...(draft.completed_stage_ids||[]),id];
+    window.__completedStages=draft.completed_stage_ids;return draft;
+  }
+  if(path.startsWith("/contract-drafts/draft-1/generate")){
+    const stageId=new URL(path,"http://fixture").searchParams.get("stage_id");
+    const final=stageId===schema.stages.at(-1).id;draft.status=final?"GENERATED":"DRAFT";
+    window.__generatedStages=[...(window.__generatedStages||[]),stageId];
+    return{id:"doc-1",download_url:"/api/v1/generated-documents/doc-1/download",filename:"Договор.docx",status:draft.status};
+  }
   if(path==="/contract-drafts/draft-1/autosave"&&options.method==="PATCH"){draft.answers={...draft.answers,...JSON.parse(options.body).answers};window.__savedAnswers=draft.answers;return draft;}
   throw new Error(`Unexpected ${options.method||"GET"} ${path}`);
 };

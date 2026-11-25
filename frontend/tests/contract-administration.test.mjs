@@ -5,8 +5,7 @@ test('administrative center lists and manages stages', {skip:!existsSync(chrome)
  try{const page=await browser.newPage();page.setDefaultTimeout(4000);page.on("pageerror",e=>console.log("PAGE ERROR",e.message));await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-administration.html`);
  await page.getByRole('cell',{name:/Анна Петрова/}).waitFor();await page.getByRole('tab',{name:'Пользователи'}).click();await page.getByText('1 договоров').waitFor();
  await page.getByRole('tab',{name:'Договоры'}).click();await page.getByRole('button',{name:'Тестовый договор'}).click();await page.getByRole('heading',{name:'Этапы договора'}).waitFor();
- await page.getByLabel('Количество').selectOption('2');await page.getByRole('button',{name:'Разрешить',exact:true}).click();await page.getByText('Изменение сохранено').waitFor();
- const calls=await page.evaluate(()=>window.__calls);assert.equal(calls.filter(x=>x[0].includes('allow-next')).length,1);assert.equal(JSON.parse(calls.find(x=>x[0].includes('allow-next'))[2]).count,2);
+ assert.equal(await page.getByRole('button',{name:'Разрешить',exact:true}).count(),0);
  await page.getByRole('button',{name:'Разблокировать'}).click();await page.getByLabel('Причина').fill('Исправление');await page.getByRole('button',{name:'Подтвердить'}).click();await page.getByText('Разблокирован для исправления').waitFor();
  await page.getByRole('button',{name:/К списку/}).click();await page.getByRole('tab',{name:'История действий'}).click();await page.getByText(/Причина: Исправление/).waitFor();
  }finally{await browser.close();await server.close();}

@@ -32,7 +32,7 @@ test("multiple choice, Other, conditions, draft and old select", async () => {
   const click = async x => { assert.ok(x); await act(async () => x.click()); };
   try {
     await act(async () => root.render(React.createElement(ContractCatalog, { api })));
-    await click(button("Заполнить договор"));
+    await click(button("Начать заполнение"));
     const boxes = [...dom.window.document.querySelectorAll("input[type=checkbox]")];
     assert.equal(boxes.length, 3);
     await click(boxes[0]); await click(boxes[1]); await click(boxes[2]);

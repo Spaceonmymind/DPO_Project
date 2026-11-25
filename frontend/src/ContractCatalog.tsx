@@ -54,8 +54,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     [productDraft, setProductDraft] = useState<any>(),
     [drafts, setDrafts] = useState<any[]>([]),
     [draft, setDraft] = useState<any>(),
-    [selectedStageIds, setSelectedStageIds] = useState<string[]>([]),
-    [choosingStages, setChoosingStages] = useState(false),
     [answers, setAnswers] = useState<any>({}),
     [errors, setErrors] = useState<any>({}),
     [query, setQuery] = useState(""),
@@ -98,7 +96,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     return () => removeEventListener("beforeunload", warn);
   }, [draft, answers]);
   useEffect(() => {
-    if (!draft || !autosaveReady.current || ((draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && !(draft.selected_stage_ids || []).length)) return;
+    if (!draft || !autosaveReady.current) return;
     let timer = setTimeout(
       () =>
         api(`/contract-drafts/${draft.id}/autosave`, {
@@ -150,14 +148,13 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
   function open(x: any) {
     autosaveReady.current = false;
     setDraft(x);
-    setSelectedStageIds(x.selected_stage_ids || []);
-    setChoosingStages((x.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && !(x.selected_stage_ids || []).length);
     setAnswers(x.answers || {});
     savedSnapshot.current = JSON.stringify(x.answers || {});
     setErrors({});
     setDocument(null);
     setReview(false);
-    setStepIndex(Math.max(0, (x.stage_progress || []).findIndex((stage: any) => stage.state === "IN_PROGRESS")));
+    const stages = (x.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE").sort((a: any, b: any) => a.position - b.position);
+    setStepIndex(Math.max(0, stages.findIndex((stage: any) => !(x.completed_stage_ids || []).includes(stage.id))));
     setTimeout(() => {
       autosaveReady.current = true;
     }, 0);
@@ -166,6 +163,7 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     const activeAnswers = Object.fromEntries(selectedSchema.fields.filter((f: any) => fieldState(f, currentAnswers).visible).map((f: any) => [f.field_key, currentAnswers[f.field_key]]));
     return evaluateCondition(g.config?.visible_when, activeAnswers);
   }
+  const selectedStageIds: string[] = (draft?.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE").map((stage: any) => stage.id);
   const selectedSchema = draft ? selectedQuestionnaire(draft.schema, selectedStageIds) : { fields: [], groups: [] };
   const relevantAnswers = Object.fromEntries([...selectedSchema.fields.map((field: any) => field.field_key), ...selectedSchema.groups.map((group: any) => group.group_key)].filter(key => key in answers).map(key => [key, answers[key]]));
   const lockingStages = !!draft && selectedStageIds.length > 0;
@@ -250,18 +248,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
       await load();
     });
   }
-  async function confirmStages() {
-    if (!selectedStageIds.length) { setError("Выберите хотя бы один этап договора."); return; }
-    await run(async () => {
-      const result = await api(`/contract-drafts/${draft.id}/stages`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected_stage_ids: selectedStageIds }) });
-      setDraft((current: any) => ({ ...current, selected_stage_ids: result.selected_stage_ids, stage_progress: result.stage_progress }));
-      setDocument(null);
-      setChoosingStages(false);
-      setReview(false);
-      setStepIndex(0);
-      setErrors({});
-    });
-  }
   async function generate(e: FormEvent) {
     e.preventDefault();
     if (!validate()) return;
@@ -335,11 +321,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
     : 100;
   if (productDraft)
     return <ProductQuestionnaire api={api} initial={productDraft} close={() => setProductDraft(undefined)} reload={load} />;
-  if (draft && choosingStages) {
-    const fixed = !!draft.completed_stage_ids?.length || !!draft.stage_selection_frozen;
-    const stages = (draft.schema?.stages || []).filter((stage: any) => stage.status === "ACTIVE" && (!fixed || (draft.selected_stage_ids || []).includes(stage.id)));
-    return <div className="page contract-questionnaire"><button className="back-link" onClick={() => setDraft(null)}><ArrowLeft size={16}/>К каталогу</button><section className="contract-stage-start"><p className="eyebrow">{draft.template.category}</p><h1>Этапы договора</h1><p>{fixed ? "Показаны подключённые этапы. Следующий этап разрешает специалист ДПО; завершённые ответы остаются доступны только для просмотра." : "Выберите этапы по порядку. Заполнение следующего откроется после завершения предыдущего."}</p><fieldset><legend>Что включить в договор</legend>{!fixed && <button type="button" className="secondary" onClick={() => setSelectedStageIds(stages.map((stage: any) => stage.id))}>Выбрать все этапы</button>}{stages.map((stage: any, index: number) => <label key={stage.id}><input type="checkbox" checked={selectedStageIds.includes(stage.id)} disabled={fixed} onChange={event => setSelectedStageIds(event.target.checked ? stages.slice(0, index + 1).map((item: any) => item.id) : stages.slice(0, index).map((item: any) => item.id))}/><span><b>{stage.name}</b>{stage.description && <small>{stage.description}</small>}</span></label>)}</fieldset>{error && <div className="platform-error" role="alert">{error}</div>}<button type="button" className="primary" disabled={busy || (!fixed && !selectedStageIds.length)} onClick={() => fixed ? setChoosingStages(false) : void confirmStages()}>{fixed ? "Вернуться к вопросам" : "Продолжить к вопросам"}</button></section></div>;
-  }
   if (draft)
     return (
       <div className="page contract-questionnaire">
@@ -353,7 +334,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <span>Заполните вопросы. Изменения сохраняются автоматически.</span>
           </div>
         </header>
-        {(draft.schema?.stages || []).some((stage: any) => stage.status === "ACTIVE") && <button type="button" className="secondary contract-stage-change" onClick={() => { setChoosingStages(true); setReview(false); }}>Изменить этапы договора</button>}
         <section className="questionnaire-progress" data-tour="q-progress" aria-label="Прогресс заполнения">
           <div><b>{review ? "Проверка ответов" : `Раздел ${stepIndex + 1} из ${steps.length}: ${currentStep?.name || "Анкета"}`}</b><span>{progress}% заполнено</span></div>
           <progress max="100" value={progress}>{progress}%</progress>
@@ -464,8 +444,9 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
             <p>
               {x.description || "Утверждённый корпоративный шаблон договора."}
             </p>
-            <button className="primary" onClick={() => begin(x.id)}>
-              Заполнить договор
+            {x.stages?.length > 0 && <ol aria-label="Этапы договора">{x.stages.map((stage: any) => <li key={stage.id}>{stage.name}</li>)}</ol>}
+            <button className="primary" disabled={busy} onClick={() => begin(x.id)}>
+              Начать заполнение
             </button>
           </article>
         ))}

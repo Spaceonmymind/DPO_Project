@@ -6,42 +6,32 @@ import { chromium } from "playwright-core";
 
 const chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-test("manager authorization adds the next stage without using unlock", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
-  await server.listen();
+test("published builder offers correction unlock without stage authorization", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });await server.listen();
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
-  try {
-    const page = await browser.newPage();
+  try { const page = await browser.newPage();
     await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/template-stage6.html?published=1&stages=1&manager-flow=1`);
-    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();
-    await page.getByRole("button", { name: /Версия 1/ }).first().click();
+    await page.getByRole("button", { name: /Тестовый договор/ }).first().click();await page.getByRole("button", { name: /Версия 1/ }).first().click();
     await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Проверка и публикация/ }).click();
-    await page.getByRole("button", { name: "Разрешить следующий этап" }).click();
-    await page.getByText(/Этап «Проведение» подключён/).waitFor();
-    assert.deepEqual(await page.evaluate(() => window.__managerActions), ["allow-next"]);
-    assert.equal(await page.getByRole("button", { name: "Разблокировать для исправления" }).count(), 1);
-    assert.equal(await page.getByRole("button", { name: "Разрешить следующий этап" }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Разрешить следующий этап" }).count(),0);
+    assert.equal(await page.getByRole("button", { name: "Разблокировать для исправления" }).count(),1);
   } finally { await browser.close(); await server.close(); }
 });
 
-test("resumed employee draft opens the newly allowed stage and keeps the first read only", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
-  await server.listen();
+test("legacy partial draft resumes at second stage and keeps first read only", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });await server.listen();
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
-  try {
-    const page = await browser.newPage();
+  try { const page = await browser.newPage();
     await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?resumed=1&draft=draft-1`);
     await page.getByLabel("Вопрос проведения").waitFor();
-    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(), false);
-    await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Подготовка/ }).click();
-    assert.equal(await page.getByLabel("Вопрос подготовки").isDisabled(), true);
-    assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(), "Подготовлено");
-    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    assert.equal(await page.getByRole("checkbox", { name: /Подписание/ }).count(), 0);
-    assert.equal(await page.getByRole("checkbox", { name: /Проведение/ }).isDisabled(), true);
-    await page.getByRole("button", { name: "Вернуться к вопросам" }).click();
-    await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).click();
-    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(), false);
+    assert.equal(await page.getByLabel("Вопрос проведения").isDisabled(),false);
+    const nav=page.getByRole("navigation",{name:"Этапы договора"});
+    assert.equal(await nav.getByRole("button",{name:/Подписание/}).isDisabled(),true);
+    await nav.getByRole("button",{name:/Подготовка/}).click();
+    assert.equal(await page.getByLabel("Вопрос подготовки").isDisabled(),true);
+    assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(),"Подготовлено");
+    assert.equal(await page.getByRole("button",{name:"Изменить этапы договора"}).count(),0);
+    assert.equal(await page.getByRole("checkbox").count(),0);
   } finally { await browser.close(); await server.close(); }
 });
 
@@ -92,52 +82,25 @@ test("builder stages filter step 6 and test generation uses selected IDs", { ski
   } finally { await browser.close(); await server.close(); }
 });
 
-test("employee selects stages and keeps answers while switching", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
-  await server.listen();
-  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
-  try {
-    const page = await browser.newPage();
-    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html`);
-    await page.getByRole("button", { name: /Заполнить договор/ }).click();
-    await page.getByRole("heading", { name: "Этапы договора" }).waitFor();
-    await page.getByRole("checkbox", { name: /Подготовка/ }).check();
-    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.deepEqual(await page.evaluate(() => window.__selectedStages), ["stage-a"]);
-    assert.equal(await page.getByLabel("Вопрос подготовки").count(), 1);
-    assert.equal(await page.getByLabel("Вопрос проведения").count(), 0);
-    await page.getByLabel("Вопрос подготовки").fill("Подготовлено");
-    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    await page.getByRole("checkbox", { name: /Проведение/ }).check();
-    assert.equal(await page.getByRole("checkbox", { name: /Подготовка/ }).isChecked(), true);
-    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.equal(await page.getByLabel("Вопрос подготовки").count(), 1);
-    assert.equal(await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).isDisabled(), true);
-    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    await page.getByRole("checkbox", { name: /Проведение/ }).uncheck();
-    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(), "Подготовлено");
-    assert.equal(await page.getByLabel("Общий для этапов").count(), 1);
-  } finally { await browser.close(); await server.close(); }
+test("employee starts full stage sequence without choosing stages", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+ const server=await createServer({server:{host:"127.0.0.1",port:0},logLevel:"silent"});await server.listen();const browser=await chromium.launch({executablePath:chromePath,headless:true,args:["--no-sandbox"]});
+ try {const page=await browser.newPage();await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html`);
+ await page.getByRole("button",{name:"Начать заполнение"}).click();await page.getByLabel("Вопрос подготовки").waitFor();
+ assert.equal(await page.getByRole("checkbox").count(),0);
+ assert.equal(await page.getByRole("button",{name:"Изменить этапы договора"}).count(),0);
+ assert.equal(await page.getByRole("navigation",{name:"Этапы договора"}).getByRole("button",{name:/Проведение/}).isDisabled(),true);
+ await page.getByLabel("Вопрос подготовки").fill("Подготовлено");await page.waitForTimeout(750);
+ assert.equal(await page.getByRole("navigation",{name:"Этапы договора"}).getByRole("button",{name:/Проведение/}).isDisabled(),true);
+ }finally{await browser.close();await server.close()}
 });
 
-test("employee keeps the specialist's saved order after selecting one or two stages", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, logLevel: "silent" });
-  await server.listen();
-  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ["--no-sandbox"] });
-  try {
-    const page = await browser.newPage();
-    await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?ordered=1`);
-    await page.getByRole("button", { name: /Заполнить договор/ }).click();
-    await page.getByRole("checkbox", { name: /Подготовка/ }).check();
-    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Четвёртый вопрос"]);
-    await page.getByRole("button", { name: "Изменить этапы договора" }).click();
-    await page.getByRole("checkbox", { name: /Проведение/ }).check();
-    await page.getByRole("button", { name: "Продолжить к вопросам" }).click();
-    assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text => text.trim()), ["Пятый вопрос", "Первый вопрос", "Второй вопрос", "Четвёртый вопрос"]);
-    assert.equal(await page.getByRole("navigation", { name: "Этапы договора" }).getByRole("button", { name: /Проведение/ }).isDisabled(), true);
-  } finally { await browser.close(); await server.close(); }
+test("employee stage sequence preserves specialist question order", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+ const server=await createServer({server:{host:"127.0.0.1",port:0},logLevel:"silent"});await server.listen();const browser=await chromium.launch({executablePath:chromePath,headless:true,args:["--no-sandbox"]});
+ try {const page=await browser.newPage();await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html?ordered=1`);
+ await page.getByRole("button",{name:"Начать заполнение"}).click();
+ assert.deepEqual((await page.locator(".dynamic-form fieldset > label").allTextContents()).map(text=>text.trim()),["Пятый вопрос","Первый вопрос","Второй вопрос","Четвёртый вопрос"]);
+ assert.equal(await page.getByRole("navigation",{name:"Этапы договора"}).getByRole("button",{name:/Проведение/}).isDisabled(),true);
+ }finally{await browser.close();await server.close()}
 });
 
 test("specialist creates, renames, reorders and removes a draft stage", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
@@ -272,4 +235,24 @@ test("version without source or questionnaire keeps stage manager available", { 
     await page.getByRole("navigation", { name: "Этапы настройки шаблона" }).getByRole("button", { name: /Условия и таблицы/ }).click();
     await page.getByText("1. Подготовка").waitFor();
   } finally { await browser.close(); await server.close(); }
+});
+
+test("employee confirms stages and generates intermediate and final DOCX", { skip: !existsSync(chromePath), timeout: 30000 }, async () => {
+ const server=await createServer({server:{host:"127.0.0.1",port:0},logLevel:"silent"});await server.listen();const browser=await chromium.launch({executablePath:chromePath,headless:true,args:["--no-sandbox"]});
+ try {const page=await browser.newPage();await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/contract-stages-employee.html`);
+ await page.getByRole("button",{name:"Начать заполнение"}).click();
+ await page.getByLabel("Общий вопрос",{exact:true}).fill("Общее");await page.getByLabel("Вопрос подготовки").fill("Подготовлено");
+ await page.getByRole("button",{name:"Сформировать DOCX",exact:true}).click();
+ assert.deepEqual(await page.evaluate(()=>window.__completedStages||[]),[]);
+ await page.getByRole("button",{name:"Подтвердить",exact:true}).click();await page.getByLabel("Вопрос проведения").waitFor();
+ assert.deepEqual(await page.evaluate(()=>window.__completedStages),["stage-a"]);
+ assert.deepEqual(await page.evaluate(()=>window.__generatedStages),["stage-a"]);
+ await page.getByLabel("Вопрос проведения").fill("Проведено");
+ await page.getByRole("button",{name:"Сформировать DOCX",exact:true}).click();await page.getByRole("button",{name:"Подтвердить",exact:true}).click();
+ await page.waitForFunction(()=>window.__generatedStages?.length===2);
+ assert.deepEqual(await page.evaluate(()=>window.__completedStages),["stage-a","stage-b"]);
+ await page.getByRole("navigation",{name:"Этапы договора"}).getByRole("button",{name:/Подготовка/}).click();
+ assert.equal(await page.getByLabel("Вопрос подготовки").isDisabled(),true);
+ assert.equal(await page.getByLabel("Вопрос подготовки").inputValue(),"Подготовлено");
+ }finally{await browser.close();await server.close()}
 });

@@ -69,8 +69,8 @@ test("employee completes a stage, reviews locked answers, and continues", async 
     await click(button("Сохранить ответы"));
     await click(button("Подтвердить"));
     assert.deepEqual(calls, ["/contract-drafts/d1/stages/s1/complete"]);
-    assert.ok(dom.window.document.querySelector("#field-f2"));
-    await click(button("Первый этап"));
+    assert.equal(button("Второй этап").disabled, false);
+    assert.equal(dom.window.document.querySelector("#field-f2"), null);
     assert.equal(dom.window.document.querySelector("#field-f1").matches(":disabled"), true);
     assert.match(dom.window.document.body.textContent, /Этап завершён. Редактирование ответов заблокировано/);
     await click(button("Перейти далее"));

@@ -244,7 +244,11 @@ test("employee confirms stages and generates intermediate and final DOCX", { ski
  await page.getByLabel("Общий вопрос",{exact:true}).fill("Общее");await page.getByLabel("Вопрос подготовки").fill("Подготовлено");
  await page.getByRole("button",{name:"Сформировать DOCX",exact:true}).click();
  assert.deepEqual(await page.evaluate(()=>window.__completedStages||[]),[]);
- await page.getByRole("button",{name:"Подтвердить",exact:true}).click();await page.getByLabel("Вопрос проведения").waitFor();
+ await page.getByRole("button",{name:"Подтвердить",exact:true}).click();
+ await page.waitForFunction(()=>window.__generatedStages?.length===1);
+ assert.equal(await page.getByLabel("Вопрос подготовки").isDisabled(),true);
+ await page.getByRole("navigation",{name:"Этапы договора"}).getByRole("button",{name:/Проведение/}).click();
+ await page.getByLabel("Вопрос проведения").waitFor();
  assert.deepEqual(await page.evaluate(()=>window.__completedStages),["stage-a"]);
  assert.deepEqual(await page.evaluate(()=>window.__generatedStages),["stage-a"]);
  await page.getByLabel("Вопрос проведения").fill("Проведено");

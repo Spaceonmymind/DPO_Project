@@ -220,7 +220,6 @@ export function ContractCatalog({ api, go, manager = false }: { api: Api; go?: (
         setNotice("DOCX сформирован. Ответы этапа сохранены и заблокированы.");
         await load();
       } else setNotice("Ответы этапа сохранены и заблокированы.");
-      if (stepIndex < steps.length - 1) setStepIndex(stepIndex + 1);
     });
   }
   function validate() {
